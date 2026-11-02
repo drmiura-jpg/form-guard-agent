@@ -21,8 +21,9 @@ filled file, re-indexes both independently and proves, check by check:
 Coordinate-designated empty cells get their own strict checks. Word: the cell may gain
 exactly one run holding one ``<w:t>``, formatted exactly like the blank cell's paragraph
 mark — no drawing, field, hyperlink or table, and its ``w:pPr`` unchanged (XML-03,
-LAYOUT-03). Excel: the cell may only become an inline string with its ``s`` style kept;
-reverting the designated cells must give back the blank sheet byte for byte, so no
+LAYOUT-03). Excel: the cell may only become an inline string with its ``s`` style kept, the
+rows holding designated cells keep their attributes and content (a created row carries only
+``r``); reverting the designated cells must give back the blank sheet byte for byte, so no
 formula or other cell can have changed (XML-03, LAYOUT-02, LAYOUT-04, TEXT-02).
 
 It also produces the Human-in-the-Loop final confirmation checklist.
@@ -327,16 +328,101 @@ class SheetCellAudit:
 
 
 _S_C, _S_IS, _S_T, _XML_SPACE = f"{{{S_NS}}}c", f"{{{S_NS}}}is", f"{{{S_NS}}}t", f"{{{XML_NS}}}space"
+_S_ROW, _S_SHEET_DATA = f"{{{S_NS}}}row", f"{{{S_NS}}}sheetData"
 
 
-def _sheet_cell_elements(data: bytes) -> dict[str, Any]:
+def _sheet_cell_elements(root: Any) -> dict[str, Any]:
     """Worksheet cell elements by reference (namespace-aware lxml view; the first <c> per reference, as indexed)."""
     out: dict[str, Any] = {}
-    for c in etree.fromstring(data, _PARSER).iter(_S_C):
+    for c in root.iter(_S_C):
         parent = c.getparent()
-        if parent is not None and parent.tag == f"{{{S_NS}}}row":
+        if parent is not None and parent.tag == _S_ROW:
             out.setdefault((c.get("r") or "").replace("$", "").upper(), c)
     return out
+
+
+def _node_key(n: Any) -> tuple:
+    """Comparable key of any child node: an element (recursively), a comment or a processing instruction."""
+    if isinstance(n.tag, str):
+        return _el_key(n)
+    if isinstance(n, etree._ProcessingInstruction):
+        return ("<?pi?>", n.target, n.text or "")
+    return ("<!--comment-->", n.text or "")
+
+
+def _other_content(el: Any, keep: str) -> list[tuple]:
+    """Everything inside ``el`` except its ``keep`` children: other elements, comments, PIs and non-blank text."""
+    out = [_node_key(n) for n in el if n.tag != keep]
+    out += [("text", t.strip()) for t in [el.text, *(n.tail for n in el)] if t and t.strip()]
+    return sorted(out, key=repr)
+
+
+def _attr_names(names: Iterable[str]) -> list[str]:
+    return sorted(etree.QName(k).localname for k in names)
+
+
+def _rows_by_number(sheet_data: Any) -> dict[int, Any]:
+    out: dict[int, Any] = {}
+    for row in sheet_data.findall(_S_ROW):
+        try:
+            out.setdefault(int(row.get("r") or ""), row)  # the first <row> per number, read like index_part does
+        except ValueError:
+            continue
+    return out
+
+
+def sheet_row_issues(part: str, root_o: Any, root_f: Any, oidx: PartIndex, fidx: PartIndex,
+                     refs: dict[str, str]) -> list[str]:
+    """XML-03 findings on the containers the revert step restores wholesale: ``<sheetData>`` and every ``<row>``
+    that holds designated cells (``refs``: cell ref -> slot id).
+
+    A row created for designated cells is removed again, a self-closing ``<row r="9"/>`` expanded to hold them is put
+    back as it was and an expanded ``<sheetData/>`` is restored in one piece — so a row attribute (``hidden``, ``ht``,
+    ``s``, ``outlineLevel`` …), anything but ``<c>`` inside such a row, a ``<sheetData>`` attribute or child, or cells /
+    rows written out of order would never reach the skeleton comparison. They are checked here instead, before the
+    revert: a created row may carry only ``r``; an existing row keeps its attributes and its non-``<c>`` content.
+    """
+    issues: list[str] = []
+    sd_o, sd_f = root_o.find(_S_SHEET_DATA), root_f.find(_S_SHEET_DATA)
+    if sd_o is None or sd_f is None:
+        return issues  # a <sheetData> that appeared or vanished differs in the skeleton itself
+    if dict(sd_o.attrib) != dict(sd_f.attrib):
+        changed = [k for k in set(sd_o.attrib) | set(sd_f.attrib) if sd_o.get(k) != sd_f.get(k)]
+        issues.append(f"{part}: <sheetData> attributes changed: {_attr_names(changed)}")
+    if _other_content(sd_o, _S_ROW) != _other_content(sd_f, _S_ROW):
+        issues.append(f"{part}: content other than <row> was added to or changed inside <sheetData>")
+    order_o, order_f = list(oidx.rows), list(fidx.rows)
+    if order_o == sorted(order_o) and order_f != sorted(order_f):
+        issues.append(f"{part}: rows are no longer in ascending order ({order_f})")
+    rows_o, rows_f = _rows_by_number(sd_o), _rows_by_number(sd_f)
+    for rownum, frow in fidx.rows.items():
+        mine = [r for r in frow.cells if r in refs]
+        el_f = rows_f.get(rownum)
+        if not mine or el_f is None:
+            continue
+        who = f"{', '.join(dict.fromkeys(refs[r] for r in mine))}: row {rownum}"
+        el_o, orow = rows_o.get(rownum), oidx.rows.get(rownum)
+        if el_o is None:  # created by the writer for coordinate-designated cells: <row r="N"> and cells only
+            odd = [k for k in el_f.attrib if k != "r"]
+            if odd:
+                issues.append(f"{who} was created for the designated cell(s) but carries attribute(s) "
+                              f"{_attr_names(odd)} — a created row may only carry r")
+            if _other_content(el_f, _S_C):
+                issues.append(f"{who} was created for the designated cell(s) but holds content other than <c>")
+        else:
+            if dict(el_o.attrib) != dict(el_f.attrib):
+                changed = [k for k in set(el_o.attrib) | set(el_f.attrib) if el_o.get(k) != el_f.get(k)]
+                issues.append(f"{who} attributes changed: {_attr_names(changed)} (the row's attributes must be kept)")
+            if _other_content(el_o, _S_C) != _other_content(el_f, _S_C):
+                issues.append(f"{who}: content other than <c> was added to or changed inside the row")
+        wrong = [r for r in mine if fidx.cells[r].row != rownum]
+        if wrong:
+            issues.append(f"{who} holds designated cell(s) {wrong} of another row")
+        cols_o = [oidx.cells[r].col for r in (orow.cells if orow is not None else []) if r in oidx.cells]
+        cols_f = [fidx.cells[r].col for r in frow.cells if r in fidx.cells]
+        if cols_o == sorted(set(cols_o)) and cols_f != sorted(set(cols_f)):
+            issues.append(f"{who}: cells are not in column order ({frow.cells})")
+    return issues
 
 
 def inline_string_issues(c_el: Any) -> list[str]:
@@ -376,7 +462,8 @@ def audit_sheet_cells(part: str, oidx: PartIndex, data_f: bytes, cells: dict[str
     namespace, ``<is>`` the only child of ``<c>`` and ``<t>`` the only child of ``<is>`` (only ``xml:space`` allowed on
     it), style id ``s`` kept (or, for a cell the blank form did not contain, the row / column style Excel shows there),
     no formula, no value element, no rich text. A designated cell left unfilled must still be absent, or byte-identical
-    to the blank form's cell. These structural findings (XML-03) are recorded *before* the designated cells are
+    to the blank form's cell. The rows holding designated cells and ``<sheetData>`` are checked too
+    (``sheet_row_issues``). These structural findings (XML-03) are recorded *before* the designated cells are
     reverted, so the caller's comparison of the reverted part with the blank one (any other cell, formula or row)
     can never hide them.
     """
@@ -385,7 +472,9 @@ def audit_sheet_cells(part: str, oidx: PartIndex, data_f: bytes, cells: dict[str
     if fidx.implicit_refs:
         audit.struct.append(f"{part}: rows/cells without an r attribute — designated cells cannot be located")
         return audit
-    elements = _sheet_cell_elements(data_f)
+    root_f = etree.fromstring(data_f, _PARSER)
+    elements = _sheet_cell_elements(root_f)
+    audit.struct += sheet_row_issues(part, etree.fromstring(oidx.data, _PARSER), root_f, oidx, fidx, cells)
     for ref, sid in sorted(cells.items()):
         oc, fc = oidx.cells.get(ref), fidx.cells.get(ref)
         exp = prepared.get(sid)

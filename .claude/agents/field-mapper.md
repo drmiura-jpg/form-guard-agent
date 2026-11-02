@@ -72,7 +72,7 @@ A JSON block in the shape the pipeline uses, then a short table for the human
 ## Hand-off
 
 - You propose; you never write. You have no Edit or Write tool, and the PreToolUse hook (`scripts/hook_guard.py`)
-  refuses any shell command that would write, move or delete a blank template under `samples/`.
+  refuses any shell command that would write, move or delete a blank template under `samples/blank_forms/`.
 - Never apply your own proposals with `--set SLOT=VALUE`: that records a value as entered by the human reviewer.
   Give the table to the human; the grounded fill itself is `python -m form_guard.cli --form <form> --memo <memo>
   --out-dir output/<run> --mode live` (Claude inside the pipeline, re-checked by the verifier), followed by the

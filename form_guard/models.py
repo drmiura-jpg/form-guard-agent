@@ -114,8 +114,8 @@ class FieldMapping(BaseModel):
     normalizations: list[str] = Field(default_factory=list)
     engine: str = ""
     condensed_removed: list[str] = Field(default_factory=list)  # full text deleted to meet a character limit
-    # Live: the model id(s) that served this field ("claude-haiku-5-5 → claude-opus-5-5 (revision)").
-    # Offline: the model live auto mode would use ("offline (claude-haiku-5-5 in live auto)") — no call was made.
+    # Live: the model id(s) that served this field ("claude-haiku-4-5-20251001 → claude-opus-5-5 (revision)").
+    # Offline: the model live auto mode would use ("offline (claude-haiku-4-5-20251001 in live auto)") — no call was made.
     routed_model: str = ""
     route_reason: str = ""
 

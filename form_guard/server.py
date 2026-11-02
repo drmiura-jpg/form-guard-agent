@@ -819,8 +819,10 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
     @app.get("/api/runs/{run_id}/report", response_class=HTMLResponse)
     def report(run_id: str):
         st = store.get(run_id)
-        p = (st.result.out_dir or store.root / run_id) / "report.html"
-        return HTMLResponse(p.read_text(encoding="utf-8"))
+        with st.lock:  # an edit rewrites report.html: never serve a half-written file or one of another revision
+            p = (st.result.out_dir or store.root / run_id) / "report.html"
+            page = p.read_text(encoding="utf-8")
+        return HTMLResponse(page)
 
     @app.get("/api/runs/{run_id}/audit")
     def audit(run_id: str):

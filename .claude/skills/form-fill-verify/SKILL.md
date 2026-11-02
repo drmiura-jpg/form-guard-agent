@@ -19,12 +19,12 @@ python -m form_guard.cli --all-demos          # the fictional demos -> output/in
 - `--mode auto` (default) uses Claude when `ANTHROPIC_API_KEY` is set (shell or the git-ignored `.env`), otherwise
   the deterministic offline engine; `demo` forces the offline engine (reproducible, no cost); `live` requires the
   key.
-- `--model-tier auto` (default, or `--model-tiering auto`): `claude-haiku-5-5` for structured fields,
-  `claude-sonnet-5-5` for standard text / amounts / names, `claude-opus-5-5` with adaptive thinking for long-text
+- `--model-tier auto` (default, or `--model-tiering auto`): `claude-haiku-4-5-20251001` for structured fields,
+  `claude-sonnet-5` for standard text / amounts / names, `claude-opus-5-5` with adaptive thinking for long-text
   condensation and for every self-correction — a Haiku or Sonnet draft the verifier rejects is escalated to Opus.
   `--model-tiering off` (or `--model-tier opus`) uses one model for every call. If the API returns
   `not_found_error` (404) for a model id, the engine falls back along `MODEL_FALLBACK_CHAIN` (for example
-  `claude-sonnet-5-5` → `claude-sonnet-5` → `claude-sonnet-4-5`) and records both ids in `audit_log.json`.
+  `claude-sonnet-5` → `claude-sonnet-4-5`) and records both ids in `audit_log.json`.
 - The output folder receives `filled_<form>`, `audit_log.json`, `preview_*.svg` (`.png` with `--png`) and
   `report.html`. The blank form is never modified. Exit code 1 means FAIL.
 - MCP alternative: `form_guard_fill {form_path, memo_text | memo_path, mode?, model_tier?}` writes an

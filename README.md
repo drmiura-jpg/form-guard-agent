@@ -17,9 +17,9 @@ facility safety inspections (月次点検報告) all run on official `.docx` / `
 merged cells, `vMerge`, formulas, drop-down lists and printed legal boilerplate. One broken border, one paraphrased
 clause or one number the notes never stated means immediate administrative rejection (差し戻し) and another round
 trip. The people who fill these forms every month — research administrators, municipal applicants and back-office
-staff, mostly not engineers — cannot safely use chat AI for it: asked to "fill in this form", it **re-creates the
-document**, so merged cells split, borders vanish, legal text is paraphrased, the page size changes and numbers
-appear that are in nobody's notes — and nobody can tell what changed.
+staff, mostly not engineers — cannot safely use chat AI for it: asked to "fill in this form", it typically
+**re-creates the document**, and a re-created document can split merged cells, lose borders, paraphrase legal text,
+change the page setup and add numbers that are in nobody's notes — and nobody can tell what changed.
 
 - **Theme 1 — depth only someone from the domain sees:** the dangerous failure is not "the AI wrote a wrong
   sentence" but "the AI silently changed the form". Form-Guard checks the form itself (ZIP, XML skeleton, borders,
@@ -50,10 +50,13 @@ form2 — which stays empty for the human instead of being hallucinated.
    blank-cell discovery or `--discover-blanks`, then a person confirms the cells) and fill monthly / quarterly reports
    from meeting notes — with zero template drift proven on every run and an auditable trail (`approval.json`,
    `audit_log.json`, `report.html`). It runs locally on `127.0.0.1` and works offline without an API key.
-2. **Direct integration into Claude Code workflows via `.mcp.json` and Skills.** Anyone using Claude Code can drop
-   `.mcp.json` and `.claude/` into their document folder: their assistant then fills forms only through Form-Guard's
-   tools, gets **unapproved drafts** back, and can never produce an unverified or auto-approved official form. Other
-   MCP clients (e.g. Claude Desktop) can register the same server command, `python -m form_guard.mcp_server`.
+2. **Direct integration into Claude Code workflows via `.mcp.json` and Skills.** Clone this repository, install it
+   (`python -m venv .venv`, then `pip install -r requirements.txt`) and launch Claude Code from the repository root —
+   or point `.mcp.json` and `.claude/settings.json` at that installed environment and at `scripts/hook_guard.py`
+   (copying only `.mcp.json` and `.claude/` into a document folder is not enough: they run this repository's code).
+   The assistant then fills forms through Form-Guard's tools, gets **unapproved drafts** back, and cannot approve a
+   form itself — sign-off stays with a named person in the web app. Other MCP clients (e.g. Claude Desktop) can
+   register the same server command, `python -m form_guard.mcp_server`.
 
 ## What Form-Guard does
 
@@ -91,13 +94,15 @@ pip install -r requirements.txt
 
 python -m form_guard.cli --all-demos     # runs the 3 fictional demos -> output/index.html
 python -m form_guard.cli --serve         # web UI on http://127.0.0.1:8000
-pytest -v                                # 185 tests
+pytest -v                                # 225 tests
 ```
 
 Requires Python 3.10+. Without `ANTHROPIC_API_KEY` everything runs on the deterministic **offline demo engine**, so the
 whole pipeline is reproducible with zero setup.
 
-**Using the repository's Claude Code setup:** start Claude Code from the shell in which `.venv` is activated. The
+**Using the repository's Claude Code setup:** clone the repository, run the install steps above, and start Claude
+Code from the repository root, in the shell in which `.venv` is activated (to work from another folder, point
+`.mcp.json` and `.claude/settings.json` at this environment and at `scripts/hook_guard.py`). The
 project hooks run `python scripts/hook_guard.py …` and `.mcp.json` runs `python -m form_guard.mcp_server`, so `python`
 must be on `PATH`. The hook script needs only the standard library (any Python 3.9+), and its import check always
 prefers `.venv` (override: `FORM_GUARD_HOOK_PYTHON`); the MCP server re-launches itself with `.venv` when the `python`
@@ -115,7 +120,7 @@ discovery *and* an auto-preview fill of the recommended applicant cells, so the 
 are on screen together; **✅ 検出した空欄を承認して外科的差込を実行** turns the reviewer's own selection into the run that
 can be signed off (the auto-preview itself can never be approved). An uploaded form without markers goes to discovery
 automatically, and **🔍 Discover blank cells** is there for your own unmarked forms. Each field in Fields & sources
-carries a model-tier badge (`Opus 5.5` / `Sonnet 5.5` / `Haiku 5.5`, or `Offline Rule` plus the live plan).
+carries a model-tier badge (`Opus 5.5` / `Sonnet 5` / `Haiku 4.5`, or `Offline Rule` plus the live plan).
 Deep links for recordings: `/#tour=1` … `/#tour=5`, `/#demo=form4` (or `/#unmarked=form4`), `/#demo=form2&tab=hitl`,
 `/#view=claude`, `/#lang=en`. The 3-minute demo video (Japanese narration, 175 s) walks through these deep links step by
 step: [docs/DEMO_VIDEO_SCRIPT_JA.md](docs/DEMO_VIDEO_SCRIPT_JA.md).
@@ -142,31 +147,32 @@ python -m form_guard.cli --form my_form.docx --memo notes.txt --out-dir out --mo
 How Claude is used at runtime (`form_guard/mapper.py`):
 
 * **Multi-model routing** (`--model-tier auto`): structured fields (和暦 dates, periods, digits, ID patterns,
-  choices) and blank-cell label classification → `claude-haiku-5-5`; standard text, yen amounts and names →
-  `claude-sonnet-5-5`; long-text condensation and every self-correction pass after a validator rejection →
+  choices) and blank-cell label classification → `claude-haiku-4-5-20251001`; standard text, yen amounts and names →
+  `claude-sonnet-5`; long-text condensation and every self-correction pass after a validator rejection →
   `claude-opus-5-5`. The audit log and the report show which model handled which field and why.
 * **Escalation**: a Haiku or Sonnet draft that fails grounding or a printed rule is re-done by `claude-opus-5-5` with
   adaptive thinking, in the conversation that proposed it; every escalation is recorded in `usage.escalations`
   (field, from → to, the verifier's reason). `--model-tiering off` (or a fixed `--model-tier`) uses one model instead.
 * **Model availability fallback** (`MODEL_FALLBACK_CHAIN`): if the API answers `404 not_found_error` for a tier's model
   id on your API organisation, the call is retried along `claude-opus-5-5` → `claude-opus-5` → `claude-opus-4-6`,
-  `claude-sonnet-5-5` → `claude-sonnet-5` → `claude-sonnet-4-5`, `claude-haiku-5-5` → `claude-haiku-4-5-20251001` →
-  `claude-haiku-4-5`. The first id that answers serves the rest of the run, the request is rebuilt from that model's
+  `claude-sonnet-5` → `claude-sonnet-4-5`, `claude-haiku-4-5-20251001` → `claude-haiku-4-5`. The first id that
+  answers serves the rest of the run, the request is rebuilt from that model's
   capabilities (no thinking or effort for a legacy id), and `audit_log.json` keeps the requested tier model
   next to the served id (`usage.model_fallbacks`, `usage.calls[].attempted_models`, the `routed_model` note).
 * **Every field records its model**: each mapping carries `routed_model` / `route_reason` — the id the API actually
-  served (`claude-haiku-5-5`, or `claude-sonnet-5-5 → claude-opus-5-5 (revision)` after a self-correction; a
+  served (`claude-haiku-4-5-20251001`, or `claude-sonnet-5 → claude-opus-5-5 (revision)` after a self-correction; a
   server-side fallback to another model shows up as such). Offline runs show the plan live auto mode would follow —
-  `offline (claude-haiku-5-5 in live auto)` — and their routing groups are marked `planned_in_live_auto`, so a plan is
+  `offline (claude-haiku-4-5-20251001 in live auto)` — and their routing groups are marked `planned_in_live_auto`, so a plan is
   never mistaken for a call. The web UI shows the routing per field (Fields & sources, with any API-returned thinking
   summary) and per run (tab **Claude Code 連携 · Architecture**); the top-bar **Model tier** selector
-  (`Auto: Haiku / Sonnet / Opus`, `Opus 5.5 only`, `Sonnet 5.5 only`, `Haiku 5.5 only`) is sent with every run.
+  (`Auto: Haiku / Sonnet / Opus`, `Opus 5.5 only`, `Sonnet 5 only`, `Haiku 4.5 only`) is sent with every run.
 * **Structured outputs** (`output_config.format` = JSON schema): one entry per field with `value`,
   `source_quotes` (verbatim, single-line), line numbers, confidence and a short reason — or `not_found`.
 * **Adaptive thinking** (`display: "summarized"`) with an explicit **effort** level, streamed with
   `get_final_message()`. Request parameters are adapted per model via `model_capabilities()` — an explicit table of
   known model ids (`opus` / `sonnet` / `haiku` 4.5, 4.6, 4.7, 5, 5.5 and `fable` 5 / 5.1): legacy models such as
-  `claude-haiku-4-5` get plain requests, and an unrecognised family or version gets no capability flags at all.
+  `claude-haiku-4-5` — the Haiku tier `claude-haiku-4-5-20251001` included — get plain structured-output requests,
+  and an unrecognised family or version gets no capability flags at all.
   Request formatting is verified against mock/transport tests; live API availability and model-specific features
   depend on the caller's Anthropic account tier. Thinking summaries returned by the API are kept in the audit log,
   labelled as API-returned summaries.
@@ -175,7 +181,8 @@ How Claude is used at runtime (`form_guard/mapper.py`):
   are revised. Values that still fail are *not* written; they go to the reviewer.
 * **Refusals** are handled (`stop_reason == "refusal"`), with the server-side fallback opt-in
   (`fallbacks="default"`, beta `server-side-fallback-2026-07-01`). In `auto` mode, a failed live call falls back
-  to the offline engine and the report says so.
+  to the offline engine and the report says so — including the API calls and tokens used before the failure
+  (`usage.live_attempt_failed`), never "no model was called".
 * The memo is treated as data, never as instructions (prompt-injection guard in the system prompt).
 
 The whole project — code, tests, sample generators and docs — was written with **Claude Code** during the hackathon.
@@ -187,8 +194,8 @@ The repository ships its own Claude Code setup (details and rationale: [docs/BUI
 | | |
 |---|---|
 | `.claude/skills/` | `form-scan`, `surgical-fill`, `structural-audit`, `form-fill-verify`, `visual-diff-audit` — scan (with blank-cell discovery) → fill → audit, a one-pass fill-and-verify, and the visual / layout audit |
-| `.claude/agents/` | `memo-extractor` (Sonnet: blind verbatim extraction *before* it sees the slots), `field-mapper` (`claude-opus-5-5`: rule-aware proposals — 和暦, caps, condensation), `structure-auditor` (Sonnet: fast deterministic audit), `form-auditor` (Opus: adversarial re-verification and the HITL list). **No file-editing tools (`Edit`/`Write`)**: `memo-extractor` uses only `Read, Grep, Glob`, and `form-auditor` (like `field-mapper` and `structure-auditor`) uses `Read, Grep, Glob, Bash` for verification commands under `PreToolUse` protection |
-| `.claude/settings.json` + `scripts/hook_guard.py` | **Two-stage hook guard.** `PreToolUse` (`Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `Bash`, `PowerShell`) prevents *before anything is written* — exit code 2 + `permissionDecision: "deny"` — any write, copy-over, move or delete of `samples/blank_forms/*.docx` / `*.xlsx`, and any write that would put an Anthropic API key, a literal `ANTHROPIC_API_KEY = "sk-…"`, a personal user-profile path (`C:\Users\<user>`, `/Users/<user>`, `/home/<user>` — any user name, Japanese ones included; placeholders such as `<user>`, `runner` or `root` are fine) or an e-mail address outside `example.com` / `example.jp` / `example.org` (and their subdomains) and `users.noreply.github.com` into a project file — the only other address allowed is exactly `noreply@anthropic.com`. `PostToolUse` (`Write`, `Edit`, `MultiEdit`) verifies *after the write* that Python compiles (`py_compile`) and the edited module imports (< 1.8 s), that JSON parses, and re-scans the file; extensions are compared case-insensitively (`X.PY`, `X.JSON`). Commands: `python scripts/hook_guard.py pre-tool-use` / `post-tool-use` — no `$`, `%` or backtick, so they run identically in Git Bash, PowerShell, cmd, macOS and Linux (activate `.venv` first, see Quick start) |
+| `.claude/agents/` | `memo-extractor` (Sonnet: blind verbatim extraction *before* it sees the slots), `field-mapper` (`claude-opus-5-5`: rule-aware proposals — 和暦, caps, condensation), `structure-auditor` (Sonnet: fast deterministic audit), `form-auditor` (Opus: adversarial re-verification and the HITL list). **No file-editing tools (`Edit`/`Write`)**: `memo-extractor` uses only `Read, Grep, Glob`, and `form-auditor` (like `field-mapper` and `structure-auditor`) uses `Read, Grep, Glob, Bash` for verification commands under `PreToolUse` protection. That `Bash` is limited by the agents' prompt instructions and by the `PreToolUse` hook (`scripts/hook_guard.py`), which blocks any write, move or deletion targeting `samples/blank_forms/` — the tool list alone does not make a shell read-only |
+| `.claude/settings.json` + `scripts/hook_guard.py` | **Two-stage hook guard.** `PreToolUse` (`Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `Bash`, `PowerShell`) prevents *before anything is written* — exit code 2 + `permissionDecision: "deny"` — any write, copy-over, move or delete of `samples/blank_forms/*.docx` / `*.xlsx` — the folder itself, folders above it and wildcards included (`rm -rf samples/blank_forms`, `Remove-Item -LiteralPath samples/blank_forms -Recurse`, `rm samples/blank_forms/*`); only the real generator command `python -m form_guard.cli --generate-samples` is exempt, never a flag inside a `# comment` — and any write that would put an Anthropic API key, a literal `ANTHROPIC_API_KEY = "sk-…"`, a personal user-profile path (`C:\Users\<user>`, `/Users/<user>`, `/home/<user>` — any user name, Japanese ones included; placeholders such as `<user>`, `runner` or `root` are fine) or an e-mail address outside `example.com` / `example.jp` / `example.org` (and their subdomains) and `users.noreply.github.com` into a project file — the only other address allowed is exactly `noreply@anthropic.com`. `PostToolUse` (`Write`, `Edit`, `MultiEdit`) verifies *after the write* that Python compiles (`py_compile`) and the edited module imports (< 1.8 s), that JSON parses, and re-scans the file; extensions are compared case-insensitively (`X.PY`, `X.JSON`). Commands: `python scripts/hook_guard.py pre-tool-use` / `post-tool-use` — no `$`, `%` or backtick, so they run identically in Git Bash, PowerShell, cmd, macOS and Linux (activate `.venv` first, see Quick start) |
 | `.mcp.json` | registers the `form-guard` MCP server: `python -m form_guard.mcp_server` (stdio JSON-RPC 2.0, no extra dependencies, UTF-8 forced, messages capped at 10 MB) with `form_guard_list_demos` (all five fictional demos, marked vs unmarked), `form_guard_scan`, `form_guard_discover_blank_cells`, `form_guard_fill` (writes only an **unapproved draft** into `output/mcp_runs/`, `approval_status: UNAPPROVED_DRAFT_REQUIRES_HUMAN_SIGN_OFF` in the result and in `audit_log.json` — nothing is stamped into the document itself; the result's `review_url` opens that exact draft in the web app for sign-off) and `form_guard_verify` (with VIS-01). `mode` defaults to `demo` (offline); `live` is an explicit opt-in. Paths with a `.env*`, `.git`, `.ssh` or `.claude-hackathon` component are refused |
 | Web UI tab **Claude Code 連携 · Architecture** | `GET /api/claude-suite` reads the files above (skills, subagents with their models and tools, both hook stages — `PreToolUse` and `PostToolUse` — with their commands and checks, the permission denials, the MCP tools) and shows how they work together, this run's per-field model routing, the routing policy and the measured workflow numbers |
 
@@ -204,7 +211,7 @@ project-level setup ships in this repository. Each feature and model was chosen 
 | Purpose | Feature / model chosen | Why | Where in repo | How it is verified |
 |---|---|---|---|---|
 | Map memo facts to form fields (the core of the app) | **Claude** with **structured outputs** (JSON schema) and **adaptive thinking** at an explicit effort level, streamed | value + verbatim quotes + line numbers, or `not_found` — every answer is machine-checkable | `form_guard/mapper.py` (`ClaudeEngine`, `MAPPING_SCHEMA`, `SYSTEM_PROMPT`) | offline: fake client + the real `anthropic` SDK on a mock HTTP transport · live: `--mode live` |
-| Spend reasoning where it is needed | **Per-field routing** — `claude-haiku-5-5` structured fields and label classification · `claude-sonnet-5-5` standard text, amounts, names · `claude-opus-5-5` long-text condensation and every self-correction; a rejected Haiku / Sonnet draft is **escalated** to Opus | a 13-digit ID needs no deep thinking; a 200-character condensation that must keep every condition does | `route_slot`, `ClaudeEngine.route` / `revise`, `usage.escalations` | offline: the model of every call and the escalation record are asserted; offline runs show the live plan per field |
+| Spend reasoning where it is needed | **Per-field routing** — `claude-haiku-4-5-20251001` structured fields and label classification · `claude-sonnet-5` standard text, amounts, names · `claude-opus-5-5` long-text condensation and every self-correction; a rejected Haiku / Sonnet draft is **escalated** to Opus | a 13-digit ID needs no deep thinking; a 200-character condensation that must keep every condition does | `route_slot`, `ClaudeEngine.route` / `revise`, `usage.escalations` | offline: the model of every call and the escalation record are asserted; offline runs show the live plan per field |
 | Keep working when a model id is unavailable | **Model fallback chain** on `404 not_found_error` | a launching tier id may not be enabled on every API organisation | `MODEL_FALLBACK_CHAIN`, `ClaudeEngine._call` | offline: the real SDK raises `NotFoundError` from a mock transport; requested and served ids are audited |
 | Never trust a value without evidence | **Self-correction loop with verbatim-quote grounding** | an LLM answer is a proposal; an independent check decides | `form_guard/grounding.py`, `map_fields` / `repair` | offline: every run of the suite |
 | Prove that nothing else changed | **Deterministic verifier** — 21 checks + VIS-01, **0 LLM tokens** | a verdict that must be reproducible never comes from a model | `form_guard/verifier.py`, `form_guard/visual_diff.py` | offline: tampering tests (borders, merges, text, `xml:space`, ZIP, path traversal, XXE) |
@@ -314,7 +321,10 @@ drawing, picture, object, field (`fldSimple` / `fldChar` / `instrText`), hyperli
 and run formatting that differs from the blank cell's paragraph-mark formatting (font size, bold, colour, a removed
 `rPr`) or a changed `pPr` fails LAYOUT-03. An Excel cell may only become an inline string: a formula fails XML-03 and
 LAYOUT-04, a changed style id `s` fails LAYOUT-02, and reverting the designated cells must reproduce the blank sheet
-byte for byte, so any other cell that changed fails XML-03 / TEXT-01.
+byte for byte, so any other cell that changed fails XML-03 / TEXT-01. The rows holding designated cells are checked
+before that revert: a row created for them may carry only `r`, an existing row keeps its attributes (`hidden`, `ht`,
+`s`, `outlineLevel` …) and its non-`<c>` content, cells and rows stay in order, and `<sheetData>` is unchanged —
+anything else fails XML-03.
 
 `python -m form_guard.cli --verify ORIGINAL FILLED` audits *any* filled copy — including one filled by hand or by another
 tool. It always checks structure and printed constraints; memo grounding is checked when `--memo MEMO` is given or a
@@ -436,7 +446,8 @@ License: MIT (see [LICENSE](LICENSE)).
 防災備蓄品の窓口、施設の安全点検では、罫線・結合セル・`vMerge`・計算式・プルダウン・印刷された定型文を持つ公式の
 `.docx` / `.xlsx` 様式を使います。罫線が1本崩れる、文言が1つ言い換わる、メモに無い数字が入る——それだけで差し戻しになり、
 やり直しが発生します。毎月これらに記入しているのは、多くがエンジニアではない研究事務・申請者・バックオフィスの担当者です。
-生成AIのチャットは様式ごと作り直し、根拠の無い数字を作り、何が変わったのか誰にも分からないため、安全に使えませんでした。
+生成AIのチャットは多くの場合、様式ごと作り直すため、罫線や文言が変わったり根拠の無い数字が入ったりすることがあり、
+何が変わったのか誰にも分からないので、安全に使えませんでした。
 
 - **テーマ1（その現場にいた人にしか見えない深さ）**：本当に危ないのは「AIの文章が間違う」ことより「AIが様式を黙って変える」
   ことです。Form-Guard は様式そのもの（ZIP・XML骨格・罫線・結合セル・定型文）を検査し、事実は推測しません（法人番号は人が入力）。
@@ -455,16 +466,19 @@ Form-Guard は 41 の指定欄に 40 件（844 文字）を記入し、XML タ�
    様式を一度登録し（マーカーの無い様式は Web 画面の空欄発見か `--discover-blanks` で、記入する欄を人が確定）、会議メモから
    記入します。毎回「様式は変わっていない」ことを検査で示し、`approval.json`・`audit_log.json`・`report.html` の監査証跡が
    残ります。ローカル（`127.0.0.1`）で動き、API キーが無くてもオフラインで使えます。
-2. **`.mcp.json` と Skills による Claude Code からの直接利用**：Claude Code の利用者は `.mcp.json` と `.claude/` を書類フォルダに
-   置くだけで、AIアシスタントが Form-Guard のツール経由でしか様式に記入しなくなり、返ってくるのは**未承認の下書き**だけです。
-   検証されていない様式や、自動で承認された様式は生まれません（Claude Desktop など他の MCP クライアントにも、同じ
-   `python -m form_guard.mcp_server` を登録できます）。
+2. **`.mcp.json` と Skills による Claude Code からの直接利用**：このリポジトリを clone してインストールし
+   （`python -m venv .venv` のあと `pip install -r requirements.txt`）、リポジトリ直下から Claude Code を起動します（別の
+   フォルダで使う場合は `.mcp.json` と `.claude/settings.json` をその環境と `scripts/hook_guard.py` に向けます。`.mcp.json` と
+   `.claude/` を書類フォルダに置くだけでは、このリポジトリのコードが無いので動きません）。AIアシスタントは Form-Guard の
+   ツール経由で様式に記入し、返ってくるのは**未承認の下書き**だけで、自分では承認できません（承認は Web 画面で名前のある人が
+   行います。Claude Desktop など他の MCP クライアントにも、同じ `python -m form_guard.mcp_server` を登録できます）。
 
 ### 何をするツールか
 
-生成AIに「この様式に記入して」と頼むと、多くの場合は文書を**作り直します**。見た目はそれらしくても、
-結合セルが分かれ、罫線が消え、注意事項や誓約文の文言が言い換えられ、用紙サイズまで変わります。
-メモにない数字が紛れ込むこともあります。Form-Guard Agent は次の流れで、**指定欄だけ**を書き換えます。
+生成AIに「この様式に記入して」と頼むと、多くの場合は文書を**作り直します**。文書ごと作り直す方式では、見た目はそれらしくても、
+結合セルが分かれる、罫線が消える、注意事項や誓約文の文言が言い換えられる、用紙設定が変わる、といったことが起こり得ます。
+メモにない数字が紛れ込むこともあります（付属の比較用ファイルは、こうした失敗を再現した模擬データです）。
+Form-Guard Agent は次の流れで、**指定欄だけ**を書き換えます。
 
 1. **スキャン** — `{{項目名}}`・`[記入欄: 項目名]`・座標指定の空欄（Word の表のセル、Excel のセル）を見つけ、様式に印刷された記入ルール（字数・和暦・桁数・上限額・選択肢）も読み取ります。マーカーの無い白紙様式では、空欄候補を4段階で発見し（申請者欄か事務局欄かも判定）、記入する欄を人が確定します。
 2. **対応付けと自己修正** — Claude（ライブ。欄の種類に応じて Haiku・Sonnet・Opus を使い分け）またはオフラインの決定論エンジンが、値と**メモ原文そのままの引用**を返します。独立した検証器が引用・数値・日付・記入ルールを確認し、和暦変換・金額表記の統一・半角化・削除のみの要約で直すか、指摘内容を添えて Claude（Opus）に再依頼します。
@@ -486,7 +500,9 @@ python -m form_guard.cli --serve         # Web画面 http://127.0.0.1:8000
 pytest -v
 ```
 
-Claude Code はこの `.venv` を有効にしたシェルから起動してください。フック（`python scripts/hook_guard.py …`）と MCP サーバー
+Claude Code は、リポジトリを clone して上の手順でインストールしたうえで、リポジトリ直下から、この `.venv` を有効にしたシェルで
+起動してください（別のフォルダで使う場合は `.mcp.json` と `.claude/settings.json` をこの環境と `scripts/hook_guard.py` に向けます）。
+フック（`python scripts/hook_guard.py …`）と MCP サーバー
 （`python -m form_guard.mcp_server`）は `PATH` 上の `python` で動きます。フックは標準ライブラリだけで動き（Python 3.9 以上なら可）、
 import 検査には常に `.venv` を優先して使います（`FORM_GUARD_HOOK_PYTHON` で指定も可）。MCP サーバーは依存パッケージが無い場合
 `.venv` で自動的に起動し直します。`python` が見つからないとフックがエラー（処理は止まりません）になるので、`.venv` を有効にして
@@ -499,16 +515,18 @@ Web 画面は日本語が既定です（右上で EN に切替）。上部の「
 [docs/DEMO_VIDEO_SCRIPT_JA.md](docs/DEMO_VIDEO_SCRIPT_JA.md) にあり、このガイドツアー（`#tour=1`〜`#tour=5`）に沿って画面をたどります。
 
 `ANTHROPIC_API_KEY` を設定すると（`.env` も可、Git には含まれません）、`--mode auto` / `--mode live` で Claude を使います。
-既定の `--model-tier auto` では、定型の欄（和暦日付・期間・桁数・書式・選択肢）と空欄ラベルの分類を `claude-haiku-5-5`、
-通常の文章・金額・氏名を `claude-sonnet-5-5`、長文の要約と検証器に差し戻された後の自己修正を `claude-opus-5-5` が担当します
+既定の `--model-tier auto` では、定型の欄（和暦日付・期間・桁数・書式・選択肢）と空欄ラベルの分類を `claude-haiku-4-5-20251001`、
+通常の文章・金額・氏名を `claude-sonnet-5`、長文の要約と検証器に差し戻された後の自己修正を `claude-opus-5-5` が担当します
 （`--model-tier opus|sonnet|haiku` で固定も可）。構造化出力（JSON スキーマ）、adaptive thinking（要約表示）と effort 指定は、
 `model_capabilities()` の既知モデル表にあるモデルにだけ送ります（表に無いファミリーや将来のバージョンには何も付けません）。
 モデル別に送信パラメータを切り替えます。確認済みなのはモックによるリクエスト形式で、実APIでの利用可否・対応機能はアカウント権限に依存します。
 どの欄をどのモデルが担当したかは監査ログとレポートに残ります。
-各欄の `routed_model` / `route_reason` には実際に応答したモデル（自己修正後は `claude-sonnet-5-5 → claude-opus-5-5 (revision)`）を
-記録し、オフライン実行では `offline (claude-haiku-5-5 in live auto)` のように「ライブ auto 時の計画」であることを明示します
-（API を呼んだとは表示しません）。Web 画面の「記入値と根拠」で欄ごとに、右上の「モデル」選択（自動：Haiku / Sonnet / Opus、
-Opus 5.5 のみ など）で実行ごとに切り替えられます。
+各欄の `routed_model` / `route_reason` には実際に応答したモデル（自己修正後は `claude-sonnet-5 → claude-opus-5-5 (revision)`）を
+記録し、オフライン実行では `offline (claude-haiku-4-5-20251001 in live auto)` のように「ライブ auto 時の計画」であることを明示します
+（API を呼んだとは表示しません。ライブ実行が途中で失敗してオフラインに切り替えた場合は、それまでの API 呼び出しとトークン数を
+表示します）。Web 画面の「記入値と根拠」で欄ごとに、右上の「モデル」選択（自動：Haiku / Sonnet / Opus、
+Opus 5.5 のみ・Sonnet 5 のみ・Haiku 4.5 のみ）で実行ごとに切り替えられます。Haiku 4.5 は旧世代のモデルなので、adaptive thinking と
+effort は送りません。
 
 ### マーカーなしの白紙様式（発見 → 人が確定 → 記入）
 
@@ -541,9 +559,13 @@ Web 画面では、左の「デモ4」「デモ5」（「空欄自動検出」�
 サブエージェント 4 種（`.claude/agents/`：様式を見る前にメモから原文引用だけを抜き出す `memo-extractor`（Sonnet）、
 ルールを踏まえて値を提案する `field-mapper`（Opus 5.5）、高速に構造を監査する `structure-auditor`（Sonnet）、
 敵対的に検査し直す `form-auditor`（Opus））を同梱しています。どのサブエージェントもファイル編集ツール（`Edit`/`Write`）を
-持たず、`memo-extractor` は `Read, Grep, Glob` のみ、`form-auditor` は検証コマンドのために `Read, Grep, Glob, Bash` を使い、
-その Bash も PreToolUse フックの保護下にあります。フックは 2 段構成です（`.claude/settings.json` → `scripts/hook_guard.py`）：
-**PreToolUse** は書き込む前に、白紙様式（`samples/blank_forms/*.docx・*.xlsx`）の書き込み・上書きコピー・移動・削除と、
+持たず、`memo-extractor` は `Read, Grep, Glob` のみ、`form-auditor`（`field-mapper`・`structure-auditor` も同じ）は検証コマンドの
+ために `Read, Grep, Glob, Bash` を使います。その Bash はプロンプトの指示と PreToolUse フック（`scripts/hook_guard.py`）で制限され、
+`samples/blank_forms/` を対象とする書き込み・移動・削除はフックが阻止します（ツール一覧だけでシェルが読み取り専用になるわけでは
+ありません）。フックは 2 段構成です（`.claude/settings.json` → `scripts/hook_guard.py`）：
+**PreToolUse** は書き込む前に、白紙様式（`samples/blank_forms/*.docx・*.xlsx`）の書き込み・上書きコピー・移動・削除
+（`samples/blank_forms` フォルダ自体・その上位フォルダ・`rm samples/blank_forms/*` のようなワイルドカードも含む。例外は本物の
+`python -m form_guard.cli --generate-samples` だけで、`# コメント` 内の文字列では例外になりません）と、
 API キー・`ANTHROPIC_API_KEY = "sk-…"` の直書き・個人のユーザーフォルダのパス（日本語のユーザー名も検出）・例示用ドメイン
 （`example.com`・`example.jp`・`example.org` とそのサブドメイン、`users.noreply.github.com`）以外のメールアドレス
 （例外は `noreply@anthropic.com` のみ）の書き込みを終了コード 2（`permissionDecision: "deny"`）で阻止し、**PostToolUse** は
@@ -578,7 +600,7 @@ Web 画面の承認へ引き継ぎます）・`form_guard_verify` の 5 ツー�
 - **施設・備品一時使用許可申請書（マーカーなし, .docx）**：空欄を発見して申請者欄7か所を推奨、事務局欄4か所を除外、「氏名」の重複を区別
 - **防災備蓄品 貸出・返却管理票（マーカーなし, .xlsx）**：結合セルの空欄5か所に書式番号を保ったまま記入、SUM式と結合セルの続き、事務局使用欄（決裁印・受付番号・返却確認）を除外
 
-各デモには「生成AIで作り直した場合」を再現した比較用ファイル（`samples/broken_before/`）も付いています。
+各デモには「生成AIで作り直した場合」のよくある失敗を再現した比較用ファイル（`samples/broken_before/`、模擬データ）も付いています。
 すべてのサンプル様式とテストデータは、本ハッカソン期間中にゼロから自作した架空のものです。
 
 ### 位置付けと注意

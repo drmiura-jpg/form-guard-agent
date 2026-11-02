@@ -23,7 +23,7 @@ Form-Guard Agent（Built with Claude: Japan 2026 提出作品）のデモ動画�
 |---|---|
 | サーバー | 収録の直前に `python -m form_guard.cli --serve` で起動し直す（「Claude Code 連携」タブの計測値は、起動後に初めてタブを開いたときにこの PC で測る） |
 | ブラウザ | 新しいプロファイル（拡張機能・ブックマーク・通知なし）、ウィンドウ 1440×900、表示倍率 100%、ライトテーマ |
-| 言語・エンジン | 日本語（`/#lang=ja`）、エンジン「自動 / Auto」、モデル「自動：Haiku / Sonnet / Opus」。API キーが無くてもオフラインエンジンで全工程を再現でき、各欄には「Offline Rule」と、ライブ auto で担当するモデルの計画（Haiku 5.5 / Sonnet 5.5 / Opus 5.5）が表示される |
+| 言語・エンジン | 日本語（`/#lang=ja`）、エンジン「自動 / Auto」、モデル「自動：Haiku / Sonnet / Opus」。API キーが無くてもオフラインエンジンで全工程を再現でき、各欄には「Offline Rule」と、ライブ auto で担当するモデルの計画（Haiku 4.5 / Sonnet 5 / Opus 5.5）が表示される |
 | 映さないもの | 個人名・メールアドレス・個人のユーザーフォルダのパス・環境変数の一覧・`.env`・API キー。ターミナルを映すときは、プロンプトにユーザー名やフォルダ名が出ない設定にする |
 | Step 4 の任意カット | Claude Code（`.mcp.json` 登録済み）で `form_guard_fill`（form1・`mode: demo`）を実行し、結果の `review_url`（`http://127.0.0.1:8000/?run_id=…`）を控えておく |
 
@@ -70,8 +70,8 @@ Form-Guard の外科的な差し替えの違いを、最初の28秒で見せる�
 
 | 時間 | 画面・操作 | テロップ |
 |---|---|---|
-| 0:28–0:40 | `http://127.0.0.1:8000/#demo=form1&tab=fields&slot=変更理由および予算影響`（またはデモ1 の「記入値と根拠」タブで「変更理由および予算影響」をクリック）。右の詳細に、チップ「抽出要約 · condensed by deletion」、「⚠ condensed — removed: …」（削除した2文の全文）、自己修正の履歴「#2 condense extractively 257→181 chars」 | 条件を落とさない200字要約：257字 → 181字（削除のみ・削った文は全文表示） |
-| 0:40–0:52 | ガイドツアー「③ 原文根拠ハイライトと推測拒否」をクリック（= `/#tour=3`）。デモ2 `form2_municipal_equipment_subsidy.docx` の「記入値と根拠」で「導入予定金額 税抜」＝4,836,000円、根拠「L18「税抜で483万6千円」」と下のメモの黄色ハイライト。表の各欄にモデルバッジ（Offline Rule ＋ Haiku 5.5 / Sonnet 5.5 の計画） | 原文引用ハイライト：483万6千円 → 4,836,000円 |
+| 0:28–0:40 | `http://127.0.0.1:8000/#demo=form1&tab=fields&slot=変更理由および予算影響`（またはデモ1 の「記入値と根拠」タブで「変更理由および予算影響」をクリック）。右の詳細に、チップ「抽出要約」、「⚠ condensed — removed: …」（削除した2文の全文）、自己修正の履歴「#2 condense extractively 257→181 chars」 | 条件を落とさない200字要約：257字 → 181字（削除のみ・削った文は全文表示） |
+| 0:40–0:52 | ガイドツアー「③ 原文根拠ハイライトと推測拒否」をクリック（= `/#tour=3`）。デモ2 `form2_municipal_equipment_subsidy.docx` の「記入値と根拠」で「導入予定金額 税抜」＝4,836,000円、根拠「L18「税抜で483万6千円」」と下のメモの黄色ハイライト。表の各欄にモデルバッジ（Offline Rule ＋ Haiku 4.5 / Sonnet 5 の計画） | 原文引用ハイライト：483万6千円 → 4,836,000円 |
 | 0:52–0:59 | ツアーの「補助金申請額（上限で再抽出）→」をクリック。自己修正の履歴：#1 1,612,000円 → ✗「exceeds the printed cap 1,000,000円 / 上限超過」→ #2 メモの「上限の100万円で申請します」から 1,000,000円 を再抽出 | 印刷された上限1,000,000円で再抽出 |
 | 0:59–1:05 | ツアーの「法人番号（人の入力待ち）→」をクリック。「人による最終確認」タブの「⚠ 1 欄に人の入力が必要です」、法人番号（13桁）の空欄、「メモに記載が無いため、Form-Guard は推測しませんでした。」 | 推測ゼロ：法人番号は要人間入力（`needs_human_input`） |
 
@@ -113,7 +113,7 @@ Form-Guard の外科的な差し替えの違いを、最初の28秒で見せる�
 
 | 時間 | 画面・操作 | テロップ |
 |---|---|---|
-| 1:45–1:57 | ガイドツアー「④ Claude 活用・モデル使い分け」をクリック（= `/#tour=4`）。デモ1 の「Claude Code 連携 · Architecture」タブ：「この実行のモデル割り当て」Haiku 5.5 ×3（提出日・研究課題番号・変更種別）／Sonnet 5.5 ×4／Opus 5.5 ×1（変更理由および予算影響）、その下の「ルーティング方針（--model-tier auto）」の表 | 欄ごとの3段モデル振り分け：Haiku（日付・番号・選択肢）／Sonnet（文章・金額・氏名）／Opus 5.5（adaptive thinking：条件を残す要約・差し戻し後の自己修正）＋ `MODEL_FALLBACK_CHAIN` |
+| 1:45–1:57 | ガイドツアー「④ Claude 活用・モデル使い分け」をクリック（= `/#tour=4`）。デモ1 の「Claude Code 連携 · Architecture」タブ：「この実行のモデル割り当て」Haiku 4.5 ×3（提出日・研究課題番号・変更種別）／Sonnet 5 ×4／Opus 5.5 ×1（変更理由および予算影響）、その下の「ルーティング方針（--model-tier auto）」の表 | 欄ごとの3段モデル振り分け：Haiku（日付・番号・選択肢）／Sonnet（文章・金額・氏名）／Opus 5.5（adaptive thinking：条件を残す要約・差し戻し後の自己修正）＋ `MODEL_FALLBACK_CHAIN` |
 | 1:57–2:07 | 下へスクロール →「Claude Code 拡張の連携」（5ステップ）→「リポジトリ同梱の Claude Code 資産」。左の「フック（2 段）」カード：PreToolUse（書き込み前：白紙様式の改変・API キー・個人のパス・メールアドレスを阻止）／PostToolUse（書き込み後：`py_compile`・import・JSON を検査） | 2段フック `scripts/hook_guard.py`：書き込み前に阻止（終了コード 2＋deny）・書き込み後に検査 |
 | 2:07–2:15 | 同じ画面で中央と右のカード：「MCP サーバー」の 5 ツール（`form_guard_list_demos`・`form_guard_scan`・`form_guard_discover_blank_cells`・`form_guard_fill`・`form_guard_verify`）、「サブエージェント」4 種（どれも Edit/Write を持たない）、その下の Skills 5 種 | Skills 5 ・ 編集しないサブエージェント 4（`memo-extractor` は様式を見る前にメモを読む／`structure-auditor`・`form-auditor` が独立に検証） ・ 依存ゼロの MCP 5 ツール |
 | 2:15–2:25 | （任意カット）Claude Code の画面で `form_guard_fill` の結果（`approval_status: UNAPPROVED_DRAFT_REQUIRES_HUMAN_SIGN_OFF`・`review_url`）→ ブラウザで `review_url`（`/?run_id=…`）を開く →「MCP の下書きを読み込みました（未承認）」→「人による最終確認」タブ | MCP の下書き → `web_handoff.json` → 同じ SHA-256 のまま Web で人が承認 |

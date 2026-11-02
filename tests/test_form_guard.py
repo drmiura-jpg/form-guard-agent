@@ -1329,8 +1329,8 @@ def test_r1_a18_reviewer_can_correct_an_ai_filled_field(api):
     js = (ROOT / "form_guard" / "static" / "app.js").read_text(encoding="utf-8")
     detail = js[js.index("function renderDetail") : js.index("function editControl")]
     assert "editControl(s, m)" in detail and "needs_human_input" not in detail.split("editControl(s, m)")[1][:40]
-    assert "Save edit / 値を修正" in js and "editControl(slot, m)" in js  # field detail + HITL checklist
-    assert "filled_sha256: S.run.filled.sha256, revision: S.run.revision" in js
+    assert 'L("値を保存", "Save edit")' in js and "editControl(slot, m)" in js  # field detail + HITL checklist
+    assert "filled_sha256: sha, revision: rev" in js  # the approve POST names the revision and file on screen
 
 
 # ------------------------------------------------ #18 R1-A19 code-point indexing
@@ -1617,20 +1617,23 @@ def test_p00_verified_sha256_is_recorded_once_and_enforced_on_approve_and_downlo
 
 
 def test_p01_current_model_constants_and_capability_table():
-    assert (MODEL_OPUS, MODEL_SONNET, MODEL_HAIKU) == ("claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5")
+    # the current model ids (claude-sonnet-5, claude-haiku-4-5-20251001), not ids that do not exist
+    assert (MODEL_OPUS, MODEL_SONNET, MODEL_HAIKU) == ("claude-opus-5-5", "claude-sonnet-5", "claude-haiku-4-5-20251001")
     assert DEFAULT_MODEL == MODEL_OPUS
-    for m in (MODEL_OPUS, MODEL_SONNET, MODEL_HAIKU, "claude-opus-4-6", "claude-sonnet-4-6", "claude-fable-5-1",
-              "anthropic.claude-sonnet-5-5"):
+    for m in (MODEL_OPUS, MODEL_SONNET, "claude-opus-4-6", "claude-sonnet-4-6", "claude-fable-5-1",
+              "anthropic.claude-sonnet-5"):
         caps = model_capabilities(m)
         assert caps["adaptive_thinking"] and caps["effort"] and not caps["legacy"], m
-    for m in ("claude-haiku-4-5", "claude-haiku-4-5-20251001", "claude-sonnet-4-5-20250929", "claude-3-5-haiku-20241022",
+    for m in (MODEL_HAIKU, "claude-haiku-4-5", "claude-sonnet-4-5-20250929", "claude-3-5-haiku-20241022",
               "claude-3-haiku-20240307", "not-a-claude-model"):
         caps = model_capabilities(m)
         assert not caps["adaptive_thinking"] and not caps["effort"] and caps["legacy"], m
+    assert model_capabilities(MODEL_HAIKU)["known"] and model_capabilities(MODEL_HAIKU)["structured_outputs"]
     assert model_capabilities("claude-opus-4-5-20251101")["effort"] and not model_capabilities("claude-opus-4-5")["adaptive_thinking"]
     assert model_capabilities("claude-haiku-4-5")["structured_outputs"] and not model_capabilities("claude-3-haiku-20240307")["structured_outputs"]
     assert model_capabilities("claude-3-haiku-20240307")["max_output_tokens"] == 4096
-    assert model_capabilities(MODEL_HAIKU)["server_side_fallback"] and not model_capabilities("claude-sonnet-4-6")["server_side_fallback"]
+    assert model_capabilities(MODEL_OPUS)["server_side_fallback"] and not model_capabilities(MODEL_HAIKU)["server_side_fallback"]
+    assert not model_capabilities("claude-sonnet-4-6")["server_side_fallback"]
     assert _effort_for(model_capabilities("claude-opus-4-6"), "xhigh") == "high"  # clamped, never a 400
     assert _effort_for(model_capabilities(MODEL_OPUS), "xhigh") == "xhigh"
     assert _effort_for(model_capabilities("claude-haiku-4-5"), "high") is None
@@ -1672,9 +1675,13 @@ def test_p01_auto_tier_routes_fields_by_complexity_and_revises_with_opus(samples
     revise = calls[3]["messages"]  # continues the Sonnet conversation that proposed 所属部局
     assert '"slot_id": "所属部局"' in revise[0]["content"] and '"slot_id": "変更理由および予算影響"' not in revise[0]["content"]
     assert revise[1]["role"] == "assistant" and "quote not found verbatim" in revise[-1]["content"]
-    for c in calls:
+    haiku, sonnet, *opus = calls  # Haiku 4.5 is a legacy model: a plain structured-output request
+    assert "thinking" not in haiku and "effort" not in haiku["output_config"] and "fallbacks" not in haiku
+    assert haiku["output_config"]["format"]["type"] == "json_schema"
+    for c in (sonnet, *opus):
         assert c["thinking"] == {"type": "adaptive", "display": "summarized"} and c["output_config"]["effort"] == "medium"
-        assert c["fallbacks"] == "default" and c["cache_control"] == {"type": "ephemeral"}
+        assert c["cache_control"] == {"type": "ephemeral"}
+    assert all(c["fallbacks"] == "default" for c in opus) and "fallbacks" not in sonnet
     assert all(m.status == "filled" for m in run.mappings)
     assert {m.slot_id: m for m in run.mappings}["所属部局"].filled_value == "理工学研究科"
     assert run.usage["models"] == [MODEL_HAIKU, MODEL_SONNET, MODEL_OPUS] and run.usage["requests"] == 4
@@ -1688,9 +1695,14 @@ def test_p01_fixed_model_tier_uses_one_current_model_for_every_call(samples_dir,
     run = map_fields(scan(p["form"]).slots, read_memo(p["memo"]), ClaudeEngine(client=client), model_tier=tier)
     calls = client.beta.messages.calls
     assert [c["model"] for c in calls] == [model, model]  # propose + revise
+    adaptive = model_capabilities(model)["adaptive_thinking"]
+    assert adaptive == (tier != "haiku")  # Haiku 4.5 gets neither adaptive thinking nor effort
     for c in calls:
-        assert c["thinking"] == {"type": "adaptive", "display": "summarized"}
-        assert c["output_config"]["effort"] == "medium" and c["output_config"]["format"]["type"] == "json_schema"
+        assert c["output_config"]["format"]["type"] == "json_schema"
+        if adaptive:
+            assert c["thinking"] == {"type": "adaptive", "display": "summarized"} and c["output_config"]["effort"] == "medium"
+        else:
+            assert "thinking" not in c and "effort" not in c["output_config"]
     assert run.usage["models"] == [model] and all(m.status == "filled" for m in run.mappings)
 
 
@@ -2443,7 +2455,7 @@ def test_p3_4_web_ui_ships_the_inspector_tier_selector_claude_tab_walkthrough_an
     html, js, css = (api.get(u).text for u in ("/", "/static/app.js", "/static/styles.css"))
     for needle in ('<html lang="ja"', 'data-lang="ja"', 'id="langToggle"', 'data-lang="en"', 'id="tierSelect"',
                    '<option value="auto" data-t="自動：Haiku / Sonnet / Opus|Auto: Haiku / Sonnet / Opus">',
-                   ">Opus 5.5 only<", ">Sonnet 5.5 only<", ">Haiku 5.5 only<",
+                   ">Opus 5.5 only<", ">Sonnet 5 only<", ">Haiku 4.5 only<",
                    'data-tab="claude"', 'data-bi="Claude Code 連携|Claude Code · Architecture"', 'id="tab-claude"',
                    'id="unmarkedList"', "マーカーなし白紙様式・空欄自動発見|Unmarked blank forms", 'id="discoverBtn"',
                    "🔍 マーカーなし白紙から空欄を自動発見|🔍 Discover blank cells", 'id="discoveryView"', 'id="candRows"',
@@ -2877,10 +2889,10 @@ def test_model_fallback_chain_retries_a_404_model_id_through_the_real_sdk(sample
     from form_guard.mapper import MODEL_FALLBACK_CHAIN
 
     assert MODEL_FALLBACK_CHAIN == {MODEL_OPUS: ("claude-opus-5", "claude-opus-4-6"),
-                                    MODEL_SONNET: ("claude-sonnet-5", "claude-sonnet-4-5"),
-                                    MODEL_HAIKU: ("claude-haiku-4-5-20251001", "claude-haiku-4-5")}
+                                    MODEL_SONNET: ("claude-sonnet-4-5",),
+                                    MODEL_HAIKU: ("claude-haiku-4-5",)}
     p = paths(samples_dir, "form1")
-    unavailable = {MODEL_SONNET, "claude-sonnet-5"}  # this API organisation has neither id
+    unavailable = {MODEL_SONNET}  # this API organisation cannot use claude-sonnet-5
     payloads = [_claude_fields(), _revision_fix()]
     seen: list[dict] = []
 
@@ -2896,16 +2908,15 @@ def test_model_fallback_chain_retries_a_404_model_id_through_the_real_sdk(sample
     client = anthropic.Anthropic(**{"api" + "_key": "mock"}, max_retries=0,
                                  http_client=anthropic.DefaultHttpxClient(transport=httpx2.MockTransport(handler)))
     r = run_pipeline(p["form"], read_memo(p["memo"]), tmp_path / "fb", mode="live", client=client, model_tier="sonnet")
-    assert [b["model"] for b in seen] == [MODEL_SONNET, "claude-sonnet-5", "claude-sonnet-4-5", "claude-sonnet-4-5"]
-    legacy = seen[2]  # the fallback id gets a request built from its own capabilities (no thinking / effort → no 400)
+    assert [b["model"] for b in seen] == [MODEL_SONNET, "claude-sonnet-4-5", "claude-sonnet-4-5"]
+    legacy = seen[1]  # the fallback id gets a request built from its own capabilities (no thinking / effort → no 400)
     assert "thinking" not in legacy and "effort" not in legacy["output_config"] and "fallbacks" not in legacy
     assert seen[0]["thinking"] == {"type": "adaptive", "display": "summarized"}
     usage = r.engine["usage"]
     (fb,) = usage["model_fallbacks"]  # recorded once; the revision went straight to the id that answered
     assert fb["tier"] == "sonnet" and fb["requested_model"] == MODEL_SONNET and fb["used_model"] == "claude-sonnet-4-5"
-    assert fb["unavailable"] == [MODEL_SONNET, "claude-sonnet-5"] and "not_found_error" in fb["reason"]
-    assert [c["attempted_models"] for c in usage["calls"]] == [[MODEL_SONNET, "claude-sonnet-5", "claude-sonnet-4-5"],
-                                                               ["claude-sonnet-4-5"]]
+    assert fb["unavailable"] == [MODEL_SONNET] and "not_found_error" in fb["reason"]
+    assert [c["attempted_models"] for c in usage["calls"]] == [[MODEL_SONNET, "claude-sonnet-4-5"], ["claude-sonnet-4-5"]]
     assert {c["requested_model"] for c in usage["calls"]} == {MODEL_SONNET} and usage["models"] == ["claude-sonnet-4-5"]
     assert r.report.overall_status == "PASS"
     audit = json.loads((tmp_path / "fb" / "audit_log.json").read_text(encoding="utf-8"))
@@ -2925,7 +2936,7 @@ def test_model_fallback_chain_exhausted_is_a_live_engine_error_and_auto_mode_fal
 
     p = paths(samples_dir, "form1")
     client = fake_client_factory([not_found] * 3)
-    with pytest.raises(LiveEngineError, match="none of claude-haiku-5-5, claude-haiku-4-5-20251001, claude-haiku-4-5"):
+    with pytest.raises(LiveEngineError, match="none of claude-haiku-4-5-20251001, claude-haiku-4-5 is available"):
         map_fields(scan(p["form"]).slots, read_memo(p["memo"]), ClaudeEngine(client=client, model_tier="haiku"))
     r = run_pipeline(p["form"], read_memo(p["memo"]), tmp_path / "auto", mode="auto",
                      client=fake_client_factory([not_found] * 9), model_tier="opus")
@@ -3204,7 +3215,9 @@ def test_r1_audit_a1_approve_and_download_require_the_sha256_and_revision_on_scr
     dl = api.get(link)
     assert dl.status_code == 200 and hashlib.sha256(dl.content).hexdigest() == sha
     js = (ROOT / "form_guard" / "static" / "app.js").read_text(encoding="utf-8")
-    assert "filled_sha256: S.run.filled.sha256, revision: S.run.revision" in js  # the approve POST
+    approve_fn = js[js.index("async function onApprove") : js.index("function downloadHref")]
+    assert "const { run_id: runId, revision: rev } = target;" in approve_fn  # the approve POST: what was on screen
+    assert "const sha = target.filled && target.filled.sha256;" in approve_fn and "filled_sha256: sha, revision: rev" in approve_fn
     approval = js[js.index("function downloadHref") : js.index("/* ---", js.index("function renderApproval"))]
     assert "download?filled_sha256=${encodeURIComponent(a.filled_sha256)}" in approval
     assert "&revision=${encodeURIComponent(a.revision)}" in approval and "dl.href = downloadHref(r);" in approval
@@ -3802,3 +3815,559 @@ def test_claude_code_tab_lists_every_hook_stage_and_puts_hooks_and_mcp_first():
     assert "settings.hooks[0]" not in suite and "hooks.map((hk)" in suite  # was: only the first hook (PreToolUse)
     assert "L(hk.when.ja, hk.when.en)" in suite and "hookCmd(hk)" in suite and 'runner} -c "…"' not in suite
     assert 'h("div", { class: "suite-grid" }, hookCard, mcpCard, agentCard, skillCard)' in suite
+
+
+# ===================================================== R1 audit (round 2) fixes
+# One test per approved finding of the second R1 audit (R1-A1 … R1-A15, R1-O2, R1-O4, R1-O8). Each one fails on the
+# code before the fix.
+
+_JAPANESE = re.compile(r"[぀-ヿ㐀-䶿一-鿿！-ﾟ]")  # kana, kanji, full-width forms
+
+
+def _js_function(js: str, name: str) -> str:
+    """The source of a top-level function of app.js (from its declaration to the closing brace in column 0)."""
+    m = re.search(r"^(?:async )?function " + re.escape(name) + r"\(.*?^\}\n", js, re.S | re.M)
+    assert m, name
+    return m.group(0)
+
+
+def _node(tmp_path: Path, name: str, source: str, env=None):
+    """Run a small JavaScript harness with Node.js and return its JSON output — None when Node.js is not installed
+    (it is not a project requirement)."""
+    node = shutil.which("node")
+    if not node:
+        return None
+    script = tmp_path / f"{name}.js"
+    script.write_text(source, encoding="utf-8")
+    proc = subprocess.run([node, str(script)], capture_output=True, timeout=60, env={**os.environ, **(env or {})})
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
+    return json.loads(proc.stdout.decode("utf-8"))
+
+
+# ------------------------------------------- R1-A1 rows that hold designated Excel cells cannot hide changes
+
+
+def _xlsx_with_rows(tmp_path):
+    """A blank sheet with a self-closing empty row 7 (Excel writes such rows) and an empty <sheetData/> sheet; the
+    designated cells fill an existing row (B2), the empty row (B7), a row that does not exist (D9) and the empty
+    sheet (記入!B2)."""
+    raw, mid, src, out = (tmp_path / n for n in ("rows_raw.xlsx", "rows_mid.xlsx", "rows.xlsx", "rows_filled.xlsx"))
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "申請"
+    ws["A1"], ws["A2"], ws["A3"] = "架空の申請書（テスト）", "団体名", "連絡先"
+    ws.row_dimensions[7].height = 24
+    wb.create_sheet("記入")
+    wb.save(raw)
+    surgical_rewrite(raw, mid, "xl/worksheets/sheet1.xml", lambda b: b.replace(
+        b'<row r="7" ht="24" customHeight="1"></row>', b'<row r="7" ht="24" customHeight="1"/>'))
+    surgical_rewrite(mid, src, "xl/worksheets/sheet2.xml", lambda b: b.replace(b"<sheetData></sheetData>", b"<sheetData/>"))
+    assert b'<row r="7" ht="24" customHeight="1"/>' in zipfile.ZipFile(src).read("xl/worksheets/sheet1.xml")
+    assert b"<sheetData/>" in zipfile.ZipFile(src).read("xl/worksheets/sheet2.xml")
+    sc = scan(src, {"targets": [{"slot_id": "団体名", "sheet": 0, "cell": "B2"}, {"slot_id": "連絡先", "sheet": 0, "cell": "B7"},
+                                {"slot_id": "追記", "sheet": 0, "cell": "D9"}, {"slot_id": "記入欄", "sheet": 1, "cell": "B2"}]})
+    values = {"団体名": "架空町内会", "連絡先": "info@example.jp", "追記": "特になし", "記入欄": "テスト"}
+    fill_form(sc, values, out)
+    return sc, out, [human_mapping(sc.slot(k), v) for k, v in values.items()]
+
+
+def test_r1_audit2_a1_rows_and_sheet_data_holding_designated_excel_cells_keep_their_attributes(tmp_path):
+    sc, out, maps = _xlsx_with_rows(tmp_path)
+    s1 = zipfile.ZipFile(out).read("xl/worksheets/sheet1.xml")
+    s2 = zipfile.ZipFile(out).read("xl/worksheets/sheet2.xml")
+    assert b'<row r="7" ht="24" customHeight="1"><c r="B7" t="inlineStr">' in s1  # the empty row was expanded
+    assert b'<row r="9"><c r="D9" t="inlineStr">' in s1 and s2.count(b"<sheetData><row r=\"2\"><c r=\"B2\"") == 1
+    good = verify(sc, out, maps, "")
+    assert good.overall_status == "PASS" and not _failing(good)  # existing, empty and new rows, an empty <sheetData/>
+    row9 = re.search(rb'<row r="9">.*?</row>', s1).group(0)
+    # Before the fix the revert step restored these rows / <sheetData> wholesale: nine of the twelve passed every check,
+    # and the other three (height, row style, extLst child) were caught only indirectly by LAYOUT / APP, never by XML-03.
+    attacks = {
+        "created_row_hidden": ("sheet1", lambda b: b.replace(b'<row r="9">', b'<row r="9" hidden="1">'), "hidden"),
+        "created_row_height": ("sheet1", lambda b: b.replace(b'<row r="9">', b'<row r="9" ht="20" customHeight="1">'), "ht"),
+        "created_row_outline": ("sheet1", lambda b: b.replace(b'<row r="9">', b'<row r="9" outlineLevel="1">'), "outlineLevel"),
+        "created_row_style": ("sheet1", lambda b: b.replace(b'<row r="9">', b'<row r="9" s="1" customFormat="1">'), "customFormat"),
+        "created_row_child": ("sheet1", lambda b: b.replace(b'<row r="9">', b'<row r="9"><extLst/>'), "content other than <c>"),
+        "expanded_row_hidden": ("sheet1", lambda b: b.replace(b'<row r="7" ht="24" customHeight="1">',
+                                                               b'<row r="7" ht="24" customHeight="1" hidden="1">'), "hidden"),
+        "expanded_row_comment": ("sheet1", lambda b: b.replace(b'customHeight="1"><c r="B7"', b'customHeight="1"><!--x--><c r="B7"'),
+                                 "content other than <c>"),
+        "rows_out_of_order": ("sheet1", lambda b: b.replace(row9, b"").replace(b'<row r="7"', row9 + b'<row r="7"'), "ascending order"),
+        "cell_in_another_row": ("sheet1", lambda b: b.replace(b'<row r="9">', b'<row r="8">'), "of another row"),
+        "sheet_data_attribute": ("sheet2", lambda b: b.replace(b"<sheetData>", b'<sheetData fg="1">'), "<sheetData> attributes"),
+        "sheet_data_child": ("sheet2", lambda b: b.replace(b"<sheetData>", b"<sheetData><extLst/>"), "inside <sheetData>"),
+        "sheet_data_row_hidden": ("sheet2", lambda b: b.replace(b'<row r="2">', b'<row r="2" hidden="1">'), "hidden"),
+    }
+    for name, (sheet, fn, needle) in attacks.items():
+        bad = tmp_path / f"a1_{name}.xlsx"
+        surgical_rewrite(out, bad, f"xl/worksheets/{sheet}.xml", fn)
+        assert zipfile.ZipFile(bad).read(f"xl/worksheets/{sheet}.xml") != zipfile.ZipFile(out).read(f"xl/worksheets/{sheet}.xml"), name
+        rep = verify(sc, bad, maps, "")
+        assert "XML-03" in _failing(rep) and rep.overall_status == "FAIL", (name, _failing(rep))
+        assert any(needle in i for i in _cell_issues(rep)), (name, _cell_issues(rep))
+
+
+# ------------------------------------------- R1-A2 hook: folders, wildcards and comment-spoofed generator flags
+
+
+@pytest.mark.parametrize("tool,command", [
+    ("PowerShell", "Remove-Item -LiteralPath samples/blank_forms -Recurse"),
+    ("Bash", "rm -rf samples/blank_forms"),
+    ("Bash", "rm samples/blank_forms/*"),
+    ("Bash", "rm samples/blank_forms/a.docx # form_guard --generate-samples"),  # was allowed: the flag sat in a comment
+    ("Bash", f"rm {TEMPLATE} form_guard --generate-samples"),
+    ("Bash", f"python -m form_guard.cli --generate-samples > {TEMPLATE}"),
+    ("Bash", "rm -rf samples/*"),
+    ("Bash", "rm -rf samples"),
+    ("Bash", "cd samples && rm -rf blank_forms"),
+    ("Bash", "rm -rf ."),
+    ("Bash", "mv samples/blank_forms output/old_forms"),
+    ("Bash", "find . -name '*.docx' -delete"),
+    ("Bash", "ls samples/blank_forms/*.docx | xargs rm"),
+    ("Bash", "git rm -r samples/blank_forms"),
+    ("Bash", "rmdir /s /q samples" + _BS + "blank_forms"),
+    ("Bash", "python -c \"import shutil; shutil.rmtree('samples/blank_forms')\""),
+    ("PowerShell", "Remove-Item -Path samples" + _BS + "blank_forms" + _BS + "* -Force"),
+    ("PowerShell", "Get-ChildItem samples" + _BS + "blank_forms | Remove-Item"),
+])
+def test_r1_audit2_a2_hook_blocks_folder_and_wildcard_deletion_and_comment_spoofed_generator_flags(tool, command):
+    reason = _denied(_hook("PreToolUse", tool, {"command": command}))  # exit code 2 + deny, before the command runs
+    assert "BLOCKED by the Form-Guard template guard" in reason and "--generate-samples" in reason
+
+
+@pytest.mark.parametrize("tool,command", [
+    ("Bash", "python -m form_guard.cli --generate-samples"),
+    ("Bash", ".venv/Scripts/python.exe -X utf8 -m form_guard.cli --regenerate-samples --all-demos"),
+    ("PowerShell", "." + _BS + ".venv" + _BS + "Scripts" + _BS + "python.exe -m form_guard.cli --generate-samples"),
+    ("Bash", "rm -rf output/run1 output/*.tmp"),
+    ("Bash", "find . -name '*.pyc' -delete"),
+    ("PowerShell", "Remove-Item -Recurse -Force output" + _BS + "web_runs"),
+    ("PowerShell", "Get-ChildItem -Recurse -Filter *.pyc | Remove-Item"),
+    ("Bash", "rm samples/blank_forms/form1_research_plan_change.slots.json"),  # slot specs are data, not templates
+])
+def test_r1_audit2_a2_hook_still_allows_the_real_generator_and_ordinary_cleanup(tool, command):
+    proc = _hook("PreToolUse", tool, {"command": command})
+    assert proc.returncode == 0 and proc.stdout == b"", (command, proc.stderr)
+
+
+# ------------------------------------------- R1-A3 a slot spec file must hold a JSON object
+
+
+def test_r1_audit2_a3_a_slot_spec_must_be_a_json_object_and_is_never_opened_as_a_second_path(samples_dir, tmp_path,
+                                                                                             monkeypatch):
+    from form_guard.mcp_server import FormGuardMCP
+    from form_guard.scanner import load_spec
+
+    form = paths(samples_dir, "form1")["form"]
+    outside = tmp_path / "outside" / "real.slots.json"  # what a JSON string in the spec would have pointed at
+    outside.parent.mkdir()
+    outside.write_text(json.dumps({"targets": []}), encoding="utf-8")
+    reads: list[str] = []
+    read_text = Path.read_text
+    monkeypatch.setattr(Path, "read_text", lambda self, *a, **k: (reads.append(self.name), read_text(self, *a, **k))[1])
+    spec = tmp_path / "spec.json"
+    for value, kind in ((str(outside), "string"), ([str(outside)], "array"), (42, "number"), (None, "null"),
+                        (True, "boolean")):
+        spec.write_text(json.dumps(value), encoding="utf-8")
+        reads.clear()
+        with pytest.raises(ValueError, match=f"slot spec JSON must be an object .*a JSON {kind}"):
+            load_spec(form, spec)
+        assert reads == ["spec.json"], value  # before the fix a JSON string was opened as a second spec file
+        with pytest.raises(ValueError, match="must be an object"):
+            scan(form, str(spec))
+    side = tmp_path / "side.docx"
+    shutil.copy(form, side)
+    side.with_suffix(".slots.json").write_text(json.dumps(str(outside)), encoding="utf-8")
+    with pytest.raises(ValueError, match="must be an object"):  # the sidecar is checked the same way
+        scan(side)
+    root = _mcp_root(tmp_path, samples_dir)
+    (root / "evil.json").write_text(json.dumps(str(outside)), encoding="utf-8")
+    srv = FormGuardMCP(root=root)
+    rel = "samples/blank_forms/form1_research_plan_change.docx"
+    reads.clear()
+    for tool, args in (("form_guard_scan", {"form_path": rel}),
+                       ("form_guard_fill", {"form_path": rel, "memo_text": "架空のメモ"}),
+                       ("form_guard_verify", {"original_path": rel, "filled_path": rel})):
+        res = srv.call_tool(tool, {**args, "slot_spec_path": "evil.json"})
+        assert res["isError"] and res["content"][0]["text"] == "slot spec must be a JSON object", tool
+    assert "real.slots.json" not in reads and not (root / "output" / "mcp_runs").exists()
+
+
+# ------------------------------------------- R1-A4 DTD / entity declarations in every Unicode encoding
+
+
+def test_r1_audit2_a4_dtd_and_entity_declarations_are_refused_in_utf16_and_utf32_with_or_without_bom(demo_runs, tmp_path):
+    import codecs
+
+    from form_guard.ziputil import UnsafeArchiveError, check_archive, xml_has_dtd
+
+    dtd = '<?xml version="1.0"?><!DOCTYPE w:document [<!ENTITY x "boom">]><w:document/>'
+    entity = '<?xml version="1.0"?><w:document><!ENTITY x "boom"></w:document>'
+    escaped = '<?xml version="1.0"?><w:document><w:t>&lt;!DOCTYPE x&gt; &lt;!ENTITY y&gt;</w:t></w:document>'
+    encodings = {"utf-8": lambda s: s.encode("utf-8"), "utf-8 BOM": lambda s: codecs.BOM_UTF8 + s.encode("utf-8"),
+                 "utf-16 BOM": lambda s: s.encode("utf-16"), "utf-16-le": lambda s: s.encode("utf-16-le"),
+                 "utf-16-be": lambda s: s.encode("utf-16-be"), "utf-32 BOM": lambda s: s.encode("utf-32"),
+                 "utf-32-le": lambda s: s.encode("utf-32-le"), "utf-32-be": lambda s: s.encode("utf-32-be")}
+    ok = {"[Content_Types].xml": b"<Types/>", "word/document.xml": b"<w:document/>", "word/styles.xml": b"<w:styles/>"}
+    n = 0
+    for label, enc in encodings.items():
+        assert xml_has_dtd(enc(dtd)) and xml_has_dtd(enc(entity)), label  # before the fix: BOM-less and UTF-32 missed
+        assert not xml_has_dtd(enc(escaped)), label  # escaped text inside an element is content, not a declaration
+        for part in ("word/document.xml", "word/styles.xml", "customXml/item1.xml"):  # main and auxiliary parts
+            n += 1
+            with pytest.raises(UnsafeArchiveError, match="DTD / entity"):
+                check_archive(_zip_with(tmp_path / f"a4_{n}.docx", {**ok, part: enc(dtd)}))
+        n += 1
+        assert len(check_archive(_zip_with(tmp_path / f"a4_{n}.docx", {**ok, "word/styles.xml": enc(escaped)}))) == 3
+    with pytest.raises(UnsafeXMLError):  # a target part read by the byte-exact indexer, BOM-less UTF-16
+        index_part("word/document.xml", dtd.encode("utf-16-le"), "word")
+    with pytest.raises(UnsupportedXMLError, match="UTF-16 / UTF-32"):
+        index_part("word/document.xml", f'<w:document xmlns:w="{W}"/>'.encode("utf-32-be"), "word")
+    r = demo_runs("form1")  # a filled copy whose auxiliary styles.xml became a BOM-less UTF-16 DTD fails ZIP-01
+    bad = tmp_path / "a4_filled.docx"
+    rewrite_entry(r.filled_path, bad, "word/styles.xml", lambda d: dtd.encode("utf-16-be"))
+    rep = verify(r.scan, bad, r.mappings, r.memo_text)
+    assert rep.overall_status == "FAIL" and "DTD / entity" in check(rep, "ZIP-01").details
+
+
+# ------------------------------------------- R1-A5 an approval answer is bound to the run it was sent for
+
+
+def test_r1_audit2_a5_on_approve_never_attaches_an_answer_to_another_run_or_revision(tmp_path):
+    js = (ROOT / "form_guard" / "static" / "app.js").read_text(encoding="utf-8")
+    fn = _js_function(js, "onApprove")
+    assert fn.index("const target = S.run;") < fn.index("await api(")  # what is on screen is captured first
+    assert "filled_sha256: sha, revision: rev" in fn and "S.run.filled.sha256" not in fn.split("const same")[0]
+    assert fn.index("if (same())") < fn.index("S.run.approval = res;")
+    assert "e.status === 409 && S.run && S.run.run_id === runId" in fn
+    assert "if (S.run && S.run.run_id === runId) setRun(fresh, false);" in fn
+    harness = """
+const L = (ja, en) => ja;
+const JSON_HEADERS = {};
+const $ = () => ({ value: " 架空 花子 " });
+let rendered = 0, setRuns = 0, script = [];
+const renderHitl = () => { rendered += 1; };
+const toast = () => {};
+const S = { run: null, checked: new Set(["i1"]) };
+const setRun = (r) => { setRuns += 1; S.run = r; };
+async function api(path, opts) { return script.shift()(path, opts); }
+const stale = () => Object.assign(new Error("stale"), { status: 409, body: {} });
+const runA = () => ({ run_id: "A", revision: 0, filled: { sha256: "aa" } });
+const runB = () => ({ run_id: "B", revision: 0, filled: { sha256: "bb" } });
+""" + fn + """
+(async () => {
+  const out = {};
+  let sent = null;
+  S.run = runA(); rendered = 0;  // the reviewer opens another document while the request is in flight
+  script = [(p, o) => { sent = { path: p, body: JSON.parse(o.body) }; S.run = runB(); return { approved: true }; }];
+  await onApprove(); out.switched = { sent, approval: S.run.approval || null, rendered, run: S.run.run_id };
+  S.run = runA(); rendered = 0;  // an edit created a new revision meanwhile
+  script = [() => { S.run = { ...S.run, revision: 1, filled: { sha256: "a1" } }; return { approved: true }; }];
+  await onApprove(); out.revised = { approval: S.run.approval || null, rendered };
+  S.run = runA(); rendered = 0;  // nothing changed: the approval is shown
+  script = [() => ({ approved: true })];
+  await onApprove(); out.same = { approval: S.run.approval || null, rendered };
+  S.run = runA(); setRuns = 0;  // 409 after the reviewer switched documents: the old run is not reloaded over it
+  script = [() => { S.run = runB(); throw stale(); }];
+  await onApprove(); out.stale_other = { setRuns, left: script.length, run: S.run.run_id };
+  S.run = runA(); setRuns = 0;  // 409 on the same document: reload it
+  let reloaded = null;
+  script = [() => { throw stale(); }, (p) => { reloaded = p; return { run_id: "A", revision: 1, filled: { sha256: "a1" } }; }];
+  await onApprove(); out.stale_same = { setRuns, reloaded, revision: S.run.revision };
+  S.run = runA(); setRuns = 0;  // 409, but the reviewer switches documents while the reload is in flight
+  script = [() => { throw stale(); }, () => { S.run = runB(); return { run_id: "A", revision: 1 }; }];
+  await onApprove(); out.stale_reload_switched = { setRuns, run: S.run.run_id };
+  process.stdout.write(JSON.stringify(out));
+})();
+"""
+    out = _node(tmp_path, "on_approve", harness)
+    if out is None:
+        return  # Node.js is optional; the source checks above still ran
+    assert out["switched"]["sent"] == {"path": "/api/runs/A/approve", "body": {
+        "reviewer": "架空 花子", "checked": ["i1"], "filled_sha256": "aa", "revision": 0}}
+    assert out["switched"]["approval"] is None and out["switched"]["rendered"] == 0 and out["switched"]["run"] == "B"
+    assert out["revised"] == {"approval": None, "rendered": 0}
+    assert out["same"] == {"approval": {"approved": True}, "rendered": 1}
+    assert out["stale_other"] == {"setRuns": 0, "left": 0, "run": "B"}
+    assert out["stale_same"] == {"setRuns": 1, "reloaded": "/api/runs/A", "revision": 1}
+    assert out["stale_reload_switched"] == {"setRuns": 0, "run": "B"}
+
+
+# ------------------------------------------- R1-A6 a live call that fails part-way keeps its usage on record
+
+
+def test_r1_audit2_a6_a_live_run_that_fails_part_way_keeps_its_calls_and_tokens(samples_dir, fake_client_factory,
+                                                                               tmp_path):
+    p = paths(samples_dir, "form1")
+    memo = read_memo(p["memo"])
+    refusal = lambda kw: fake_message({}, "refusal", "cyber", model=kw["model"])  # noqa: E731 - answered, then declined
+    client = fake_client_factory([echo_model(_claude_fields()), refusal])  # Haiku answers, then Sonnet declines
+    r = run_pipeline(p["form"], memo, tmp_path / "partial", mode="auto", client=client)
+    usage = r.engine["usage"]
+    assert r.engine["mode"] == "demo" and "declined" in r.engine["fallback_reason"]
+    assert usage["live_attempt_failed"] is True and usage["requests"] == 2  # before the fix: the offline engine's 0
+    assert (usage["input_tokens"], usage["output_tokens"]) == (2400, 600)
+    assert [c["served_model"] for c in usage["calls"]] == [MODEL_HAIKU, MODEL_SONNET] == usage["models"]
+    assert usage["model_fallbacks"] == [] and all(rt.get("planned_in_live_auto") for rt in usage["routing"])
+    assert r.report.overall_status == "PASS"  # the offline engine produced every value
+    html = (tmp_path / "partial" / "report.html").read_text(encoding="utf-8")
+    assert "Live Claude API calls were made before the live run failed: 2 call(s), 2,400 input / 600 output tokens" in html
+    assert "ライブの Claude API を 2 回呼び出した後で失敗しました" in html
+    assert "no model was called" not in html and "モデルは呼び出していません" not in html
+    audit = json.loads((tmp_path / "partial" / "audit_log.json").read_text(encoding="utf-8"))
+    assert audit["engine"]["usage"]["live_attempt_failed"] and len(audit["engine"]["usage"]["calls"]) == 2
+    clean = run_pipeline(p["form"], memo, tmp_path / "offline", mode="demo")  # an offline run still says so plainly
+    assert "live_attempt_failed" not in clean.engine["usage"]
+    assert "no model was called" in (tmp_path / "offline" / "report.html").read_text(encoding="utf-8")
+    js = (ROOT / "form_guard" / "static" / "app.js").read_text(encoding="utf-8")
+    fn = _js_function(js, "liveFailure")
+    for caller in ("renderEngineBadge", "routeBlock", "runLanes"):
+        assert "liveFailure(" in _js_function(js, caller), caller
+    out = _node(tmp_path, "live_failure", fn + """
+process.stdout.write(JSON.stringify([
+  liveFailure({ engine: { mode: "demo", fallback_reason: "x", usage: { live_attempt_failed: true, requests: 2 } } }),
+  liveFailure({ engine: { mode: "demo", fallback_reason: "x", usage: { requests: 0 } } }),
+  liveFailure({ engine: { mode: "demo", usage: { routing: [] } } }),
+  liveFailure({ engine: { mode: "live", usage: { requests: 4 } } }),
+]));
+""")
+    if out is not None:
+        assert out == [{"live_attempt_failed": True, "requests": 2}, None, None, None]
+
+
+def test_r1_audit2_a6_discovery_records_the_served_model_and_keeps_the_usage_of_a_failed_classification(
+        samples_dir, fake_client_factory):
+    anthropic = pytest.importorskip("anthropic")
+    httpx2 = pytest.importorskip("httpx2")
+
+    def not_found(kwargs):
+        req = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+        body = {"type": "error", "error": {"type": "not_found_error", "message": f"model: {kwargs['model']}"}}
+        raise anthropic.NotFoundError(f"model: {kwargs['model']}", response=httpx2.Response(404, request=req, json=body),
+                                      body=body)
+
+    form = unmarked(samples_dir, "form4")["form"]
+    rules = discover_blank_cells(form)
+    verdicts = {"cells": [{"candidate_id": c["candidate_id"], "role": "applicant_fillable", "reason": "label"}
+                          for c in rules["candidates"]]}
+    client = fake_client_factory([not_found, echo_model(verdicts)])  # the Haiku tier id is unavailable: 404 fallback
+    d = discover_blank_cells(form, mode="live", client=client)
+    assert [c["model"] for c in client.beta.messages.calls] == [MODEL_HAIKU, "claude-haiku-4-5"]
+    assert d["engine"]["model"] == "claude-haiku-4-5" and d["engine"]["label"] == "rules + Claude (claude-haiku-4-5)"
+    assert {c["classified_by"] for c in d["candidates"]} == {"rules + claude-haiku-4-5"}  # was: the requested id
+    assert d["engine"]["usage"]["model_fallbacks"][0]["used_model"] == "claude-haiku-4-5" and "live_usage" not in d
+    refused = discover_blank_cells(form, mode="auto", client=fake_client_factory([fake_message({}, "refusal", model=MODEL_HAIKU)]))
+    assert "declined" in refused["engine"]["fallback_reason"] and refused["candidates"] == rules["candidates"]
+    live = refused["live_usage"]  # the call the API answered (and billed) before declining stays on record
+    assert live["requests"] == 1 and (live["input_tokens"], live["output_tokens"]) == (1200, 300)
+    assert [c["served_model"] for c in live["calls"]] == [MODEL_HAIKU] and "live_usage" not in refused["engine"]
+    assert "live_usage" not in rules
+
+
+# ------------------------------------------- R1-A7 ensure_samples never overwrites an existing sample file
+
+
+def test_r1_audit2_a7_ensure_samples_only_fills_in_missing_files(tmp_path):
+    from form_guard.samples import BUILDERS, MEMOS, NAIVE_BUILDERS, ensure_samples
+
+    base = tmp_path / "samples"
+    generate_samples(base)  # forms, slot specs, memos, naive files and the comparison pages
+    form = base / "blank_forms" / DEMOS[0]["form"]
+    memo = base / "memos" / DEMOS[0]["memo"]
+    form.write_bytes(form.read_bytes() + b"\0edited by a person")
+    memo.write_text("（人が書き換えた架空のメモ）\n", encoding="utf-8")
+    (base / "broken_before" / "comparison_form1.html").write_text("<p>edited</p>", encoding="utf-8")
+    before = {p.relative_to(base): p.read_bytes() for p in base.rglob("*") if p.is_file()}
+    missing = base / "broken_before" / DEMOS[1]["naive"]
+    missing.unlink()
+    assert ensure_samples(base) == base
+    after = {p.relative_to(base): p.read_bytes() for p in base.rglob("*") if p.is_file()}
+    assert set(after) == set(before)  # the deleted file came back, nothing else was added
+    assert [k for k in before if after[k] != before[k]] == []  # before the fix every form and memo was regenerated
+    assert after[missing.relative_to(base)] == NAIVE_BUILDERS[DEMOS[1]["naive"]]()
+    assert generate_samples(base, with_comparisons=False, overwrite=False) == {}  # nothing is missing any more
+    generate_samples(base, with_comparisons=False)  # an explicit --generate-samples still rebuilds everything
+    assert form.read_bytes() == BUILDERS[form.name]() and memo.read_text(encoding="utf-8") == MEMOS[memo.name]
+
+
+# ------------------------------------------- R1-A8 human-entered values are counted apart from AI values
+
+
+def test_r1_audit2_a8_filled_tiles_separate_ai_values_with_quotes_from_reviewer_entries(demo_runs):
+    import copy
+
+    d = demo_runs("form2").to_dict(include_previews=False)
+    ai = sum(1 for m in d["mappings"] if m["status"] == "filled")
+    page = build_report_html(d)
+    assert "fields filled (verbatim source) / 記入済み（原文照合済み）" in page and "・人の入力" not in page
+    assert "ungrounded AI claims / AI記入値の根拠違反" in page and "ungrounded claims / 根拠なし" not in page
+    edited = copy.deepcopy(d)
+    m = next(x for x in edited["mappings"] if x["slot_id"] == "法人番号")
+    m.update(status="human_entered", filled_value="1234567890123")  # typed by the reviewer: no memo quote
+    page = build_report_html(edited)
+    assert f"{ai + 1}/{len(d['mappings'])}" in page
+    assert f"fields filled / 記入済み（AI原文照合 {ai}・人の入力 1）" in page and "（原文照合済み）" not in page
+    js = (ROOT / "form_guard" / "static" / "app.js").read_text(encoding="utf-8")
+    kpis = _js_function(js, "renderKpis")
+    assert 'const aiFilled = r.mappings.filter((m) => m.status === "filled").length;' in kpis
+    assert 'const humanFilled = r.mappings.filter((m) => m.status === "human_entered").length;' in kpis
+    assert ("L(`AI記入（原文照合済み）${aiFilled}件・人の入力（本人確認）${humanFilled}件`, "
+            "`${aiFilled} AI (verbatim source) · ${humanFilled} human-entered`)") in kpis
+    assert kpis.index("humanFilled > 0") < kpis.index('L("すべて原文の根拠付き", "each with a verbatim source")')
+    assert 'L("AI記入値の根拠違反", "ungrounded AI values")' in kpis and "values without evidence" not in kpis
+
+
+# ------------------------------------------- R1-A10 the English UI shows no Japanese UI strings
+
+
+def test_r1_audit2_a10_english_flag_labels_edit_controls_and_steps_have_no_japanese():
+    from form_guard.verifier import _FLAG_TEXT
+
+    js = (ROOT / "form_guard" / "static" / "app.js").read_text(encoding="utf-8")
+    html = (ROOT / "form_guard" / "static" / "index.html").read_text(encoding="utf-8")
+    start = js.index("const FLAG = {")
+    block = js[start : js.index("};", start)]
+    pairs = re.findall(r'(\w+): \["([^"]+)", "([^"]+)"\]', block)
+    assert len(pairs) == block.count(": [") and set(_FLAG_TEXT) | {"needs_input", "has_suggestion"} <= {k for k, _, _ in pairs}
+    for key, ja, en in pairs:  # before the fix each flag was one "和暦に変換 · to 和暦" string in both languages
+        assert _JAPANESE.search(ja) and not _JAPANESE.search(en), (key, en)
+    assert "const flagText = (f) => (FLAG[f] ? L(...FLAG[f]) : f);" in js and "FLAG[f] || f" not in js
+    for snippet in ('L("値を入力", "Enter value")', 'L("値を修正", "Correct this value")', 'L("値を保存", "Save edit")',
+                    'L("✎ 値を修正", "✎ Edit value")'):
+        assert snippet in js, snippet
+    for old in ("値を入力 · Enter value", "Save edit / 値を修正", "✎ 値を修正 / Edit value", "Correct this value · 値を修正"):
+        assert old not in js, old
+    step = re.search(r'data-t="欄と印刷ルール（字数・和暦・上限）を読む\|([^"]+)"', html).group(1)
+    assert step == "find fields and printed rules (character limits, Japanese era dates, caps)" and not _JAPANESE.search(step)
+
+
+# ------------------------------------------- R1-A11 / R1-O4 wording that matches what the checks show
+
+
+def test_r1_audit2_a11_o4_wording_is_not_absolute_and_the_per_form_tile_never_reads_as_a_failure(tmp_path):
+    html = (ROOT / "form_guard" / "static" / "index.html").read_text(encoding="utf-8")
+    js = (ROOT / "form_guard" / "static" / "app.js").read_text(encoding="utf-8")
+    readme = " ".join((ROOT / "README.md").read_text(encoding="utf-8").split())
+    for claim in ("数学的に証明", 'proves "form invariance"', "ごと様式が壊れる", "生成AIに頼むと様式ごと作り直され",
+                  "proves with 21 deterministic checks", "「他は何も変わっていない」ことを証明"):
+        assert claim not in html, claim
+    for text in ("文書を再生成する方式では、罫線・結合セル・定型文・用紙サイズが変わってしまうことがあります（画面の比較例は失敗を再現した模擬データです）。",
+                 "Methods that re-generate the document can alter borders, merged cells, boilerplate text and page setup "
+                 "(the comparison file is a simulated reproduction of those failures).",
+                 "21項目の決定論的検査（描画のずれ・セルのはみ出しを検出した場合は VIS-01 を追加）＋視覚 Diff＋原文ハイライト＋人間承認ゲートで"
+                 "指定欄以外の変更を検査します。Word / Excel 実機での表示・印刷と記入内容の最終確認は人が行います。",
+                 "checks for any change outside the designated fields with 21 deterministic checks (plus VIS-01 if layout "
+                 "drift or overflow is detected), a visual diff, source highlighting and a human approval gate. Final "
+                 "display/print review in Word or Excel and fact sign-off stay with a person.",
+                 "文書ごと作り直す方式では罫線・結合セル・定型文が変わることがあり",
+                 "21項目の決定論的検査で指定欄以外の変更を検査。各値に原文の根拠を示し、人が確認するまでダウンロードをロックします。"
+                 "Word / Excel での表示と内容の最終確認は人が行います。"):
+        assert text in html, text
+    assert "**re-creates the document**, so merged cells split" not in readme and "置くだけで、AIアシスタント" not in readme
+    assert "and a re-created document can split merged cells, lose borders, paraphrase legal text" in readme
+    assert "（付属の比較用ファイルは、こうした失敗を再現した模擬データです）" in readme
+    assert 'join("/")} 項目合格' not in js and "checksPerFormText(t)" in js  # was: 「全様式で 21/22 項目合格」
+    out = _node(tmp_path, "checks_per_form", "const S = { lang: \"ja\" };\nconst L = (ja, en) => (S.lang === \"en\" ? en : ja);\n"
+                + _js_function(js, "checksPerFormText") + """
+const one = { checks_per_form: [21], all_checks_passed: true }, two = { checks_per_form: [21, 22], all_checks_passed: true };
+const out = { one: checksPerFormText(one), two: checksPerFormText(two), fail: checksPerFormText({ ...one, all_checks_passed: false }) };
+S.lang = "en"; out.one_en = checksPerFormText(one); out.two_en = checksPerFormText(two);
+process.stdout.write(JSON.stringify(out));
+""")
+    if out is not None:
+        assert out == {"one": "全様式で全 21 項目合格", "two": "全様式で全項目合格（様式により 21〜22 項目）",
+                       "fail": "不合格の検査あり（様式あたり 21 項目）", "one_en": "all 21 checks passed on every form",
+                       "two_en": "all checks passed on every form (21–22 per form)"}
+
+
+# ------------------------------------------- R1-A12 timestamps in Asia/Tokyo with the weekday
+
+
+def test_r1_audit2_a12_timestamps_are_shown_in_tokyo_time_with_the_weekday(demo_runs, tmp_path):
+    from datetime import datetime
+
+    from form_guard.report import JST, _format_jst_with_weekday
+
+    for stamp in ("2026-11-02T21:11:00+00:00", "2026-11-02T21:11:00Z", "2026-11-03T06:11:00+09:00",
+                  "2026-11-02T16:11:00-05:00"):
+        assert _format_jst_with_weekday(stamp) == "2026-11-03（火）06:11 JST (Tue)", stamp
+    assert _format_jst_with_weekday("2026-11-08T10:59:59.5+00:00") == "2026-11-08（日）19:59 JST (Sun)"
+    local = datetime(2026, 11, 2, 21, 11).astimezone().astimezone(JST)  # a naive timestamp is local time
+    assert _format_jst_with_weekday("2026-11-02T21:11:00").startswith(f"{local:%Y-%m-%d}（{'月火水木金土日'[local.weekday()]}）{local:%H:%M}")
+    assert _format_jst_with_weekday("not a date") == "not a date"
+    d = demo_runs("form1").to_dict(include_previews=False)
+    d["created_at"] = "2026-11-02T21:11:00+00:00"
+    assert "verification report · 2026-11-03（火）06:11 JST (Tue)</div>" in build_report_html(d)
+    assert d["created_at"] == "2026-11-02T21:11:00+00:00"  # the JSON keeps the ISO timestamp
+    js = (ROOT / "form_guard" / "static" / "app.js").read_text(encoding="utf-8")
+    assert "fmtDateWithWeekday(r.approval.approved_at)" in _js_function(js, "renderApproval")
+    harness = "const S = { lang: \"ja\" };\nconst L = (ja, en) => (S.lang === \"en\" ? en : ja);\n" + \
+        _js_function(js, "fmtDateWithWeekday") + """
+const out = { ja: fmtDateWithWeekday("2026-11-02T21:11:00+00:00"), z: fmtDateWithWeekday("2026-11-02T21:11:00Z"),
+              sunday: fmtDateWithWeekday("2026-11-08T10:59:59+00:00"), bad: fmtDateWithWeekday("not a date") };
+S.lang = "en"; out.en = fmtDateWithWeekday("2026-11-02T21:11:00+00:00");
+process.stdout.write(JSON.stringify(out));
+"""
+    out = _node(tmp_path, "jst", harness, env={"TZ": "America/Los_Angeles"})  # independent of the browser's zone
+    if out is not None:
+        assert out == {"ja": "2026-11-03（火）06:11 JST", "z": "2026-11-03（火）06:11 JST",
+                       "sunday": "2026-11-08（日）19:59 JST", "bad": "not a date", "en": "2026-11-03 (Tue) 06:11 JST"}
+
+
+# ------------------------------------------- R1-O2 current model ids everywhere
+
+
+def test_r1_audit2_o2_no_retired_model_ids_or_names_anywhere_in_the_repository():
+    retired = re.compile("|".join(["sonnet-5" + "-5", "haiku-5" + "-5", r"Sonnet 5\." + "5", r"Haiku 5\." + "5"]))
+    listed = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, timeout=60)
+    files = [ROOT / n for n in listed.stdout.decode("utf-8").split("\0") if n] if listed.returncode == 0 else \
+        [p for d in ("form_guard", "tests", "docs", "scripts", ".claude") for p in (ROOT / d).rglob("*") if p.is_file()]
+    text_files = [p for p in files if p.suffix.lower() in (".py", ".md", ".js", ".html", ".css", ".json", ".toml", ".txt")]
+    assert len(text_files) > 20
+    hits = [p.relative_to(ROOT).as_posix() for p in text_files if p.is_file() and retired.search(p.read_text(encoding="utf-8"))]
+    assert hits == []
+    html = (ROOT / "form_guard" / "static" / "index.html").read_text(encoding="utf-8")
+    assert 'data-t="Sonnet 5 のみ|Sonnet 5 only"' in html and 'data-t="Haiku 4.5 のみ|Haiku 4.5 only"' in html
+
+
+# ------------------------------------------- R1-A14 the report is read under the run's lock
+
+
+def test_r1_audit2_a14_the_report_is_read_under_the_runs_lock(api):
+    import threading
+
+    run = api.post("/api/runs", json={"demo_id": "form1", "mode": "demo"}).json()
+    st = api.app.state.store.runs[run["run_id"]]
+    held, released = threading.Event(), threading.Event()
+
+    def hold():  # an edit in progress holds the lock while it rewrites report.html
+        with st.lock:
+            held.set()
+            time.sleep(0.4)
+            released.set()
+
+    t = threading.Thread(target=hold)
+    t.start()
+    assert held.wait(5)
+    resp = api.get(f"/api/runs/{run['run_id']}/report")
+    answered_after_release = released.is_set()  # read before joining the holder thread
+    t.join(5)
+    assert resp.status_code == 200 and "<html" in resp.text
+    assert answered_after_release  # before the fix the page was read while the edit still held the lock
+
+
+# ------------------------------------------- R1-A15 / R1-O8 installing the Claude Code setup, subagent Bash limits
+
+
+def test_r1_audit2_a15_o8_docs_say_how_to_install_the_claude_code_setup_and_what_limits_subagent_bash():
+    agent = (ROOT / ".claude" / "agents" / "field-mapper.md").read_text(encoding="utf-8")
+    assert "would write, move or delete a blank template under `samples/blank_forms/`." in agent
+    readme = " ".join((ROOT / "README.md").read_text(encoding="utf-8").split())
+    doc = " ".join((ROOT / "docs" / "BUILT_WITH_CLAUDE_CODE.md").read_text(encoding="utf-8").split())
+    for text in (readme, doc):
+        assert "pip install -r requirements.txt" in text and "from the repository root" in text
+        assert "point `.mcp.json` and `.claude/settings.json` at" in text and "is not enough" in text
+        assert "which blocks any write, move or deletion targeting `samples/blank_forms/`" in text
+        assert "置くだけでは" in text and "リポジトリ直下から" in text
+    assert "can drop `.mcp.json` and `.claude/` into their document folder" not in readme
+    assert "the others use `Bash` solely for read-only verification commands" not in doc

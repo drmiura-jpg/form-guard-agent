@@ -474,8 +474,8 @@ TIER_OF_MODEL = {model: tier for tier, model in TIER_MODELS.items()}
 # both the requested tier model and the id that actually served each call.
 MODEL_FALLBACK_CHAIN: dict[str, tuple[str, ...]] = {
     MODEL_OPUS: ("claude-opus-5", "claude-opus-4-6"),
-    MODEL_SONNET: ("claude-sonnet-5", "claude-sonnet-4-5"),
-    MODEL_HAIKU: ("claude-haiku-4-5-20251001", "claude-haiku-4-5"),
+    MODEL_SONNET: ("claude-sonnet-4-5",),
+    MODEL_HAIKU: ("claude-haiku-4-5",),
 }
 STRUCTURED_FORMATS = ("wareki_date", "date", "wareki_period", "digits", "pattern", "choice")
 LONG_TEXT_CHARS = 150  # a printed limit this long means long free text even when the memo passage cannot be located
@@ -848,7 +848,7 @@ class ClaudeEngine:
             self._route_of.setdefault(sid, []).append((served, task, reasons.get(sid, ""), note))
 
     def field_route(self, slot_id: str) -> tuple[str, str]:
-        """(routed_model, route_reason): e.g. ("claude-haiku-5-5 → claude-opus-5-5 (revision)",
+        """(routed_model, route_reason): e.g. ("claude-haiku-4-5-20251001 → claude-opus-5-5 (revision)",
         "structured field (wareki_date); then self-correction after validator rejection")."""
         steps = self._route_of.get(slot_id) or []
         if not steps:

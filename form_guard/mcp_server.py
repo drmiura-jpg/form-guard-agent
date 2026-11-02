@@ -335,9 +335,12 @@ class FormGuardMCP:
         if not args.get("slot_spec_path"):
             return None
         try:
-            return json.loads(self._path(args["slot_spec_path"], "slot_spec_path").read_text(encoding="utf-8"))
+            data = json.loads(self._path(args["slot_spec_path"], "slot_spec_path").read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             raise ToolError(f"slot spec is not valid JSON: {exc}") from exc
+        if not isinstance(data, dict):  # a JSON string would otherwise be opened as a second, unchecked path
+            raise ToolError("slot spec must be a JSON object")
+        return data
 
     def _samples_dir(self) -> Path:
         from .samples import default_samples_dir

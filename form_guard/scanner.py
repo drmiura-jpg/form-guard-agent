@@ -17,6 +17,7 @@ the constraints printed on the form (character limits, formats, option lists).
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import html
 import json
@@ -103,14 +104,23 @@ class ScanResult:
         return str(self.spec.get("form_title") or self.path.stem)
 
 
+def _spec_object(path: Path) -> dict:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):  # a JSON string is data, never a second path to open
+        kind = {str: "string", list: "array", bool: "boolean", int: "number", float: "number"}.get(type(data), "null")
+        raise ValueError(f"slot spec JSON must be an object ({path.name} holds a JSON {kind})")
+    return data
+
+
 def load_spec(form_path: Path, spec: Union[dict, str, Path, None]) -> dict:
+    """The slot spec as a dict: given directly, read from a .json path, or the form's sidecar <form>.slots.json."""
     if isinstance(spec, dict):
         return spec
     if spec:
-        return json.loads(Path(spec).read_text(encoding="utf-8"))
+        return _spec_object(Path(spec))
     side = form_path.with_suffix(".slots.json")
     if side.exists():
-        return json.loads(side.read_text(encoding="utf-8"))
+        return _spec_object(side)
     return {}
 
 
@@ -950,10 +960,12 @@ def discover_blank_cells(path: Union[str, Path], mode: str = "demo", client: Any
         }
         candidates.append(cand)
     engine = _classify_with_claude(candidates, _package_title(path), mode, client, model_tier)
+    # a live classification that failed after the API answered: its calls and tokens stay on record
+    live_usage = engine.pop("live_usage", None)
     rejected = [{"location": c.location, "evidence_label": c.label_text, "reason": c.rejected, **c.coords,
                  "merged_range": c.merged_range} for c in found if c.rejected]
     n_office = sum(1 for c in candidates if c["office_only"])
-    return {
+    discovery = {
         "schema": "form-guard/blank-cell-discovery@1",
         "form": path.name,
         "form_title": _package_title(path),
@@ -975,6 +987,9 @@ def discover_blank_cells(path: Union[str, Path], mode: str = "demo", client: Any
         "next_step": ("A human reviewer confirms the cells to fill; build_confirmed_slot_spec() (CLI: --discovery FILE "
                       "--confirm c01,c02 | recommended) re-checks the blank form's SHA-256 and writes the slot spec."),
     }
+    if live_usage is not None:  # stage 2 fell back to the rules: the API calls made before the failure stay on record
+        discovery["live_usage"] = live_usage
+    return discovery
 
 
 UNCLASSIFIED_REASON = "not classified by the model (missing or duplicated in its answer) — never recommended"
@@ -1004,8 +1019,11 @@ def _classify_with_claude(candidates: list[dict[str, Any]], title: str, mode: st
     except LiveEngineError as exc:
         if requested == "live":
             raise
-        return {**rules, "label": rules["label"] + " — live classification failed", "fallback_reason": str(exc)}
-    model = engine.model_for("classify")
+        return {**rules, "label": rules["label"] + " — live classification failed", "fallback_reason": str(exc),
+                "live_usage": copy.deepcopy(getattr(engine, "usage", {}))}  # any call the API answered is kept
+    calls = engine.usage.get("calls") or []
+    # the id the API served (a 404 fallback or a server-side fallback can differ from the requested tier model)
+    model = (calls[-1].get("served_model") or calls[-1].get("model") if calls else None) or engine.model_for("classify")
     known = [c["candidate_id"] for c in candidates]
     counts = Counter(str(e.get("candidate_id")) for e in entries)
     verdicts = {str(e.get("candidate_id")): e for e in entries if counts[str(e.get("candidate_id"))] == 1}

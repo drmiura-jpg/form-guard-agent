@@ -4,12 +4,43 @@ from __future__ import annotations
 
 import html
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from .verifier import flag_label
 
 E = html.escape
+JST = timezone(timedelta(hours=9), "JST")
+_WEEKDAYS = ("月火水木金土日", ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"))
+
+
+def _format_jst_with_weekday(iso_str: str) -> str:
+    """An ISO timestamp (``Z``, an offset, or naive = local time) in Asia/Tokyo with the weekday:
+    ``2026-11-02T21:11:00+00:00`` → ``2026-11-03（火）06:11 JST (Tue)``. Anything unparsable is returned as is."""
+    try:
+        dt = datetime.fromisoformat(str(iso_str).strip().replace("Z", "+00:00"))
+    except ValueError:
+        return str(iso_str)
+    if dt.tzinfo is None:
+        dt = dt.astimezone()  # a naive timestamp is local time
+    j = dt.astimezone(JST)
+    return f"{j:%Y-%m-%d}（{_WEEKDAYS[0][j.weekday()]}）{j:%H:%M} JST ({_WEEKDAYS[1][j.weekday()]})"
+
+
+def live_failure_note(eng: dict[str, Any]) -> str:
+    """Bilingual note for a live run that failed after the API had answered (the values then come from the offline
+    engine), or "" — so a report never claims that no model was called when calls were made and billed."""
+    usage = eng.get("usage") or {}
+    n = int(usage.get("requests") or 0)
+    if not (usage.get("live_attempt_failed") or (eng.get("fallback_reason") and n > 0)):
+        return ""
+    tin, tout = int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0)
+    models = ", ".join(usage.get("models") or [])
+    return (f"Live Claude API calls were made before the live run failed: {n} call(s), {tin:,} input / {tout:,} output "
+            f"tokens{f', served by {models}' if models else ''}. Every value below comes from the offline engine. ｜ "
+            f"ライブの Claude API を {n} 回呼び出した後で失敗しました（入力 {tin:,} / 出力 {tout:,} トークン"
+            f"{f'、応答モデル {models}' if models else ''}）。記入値はすべてオフラインエンジンの結果です。")
 
 CSS = """
 :root{--bg:#f6f7f9;--card:#fff;--ink:#14171c;--muted:#5b6472;--line:#e3e6ea;--ok:#047857;--okbg:#ecfdf5;
@@ -82,7 +113,11 @@ def build_report_html(d: dict[str, Any]) -> str:
     naive = d.get("naive_report")
     slots = {s["slot_id"]: s for s in d["slots"]}
     maps = d["mappings"]
-    filled = sum(1 for m in maps if m["status"] in ("filled", "human_entered"))
+    ai_filled = sum(1 for m in maps if m["status"] == "filled")
+    human_filled = sum(1 for m in maps if m["status"] == "human_entered")  # attested by the reviewer, no memo quote
+    filled = ai_filled + human_filled
+    filled_label = (f"fields filled / 記入済み（AI原文照合 {ai_filled}・人の入力 {human_filled}）" if human_filled
+                    else "fields filled (verbatim source) / 記入済み（原文照合済み）")
     pending = [m for m in maps if m["status"] == "needs_human_input"]
     untouched = [e for e in rep["entry_hashes"] if e["role"] == "untouched"]
     # count only parts that really are byte-identical (content and raw compressed stream)
@@ -130,6 +165,8 @@ def build_report_html(d: dict[str, Any]) -> str:
                      f"<div class='card'>{_checks_table(naive['checks'])}</div>"
     eng = d["engine"]
     fb = f" — <b>fallback:</b> {E(eng['fallback_reason'])}" if eng.get("fallback_reason") else ""
+    live_failed = live_failure_note(eng)
+    live_html = f"<p class='muted'>⚠ {E(live_failed)}</p>" if live_failed else ""
     routing = (eng.get("usage") or {}).get("routing") or []
     routing_html = ""
     if routing:  # which model handled which field, and why (offline: the plan live auto mode would follow)
@@ -137,10 +174,18 @@ def build_report_html(d: dict[str, Any]) -> str:
         trs = "".join(f"<tr><td>{E(r['task'])}</td><td class='mono'>{E(r['model'])}</td><td>{E('、'.join(r['slots']))}</td>"
                       f"<td class='muted'>{E(' / '.join(dict.fromkeys(r.get('reasons', {}).values())))}</td></tr>"
                       for r in routing)
-        head = ("<h2>Planned model routing (live auto mode) / ライブ（auto）時のモデル割り当て計画</h2><p class='muted'>"
-                "This run used the offline engine — no model was called. The table shows where live <code>auto</code> "
-                "mode would send each field. ｜ この実行はオフラインエンジンで、モデルは呼び出していません。</p>"
-                if planned else "<h2>Model routing / モデルの使い分け</h2>")
+        if planned and live_failed:
+            head = ("<h2>Planned model routing (live auto mode) / ライブ（auto）時のモデル割り当て計画</h2><p class='muted'>"
+                    "The live run failed after the API calls listed at the top, so every value comes from the offline "
+                    "engine. The table shows where live <code>auto</code> mode would send each field. ｜ "
+                    "ライブ実行は途中で失敗したため（API 呼び出しは冒頭に記載）、記入値はオフラインエンジンの結果です。"
+                    "表はライブ（auto）時の割り当て計画です。</p>")
+        elif planned:
+            head = ("<h2>Planned model routing (live auto mode) / ライブ（auto）時のモデル割り当て計画</h2><p class='muted'>"
+                    "This run used the offline engine — no model was called. The table shows where live <code>auto</code> "
+                    "mode would send each field. ｜ この実行はオフラインエンジンで、モデルは呼び出していません。</p>")
+        else:
+            head = "<h2>Model routing / モデルの使い分け</h2>"
         routing_html = (f"{head}<div class='card'><table><tr><th>Task</th><th>Model</th>"
                         f"<th>Fields</th><th>Why</th></tr>{trs}</table></div>")
     # Never claim an uploaded form, an edited memo or reviewer-typed values are fictional.
@@ -151,17 +196,17 @@ def build_report_html(d: dict[str, Any]) -> str:
         footer += "（Built-in demo: all sample forms, memos and data are 100% fictional / 付属デモの様式・メモ・データはすべて架空です）"
     return f"""<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Form-Guard report — {E(d['form']['title'])}</title><style>{CSS}</style></head><body>
-<header><div class="muted">Form-Guard Agent · verification report · {E(d['created_at'])}</div>
+<header><div class="muted">Form-Guard Agent · verification report · {E(_format_jst_with_weekday(d['created_at']))}</div>
 <h1>{E(d['form']['title'])}</h1><div class="muted">{E(d['form'].get('title_en', ''))} · {E(d['form']['name'])} → {E(d['filled']['name'])}</div>
 <p><span class="badge {E(rep['overall_status'])}">{E(_status_label(rep['overall_status']))}</span>
-<span class="muted"> Engine: {E(eng.get('label', ''))}{fb}</span></p></header><main>
+<span class="muted"> Engine: {E(eng.get('label', ''))}{fb}</span></p>{live_html}</header><main>
 <div class="tiles">
-<div class="tile"><b>{filled}/{len(maps)}</b><span>fields filled / 記入済み</span></div>
+<div class="tile"><b>{filled}/{len(maps)}</b><span>{E(filled_label)}</span></div>
 <div class="tile"><b>{len(pending)}</b><span>awaiting human input / 人の入力待ち</span></div>
 <div class="tile"><b>{rep['passed_count']}/{rep['passed_count'] + rep['failed_count']}</b><span>checks passed / 検査合格</span></div>
 <div class="tile"><b>{E(identical_tile)}</b><span>ZIP entries byte-identical / 無変更パーツ</span></div>
 <div class="tile"><b>{stats.get('boilerplate_blocks', '–')}</b><span>boilerplate blocks unchanged / 定型文</span></div>
-<div class="tile"><b>{rep['ungrounded_claims_count']}</b><span>ungrounded claims / 根拠なし</span></div>
+<div class="tile"><b>{rep['ungrounded_claims_count']}</b><span>ungrounded AI claims / AI記入値の根拠違反</span></div>
 </div>
 <h2>Visual comparison / 見た目の比較</h2><div class="grid3">{''.join(figs)}</div>
 <h2>Field mapping &amp; verbatim sources / 記入値と根拠</h2><div class="card"><table>
@@ -192,8 +237,9 @@ def build_index_html(summaries: list[dict[str, Any]]) -> str:
 <main>{''.join(cards)}</main><footer>100% fictional sample forms and memos. The final check and decision are made by a human.</footer></body></html>"""
 
 
-def write_naive_comparisons(samples_dir: Path) -> dict[str, Path]:
-    """Render blank vs naive-regeneration comparisons into samples/broken_before/."""
+def write_naive_comparisons(samples_dir: Path, overwrite: bool = True) -> dict[str, Path]:
+    """Render blank vs naive-regeneration comparisons into samples/broken_before/. With ``overwrite=False`` only
+    comparison files that do not exist yet are written."""
     from .pipeline import naive_overlays
     from .samples import DEMOS, read_memo
     from .scanner import scan
@@ -202,6 +248,11 @@ def write_naive_comparisons(samples_dir: Path) -> dict[str, Path]:
 
     written: dict[str, Path] = {}
     for demo in DEMOS:
+        stem = Path(demo["naive"]).stem
+        sp = samples_dir / "broken_before" / f"{stem}.svg"
+        hp = samples_dir / "broken_before" / f"comparison_{demo['id']}.html"
+        if not overwrite and sp.exists() and hp.exists():
+            continue
         form = samples_dir / "blank_forms" / demo["form"]
         naive = samples_dir / "broken_before" / demo["naive"]
         memo = read_memo(samples_dir / "memos" / demo["memo"])
@@ -212,10 +263,11 @@ def write_naive_comparisons(samples_dir: Path) -> dict[str, Path]:
         ovs, banner = naive_overlays(sc, blank_l, naive_l, rep)
         naive_svg = svg_document(naive_l, ovs, "Naive AI regeneration (simulated)", banner, "bad")
         blank_svg = svg_document(blank_l, [], "Blank original form", "Blank original / 原本", "info")
-        stem = Path(demo["naive"]).stem
-        sp = samples_dir / "broken_before" / f"{stem}.svg"
-        sp.write_text(naive_svg, encoding="utf-8", newline="\n")
-        hp = samples_dir / "broken_before" / f"comparison_{demo['id']}.html"
+        if overwrite or not sp.exists():
+            sp.write_text(naive_svg, encoding="utf-8", newline="\n")
+            written[sp.name] = sp
+        if not overwrite and hp.exists():
+            continue
         fails = "".join(f"<li><b>{E(c['check_id'])}</b> {E(c['description'])} — {E(c['details'])}</li>"
                         for c in json.loads(rep.model_dump_json())["checks"] if not c["passed"])
         hp.write_text(f"""<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>Naive regeneration vs original — {E(demo['title'])}</title>
@@ -227,6 +279,5 @@ The naive file is scripted to reproduce common failure modes; it is not output o
 <figure><figcaption>Naive regeneration / 作り直し版</figcaption>{naive_svg}</figure></div></main>
 <footer>100% fictional sample. Run <code>python -m form_guard.cli --all-demos</code> for the Form-Guard result.</footer></body></html>""",
                       encoding="utf-8", newline="\n")
-        written[sp.name] = sp
         written[hp.name] = hp
     return written

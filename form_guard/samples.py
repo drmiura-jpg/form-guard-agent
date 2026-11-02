@@ -1149,47 +1149,52 @@ UNMARKED_BUILDERS = {  # no slot spec: the cells to fill come from discovery + h
 }
 
 
-def generate_samples(samples_dir: Path | str | None = None, with_comparisons: bool = True) -> dict[str, Path]:
-    """Write blank forms, slot specs, memos and naive-regeneration files. Returns written paths."""
+def generate_samples(samples_dir: Path | str | None = None, with_comparisons: bool = True,
+                     overwrite: bool = True) -> dict[str, Path]:
+    """Write blank forms, slot specs, memos and naive-regeneration files. Returns written paths.
+
+    ``overwrite=False`` writes only the files that do not exist yet: an existing blank form, slot spec or memo is
+    never replaced (``ensure_samples``). ``--generate-samples`` rebuilds everything (``overwrite=True``)."""
     base = Path(samples_dir) if samples_dir else default_samples_dir()
     blank, memos, broken = base / "blank_forms", base / "memos", base / "broken_before"
     for d in (blank, memos, broken):
         d.mkdir(parents=True, exist_ok=True)
     written: dict[str, Path] = {}
+
+    def put(p: Path, make) -> None:
+        if overwrite or not p.exists():
+            data = make()
+            if isinstance(data, bytes):
+                p.write_bytes(data)
+            else:
+                p.write_text(data, encoding="utf-8", newline="\n")
+            written[p.name] = p
+
     for name, fn in BUILDERS.items():
-        p = blank / name
-        p.write_bytes(fn())
-        written[name] = p
+        put(blank / name, fn)
         spec = SPECS[Path(name).stem]
-        sp = blank / f"{Path(name).stem}.slots.json"
-        sp.write_text(json.dumps(spec, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
-        written[sp.name] = sp
+        put(blank / f"{Path(name).stem}.slots.json", lambda spec=spec: json.dumps(spec, ensure_ascii=False, indent=2) + "\n")
     for name, fn in UNMARKED_BUILDERS.items():
-        p = blank / name
-        p.write_bytes(fn())
-        written[name] = p
+        put(blank / name, fn)
     for name, text in MEMOS.items():
-        p = memos / name
-        p.write_text(text, encoding="utf-8", newline="\n")
-        written[name] = p
+        put(memos / name, lambda text=text: text)
     for name, fn in NAIVE_BUILDERS.items():
-        p = broken / name
-        p.write_bytes(fn())
-        written[name] = p
+        put(broken / name, fn)
     if with_comparisons:
         from .report import write_naive_comparisons
 
-        written.update(write_naive_comparisons(base))
+        written.update(write_naive_comparisons(base, overwrite=overwrite))
     return written
 
 
 def ensure_samples(samples_dir: Path | str | None = None) -> Path:
+    """Make sure the sample set exists; a missing file is created, nothing that exists is overwritten."""
     base = Path(samples_dir) if samples_dir else default_samples_dir()
     needed = [base / "blank_forms" / d["form"] for d in DEMOS + UNMARKED_FORMS] + \
              [base / "memos" / d["memo"] for d in DEMOS + UNMARKED_FORMS] + \
              [base / "broken_before" / d["naive"] for d in DEMOS]
     if not all(p.exists() for p in needed):
-        generate_samples(base)
+        generate_samples(base, overwrite=False)
     return base
 
 

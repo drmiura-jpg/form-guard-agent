@@ -217,11 +217,12 @@ class _Frame:
 
 
 def ensure_safe_xml(data: bytes, part_name: str = "") -> None:
-    head = data[:4]
-    if head.startswith(b"\xff\xfe") or head.startswith(b"\xfe\xff"):
-        raise UnsupportedXMLError(f"{part_name}: UTF-16 XML parts are not supported")
-    if b"<!DOCTYPE" in data or b"<!ENTITY" in data:
+    from .ziputil import xml_has_dtd  # every encoding: UTF-8, UTF-16 / UTF-32 with or without a byte-order mark
+
+    if xml_has_dtd(data):
         raise UnsafeXMLError(f"{part_name}: DTD / entity declarations are not allowed in OOXML parts")
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff") or data[:4] == b"\x00\x00\xfe\xff" or b"\x00" in data:
+        raise UnsupportedXMLError(f"{part_name}: UTF-16 / UTF-32 XML parts are not supported")
 
 
 def tag_span(data: bytes, pos: int) -> tuple[int, int]:

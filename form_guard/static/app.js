@@ -63,16 +63,18 @@ function setLang(lang) {
   rerender();
 }
 
+// Flag codes from the server (mapping.normalizations, checklist flags) as [ja, en]; shown with flagText().
 const FLAG = {
-  wareki: "和暦に変換 · to 和暦", halfwidth: "半角に統一 · half-width", yen: "金額表記を統一 · amount format",
-  condensed: "抽出要約 · condensed by deletion", re_extracted: "制約違反→再抽出 · re-extracted", order: "様式の順に整列 · reordered",
-  name: "敬称・注記を除去 · name cleaned", note: "注記を除去 · note removed", year_inferred: "年は推定 · year inferred",
-  weekday_ok: "曜日一致 · weekday checked", human: "人が入力 · reviewer entry",
-  re_anchored: "引用を付け替え · quote re-anchored — check the wording",
-  low_conf: "低信頼度 · low confidence", needs_input: "要入力 · needs input", has_suggestion: "候補あり · has suggestion",
-  unsafe_condensation: "要約で条件が欠ける · condition would be lost", weekday: "曜日を付記 · weekday added",
-  recovered_unverified: "根拠未検証 · not verified",
+  wareki: ["和暦に変換", "Japanese era date"], halfwidth: ["半角に統一", "half-width"], yen: ["金額表記を統一", "amount format"],
+  condensed: ["抽出要約", "extractive condensation"], re_extracted: ["制約違反→再抽出", "re-extracted under the printed rule"],
+  order: ["様式の順に整列", "reordered as printed"], name: ["敬称・注記を除去", "name cleaned"], note: ["注記を除去", "note removed"],
+  year_inferred: ["年は推定", "year inferred from context"], weekday_ok: ["曜日一致", "weekday verified"],
+  human: ["人が入力", "entered by the reviewer"], re_anchored: ["引用を付け替え", "quote re-anchored — check the wording"],
+  low_conf: ["低信頼度", "low confidence"], needs_input: ["要入力", "needs input"], has_suggestion: ["候補あり", "has a suggestion"],
+  unsafe_condensation: ["要約で条件が欠ける", "condensing would drop a condition"], weekday: ["曜日を付記", "weekday added"],
+  recovered_unverified: ["根拠未検証", "not verified"],
 };
+const flagText = (f) => (FLAG[f] ? L(...FLAG[f]) : f);
 const ATTENTION = new Set(["year_inferred", "low_conf", "needs_input", "re_extracted", "condensed", "unsafe_condensation", "re_anchored"]);
 const FORMAT = {
   text: ["文章", "text"], person_name: ["氏名", "person name"], wareki_date: ["和暦日付", "和暦 date"],
@@ -295,13 +297,23 @@ function rerender() {
   }
 }
 
+// A live run that failed after the API had answered: the values come from the offline engine, but calls were made
+// (and billed) — the usage of those calls, or null.
+function liveFailure(run) {
+  const eng = (run && run.engine) || {};
+  const u = eng.usage || {};
+  return eng.mode !== "live" && (u.live_attempt_failed || (eng.fallback_reason && u.requests > 0)) ? u : null;
+}
+
 function renderEngineBadge() {
   const b = $("#engineBadge");
   const eng = S.view === "run" && S.run ? S.run.engine : null;
   if (eng) {
     const live = eng.mode === "live";
+    const failed = liveFailure(S.run);
     b.textContent = live ? `Claude · ${eng.model === "auto" ? L("自動モデル振り分け", "auto model routing") : eng.model}`
-      : L("オフラインエンジン（API 呼び出しなし）", "Offline demo engine (no API call)");
+      : failed ? L(`オフラインエンジン（ライブ API ${failed.requests} 回の後に失敗）`, `Offline engine (live run failed after ${failed.requests} API calls)`)
+        : L("オフラインエンジン（API 呼び出しなし）", "Offline demo engine (no API call)");
     b.className = `pill ${live ? "pill-live" : "pill-neutral"}`;
   } else if (S.health) {
     b.textContent = S.health.live_available ? L(`Claude 利用可 · ${S.health.default_model}`, `Claude ready · ${S.health.default_model}`)
@@ -731,14 +743,19 @@ function tile(label, value, note, icon, iconCls) {
 function renderKpis() {
   const r = S.run;
   const rep = r.report;
-  const filled = r.mappings.filter((m) => m.status === "filled" || m.status === "human_entered").length;
+  // a reviewer-entered value has no memo quote: count it apart instead of claiming every value has a verbatim source
+  const aiFilled = r.mappings.filter((m) => m.status === "filled").length;
+  const humanFilled = r.mappings.filter((m) => m.status === "human_entered").length;
+  const filled = aiFilled + humanFilled;
   const pending = rep.pending_slots.length;
   const total = rep.passed_count + rep.failed_count;
   const untouchedAll = rep.entry_hashes.filter((e) => e.role === "untouched").length;
   const untouched = rep.entry_hashes.filter((e) => e.role === "untouched" && e.identical && e.raw_identical).length;
   const vis = r.visual || {};
   $("#kpis").replaceChildren(
-    tile(B("記入済み", "Fields filled", "stack"), `${filled}/${r.mappings.length}`, L("すべて原文の根拠付き", "each with a verbatim source")),
+    tile(B("記入済み", "Fields filled", "stack"), `${filled}/${r.mappings.length}`, humanFilled > 0
+      ? L(`AI記入（原文照合済み）${aiFilled}件・人の入力（本人確認）${humanFilled}件`, `${aiFilled} AI (verbatim source) · ${humanFilled} human-entered`)
+      : L("すべて原文の根拠付き", "each with a verbatim source")),
     tile(B("人の入力待ち", "Awaiting human input", "stack"), String(pending),
       pending ? L("メモに無いので推測しない", "not in the memo — never guessed") : L("なし", "none"), pending ? "⚠" : "✓", pending ? "icon-warn" : "icon-good"),
     tile(B("合格した検査", "Checks passed", "stack"), `${rep.passed_count}/${total}`, L("構造＋根拠の決定論的検査", "structural + grounding"),
@@ -750,7 +767,7 @@ function renderKpis() {
     tile(B("指定欄以外のずれ", "Layout drift outside fields", "stack"), `${vis.max_shift_px ?? 0} px`,
       L(`${vis.boxes_compared ?? 0} 個の枠を比較`, `${vis.boxes_compared ?? 0} boxes compared`),
       vis.identical_outside_slots ? "✓" : "✗", vis.identical_outside_slots ? "icon-good" : "icon-bad"),
-    tile(B("根拠のない記入", "Ungrounded claims", "stack"), String(rep.ungrounded_claims_count), L("メモに無い値", "values without evidence"),
+    tile(B("根拠のない記入", "Ungrounded claims", "stack"), String(rep.ungrounded_claims_count), L("AI記入値の根拠違反", "ungrounded AI values"),
       rep.ungrounded_claims_count ? "✗" : "✓", rep.ungrounded_claims_count ? "icon-bad" : "icon-good"),
   );
 }
@@ -850,7 +867,7 @@ function highlightSvg(id) {
 
 const MODEL_ID = /claude-[a-z]+-\d+(?:-\d{1,2})?(?:-\d{8})?/g;
 
-function modelName(id) {  // claude-haiku-5-5 -> Haiku 5.5, claude-haiku-4-5-20251001 -> Haiku 4.5
+function modelName(id) {  // claude-opus-5-5 -> Opus 5.5, claude-sonnet-5 -> Sonnet 5, claude-haiku-4-5-20251001 -> Haiku 4.5
   const m = /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?$/.exec(id || "");
   return m ? `${m[1][0].toUpperCase()}${m[1].slice(1)} ${m[2]}${m[3] ? `.${m[3]}` : ""}` : String(id || "");
 }
@@ -890,7 +907,10 @@ function routeBlock(m) {
   const info = routeInfo(m);
   const chain = info.models.join(" → ");
   let what = m.routed_model || "—";
-  if (info.kind === "plan") {
+  if (info.kind === "plan" && liveFailure(S.run)) {
+    what = L(`この欄の値はオフラインエンジンで作成しました（ライブ実行は途中で失敗。それまでの API 呼び出しは「Claude Code 連携」タブに記録）。ライブの auto モードでは ${chain} が担当します。`,
+      `This value comes from the offline engine: the live run failed part-way (the API calls made before that are listed in the Claude Code tab). In live auto mode ${chain} would handle this field.`);
+  } else if (info.kind === "plan") {
     what = L(`この欄はオフラインエンジンで処理しました（API 呼び出しなし）。ライブの auto モードでは ${chain} が担当します。`,
       `Processed by the offline engine — no API call. In live auto mode ${chain} would handle this field.`);
   } else if (info.kind === "live") {
@@ -937,7 +957,7 @@ function renderFields() {
       h("td", {}, h("div", { class: "f-label" }, s.label), h("div", { class: "f-ctx" }, s.context_label || "")),
       h("td", { class: `f-value${m.filled_value ? "" : " pending"}` }, val),
       h("td", { class: `num${over ? " over" : ""}` }, s.max_chars ? `${n}/${s.max_chars}` : String(n || "")),
-      h("td", {}, statusChip(m), ...m.normalizations.filter((f) => ATTENTION.has(f)).map((f) => h("div", { class: "f-ctx" }, `⚠ ${FLAG[f] || f}`))),
+      h("td", {}, statusChip(m), ...m.normalizations.filter((f) => ATTENTION.has(f)).map((f) => h("div", { class: "f-ctx" }, `⚠ ${flagText(f)}`))),
       h("td", {}, modelBadge(m)),
       h("td", { class: "num" }, lineRef(m)));
   }));
@@ -1001,7 +1021,7 @@ function renderDetail(id) {
     ...(a.issues || []).filter((i) => i.severity === "warning").map((i) => h("div", { class: "ti", style: "color:var(--warn-ink)" }, `⚠ ${i.message}`))));
   fill($("#fieldDetail"),
     h("div", { class: "card-h" }, s.label, h("span", {}, s.location_path)),
-    h("div", {}, statusChip(m), " ", ...m.normalizations.map((f) => h("span", { class: "chip" }, FLAG[f] || f))),
+    h("div", {}, statusChip(m), " ", ...m.normalizations.map((f) => h("span", { class: "chip" }, flagText(f)))),
     h("div", { class: "detail-value" }, m.filled_value || (m.suggested_value
       ? L(`（未検証の候補: ${m.suggested_value}）`, `（unverified suggestion: ${m.suggested_value}）`)
       : L("（メモに記載なし — 確認者が入力）", "（not stated in the memo — left for the reviewer）"))),
@@ -1037,8 +1057,8 @@ function editControl(s, m) {
   };
   inp.addEventListener("keydown", (e) => { if (e.key === "Enter") save(); });
   return h("div", { class: "edit-row" },
-    h("label", { class: "f-ctx" }, m.status === "needs_human_input" ? L("値を入力 · Enter value", "Enter value · 値を入力") : L("値を修正 · Correct this value", "Correct this value · 値を修正")),
-    inp, count, h("button", { class: "btn btn-ghost", type: "button", onclick: save }, "Save edit / 値を修正"));
+    h("label", { class: "f-ctx" }, m.status === "needs_human_input" ? L("値を入力", "Enter value") : L("値を修正", "Correct this value")),
+    inp, count, h("button", { class: "btn btn-ghost", type: "button", onclick: save }, L("値を保存", "Save edit")));
 }
 
 /* ---------------------------------------------------------------- audit */
@@ -1102,7 +1122,7 @@ function renderHitl() {
     const cb = h("input", { type: "checkbox", value: it.item_id, disabled: blocked || Boolean(r.approval) });
     cb.checked = S.checked.has(it.item_id);
     cb.addEventListener("change", () => { if (cb.checked) S.checked.add(it.item_id); else S.checked.delete(it.item_id); updateApprove(); });
-    const flags = (it.flags || []).map((f) => h("span", { class: "chip", style: ATTENTION.has(f) ? "border-color:var(--warn);color:var(--warn-ink)" : "" }, FLAG[f] || f));
+    const flags = (it.flags || []).map((f) => h("span", { class: "chip", style: ATTENTION.has(f) ? "border-color:var(--warn);color:var(--warn-ink)" : "" }, flagText(f)));
     const slot = it.slot_id ? r.slots.find((x) => x.slot_id === it.slot_id) : null;
     return h("li", { class: `${it.kind === "global" ? "global" : ""}${blocked ? " blocked" : ""}` }, cb,
       h("div", {},
@@ -1111,7 +1131,7 @@ function renderHitl() {
         it.source_quote ? h("div", { class: "quote" }, `「${it.source_quote}」`) : null,
         flags.length ? h("div", { class: "chips" }, flags) : null,
         m && it.slot_id ? h("a", { href: "#", onclick: (e) => { e.preventDefault(); selectSlot(it.slot_id, true); showTab("fields"); } }, L("根拠を見る →", "show source →")) : null,
-        slot && m && it.kind === "field" ? h("details", { class: "edit-inline" }, h("summary", {}, "✎ 値を修正 / Edit value"), editControl(slot, m)) : null));
+        slot && m && it.kind === "field" ? h("details", { class: "edit-inline" }, h("summary", {}, L("✎ 値を修正", "✎ Edit value")), editControl(slot, m)) : null));
   }));
   renderApproval();
   updateApprove();
@@ -1168,23 +1188,47 @@ function updateApprove() {
 }
 
 async function onApprove() {
+  // Capture what is on screen now: the reviewer may open another document or revision while the request is in flight.
+  const target = S.run;
+  if (!target) return;
+  const { run_id: runId, revision: rev } = target;
+  const sha = target.filled && target.filled.sha256;
+  const same = () => S.run && S.run.run_id === runId && S.run.revision === rev && S.run.filled && S.run.filled.sha256 === sha;
   try {
-    const res = await api(`/api/runs/${S.run.run_id}/approve`, {
+    const res = await api(`/api/runs/${runId}/approve`, {
       method: "POST", headers: JSON_HEADERS,
       // bind the approval to exactly what is on screen: the server refuses a stale revision or file hash
       body: JSON.stringify({ reviewer: $("#reviewerInput").value.trim(), checked: [...S.checked],
-        filled_sha256: S.run.filled.sha256, revision: S.run.revision }),
+        filled_sha256: sha, revision: rev }),
     });
-    S.run.approval = res;
-    renderHitl();
+    if (same()) {  // never attach this approval to a run or revision that replaced it meanwhile
+      S.run.approval = res;
+      renderHitl();
+    }
     toast(L("承認しました — 検査済みファイルのロックを解除しました。", "Approved — the verified file is unlocked."));
   } catch (e) {
     const missing = e.body && e.body.detail && e.body.detail.missing;
     toast(missing ? L(`未確認の項目: ${missing.length}`, `Unchecked items: ${missing.length}`) : L(`承認を拒否: ${e.message}`, `Approval refused: ${e.message}`));
-    if (e.status === 409 && S.run) {  // stale view: reload the run so the reviewer sees the current state
-      try { setRun(await api(`/api/runs/${S.run.run_id}`), false); } catch (_) { /* keep the old view */ }
+    if (e.status === 409 && S.run && S.run.run_id === runId) {  // stale view: reload that run to show its current state
+      try {
+        const fresh = await api(`/api/runs/${runId}`);
+        if (S.run && S.run.run_id === runId) setRun(fresh, false);
+      } catch (_) { /* keep the old view */ }
     }
   }
+}
+
+// ISO timestamp → Asia/Tokyo (UTC+9, no daylight saving) with the weekday. Computed from the UTC offset, so the result
+// never depends on the browser's time zone: 2026-11-02T21:11:00+00:00 → 2026-11-03（火）06:11 JST.
+function fmtDateWithWeekday(iso) {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return String(iso || "");
+  const d = new Date(t + 9 * 3600 * 1000);  // read back with the getUTC* methods = the wall clock in Tokyo
+  const p = (n) => String(n).padStart(2, "0");
+  const day = `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}`;
+  const time = `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
+  const wd = d.getUTCDay();  // 0 = Sunday
+  return L(`${day}（${"日月火水木金土"[wd]}）${time} JST`, `${day} (${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][wd]}) ${time} JST`);
 }
 
 // The download link always names the approved file and revision (filled_sha256 + revision are required query
@@ -1206,7 +1250,8 @@ function renderApproval() {
     dl.href = downloadHref(r);
     dl.textContent = L(`⬇ 検査済み .${r.form.file_type} をダウンロード`, `⬇ Download verified .${r.form.file_type}`);
     msg.className = "msg ok";
-    fill(msg, h("div", {}, L(`✓ ${r.approval.reviewer} が ${r.approval.approved_at} に承認`, `✓ Approved by ${r.approval.reviewer} at ${r.approval.approved_at}`)),
+    const when = fmtDateWithWeekday(r.approval.approved_at);
+    fill(msg, h("div", {}, L(`✓ ${r.approval.reviewer} が ${when} に承認`, `✓ Approved by ${r.approval.reviewer} on ${when}`)),
       h("div", { class: "receipt" }, `SHA-256 ${r.approval.filled_sha256}`));
     $("#approveBtn").disabled = true;
   } else {
@@ -1263,7 +1308,17 @@ function runLanes(run) {
     (lanes[fam] || lanes.other).push({ m, info });
   });
   const models = S.suite.routing.models;
-  const usage = run.engine.usage || {};
+  const failed = liveFailure(run);  // live calls were made before the run fell back to the offline engine
+  const u = failed || run.engine.usage || {};
+  const [calls, tin, tout, served] = [u.requests || 0, u.input_tokens || 0, u.output_tokens || 0, (u.models || []).join(", ")];
+  const note = planned && failed
+    ? L(`ライブ実行は ${calls} 回の API 呼び出し（入力 ${tin} / 出力 ${tout} トークン · 応答モデル ${served}）の後に失敗したため、値はオフラインエンジンで作成しました。下はライブの auto モードで各欄を担当するモデル（計画）です。`,
+      `The live run failed after ${calls} API calls (${tin} input / ${tout} output tokens · served by ${served}), so the values come from the offline engine. Below is where live auto mode would send each field (the plan).`)
+    : planned
+      ? L("このランはオフラインエンジンで実行しました — モデルは呼び出していません。下はライブの auto モードで各欄を担当するモデル（計画）です。",
+        "This run used the offline engine — no model was called. Below is where live auto mode would send each field (the plan).")
+      : L(`ライブ実行：${calls} 回の API 呼び出し · 入力 ${tin} / 出力 ${tout} トークン · 応答モデル ${served}`,
+        `Live run: ${calls} API calls · ${tin} input / ${tout} output tokens · served by ${served}`);
   const lane = (fam, title) => h("div", { class: `lane lane-${fam}` },
     h("div", { class: "lane-h" }, fam === "other" ? h("span", { class: "mb" }, title) : modelChip(models[fam], planned),
       h("span", { class: "mono f-ctx" }, fam === "other" ? "" : models[fam]), h("b", {}, String(lanes[fam].length))),
@@ -1271,13 +1326,19 @@ function runLanes(run) {
       run.slots.find((s) => s.slot_id === m.slot_id)?.label || m.slot_id,
       info.revised ? h("b", { class: "rev" }, " → Opus") : null))));
   return h("div", {},
-    h("p", { class: planned ? "plan-note" : "f-ctx" }, planned
-      ? L("このランはオフラインエンジンで実行しました — モデルは呼び出していません。下はライブの auto モードで各欄を担当するモデル（計画）です。",
-        "This run used the offline engine — no model was called. Below is where live auto mode would send each field (the plan).")
-      : L(`ライブ実行：${usage.requests || 0} 回の API 呼び出し · 入力 ${usage.input_tokens || 0} / 出力 ${usage.output_tokens || 0} トークン · 応答モデル ${(usage.models || []).join(", ")}`,
-        `Live run: ${usage.requests || 0} API calls · ${usage.input_tokens || 0} input / ${usage.output_tokens || 0} output tokens · served by ${(usage.models || []).join(", ")}`)),
+    h("p", { class: planned ? "plan-note" : "f-ctx" }, note),
     h("div", { class: "lanes" }, lane("haiku"), lane("sonnet"), lane("opus"),
       lanes.other.length ? lane("other", L("人・その他", "human / other")) : null));
+}
+
+// "every check passed on every form", never "21/22" (which reads as 21 of 22 passed); the count per form as a range
+function checksPerFormText(t) {
+  const n = t.checks_per_form || [];  // sorted distinct check counts, e.g. [21] or [21, 22] (VIS-01 added on drift)
+  const [ja, en] = n.length > 1 ? [`${n[0]}〜${n[n.length - 1]}`, `${n[0]}–${n[n.length - 1]}`] : [String(n[0] ?? "?"), String(n[0] ?? "?")];
+  if (!t.all_checks_passed) return L(`不合格の検査あり（様式あたり ${ja} 項目）`, `some checks failed (${en} per form)`);
+  return n.length > 1
+    ? L(`全様式で全項目合格（様式により ${ja} 項目）`, `all checks passed on every form (${en} per form)`)
+    : L(`全様式で全 ${ja} 項目合格`, `all ${en} checks passed on every form`);
 }
 
 function suiteSections(s, run) {
@@ -1338,7 +1399,7 @@ function suiteSections(s, run) {
         tile(B("記入した文字", "Characters written", "stack"), t.chars.toLocaleString(), L("人が転記するはずだった量", "what a person would transcribe")),
         tile(B("照合した XML タグ", "XML tags compared", "stack"), t.tags.toLocaleString(), L(`定型文 ${t.text_blocks} か所`, `${t.text_blocks} printed text blocks`)),
         tile(B("結合セル・罫線", "Merged cells · borders", "stack"), `${t.merges} · ${t.borders}`, L("結合セル・範囲 · 罫線定義", "merged cells/ranges · border definitions")),
-        tile(B("1様式あたり", "Per form", "stack"), `${t.ms_min}–${t.ms_max} ms`, L(`全様式で ${t.checks_per_form.join("/")} 項目合格`, `${t.checks_per_form.join("/")} checks passed on every form`), t.all_checks_passed ? "✓" : "✗", t.all_checks_passed ? "icon-good" : "icon-bad"),
+        tile(B("1様式あたり", "Per form", "stack"), `${t.ms_min}–${t.ms_max} ms`, checksPerFormText(t), t.all_checks_passed ? "✓" : "✗", t.all_checks_passed ? "icon-good" : "icon-bad"),
         tile(B("人に残る作業", "Left for the human", "stack"), String(t.hitl), L(`確認項目 · 推測しない欄 ${t.pending}（${t.pending_slots.join(", ")}）`, `sign-off items · ${t.pending} unstated fact (${t.pending_slots.join(", ")})`))),
       h("div", { class: "card table-card" }, h("table", {},
         h("thead", {}, h("tr", {}, ...[["様式", "Form"], ["欄", "Fields"], ["文字", "Chars"], ["XML タグ", "XML tags"], ["定型文", "Text blocks"],

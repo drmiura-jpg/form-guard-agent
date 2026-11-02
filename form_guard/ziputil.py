@@ -11,7 +11,8 @@ patched accordingly. Nothing is re-compressed unless it was actually edited.
 names (``..`` segments, a leading ``/`` or ``\\``, drive letters), duplicate
 names, more than 2,000 entries, more than 100 MB declared uncompressed size or
 an extreme compression ratio (ZIP bombs), and XML parts that carry a DTD or
-an entity declaration (XXE / "billion laughs").
+an entity declaration (XXE / "billion laughs") — in UTF-8, UTF-16 or UTF-32,
+with or without a byte-order mark.
 """
 
 from __future__ import annotations
@@ -63,11 +64,39 @@ def unsafe_entry_name(name: str) -> str:
     return ""
 
 
+# byte-order marks, longest first: FF FE 00 00 is UTF-32-LE, not UTF-16-LE followed by U+0000
+_BOMS = ((b"\x00\x00\xfe\xff", "utf-32-be"), (b"\xff\xfe\x00\x00", "utf-32-le"), (b"\xef\xbb\xbf", "utf-8"),
+         (b"\xfe\xff", "utf-16-be"), (b"\xff\xfe", "utf-16-le"))
+_WIDE_ENCODINGS = ("utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be")
+_DECLARED_ENCODING_RE = re.compile(rb"""^\s*<\?xml[^>]*?\sencoding\s*=\s*["']([A-Za-z0-9._-]+)["']""")
+
+
+def xml_text_variants(data: bytes) -> list[bytes]:
+    """The XML part as UTF-8 in every encoding a parser could read it in: the one its byte-order mark names (UTF-8,
+    UTF-16 or UTF-32, either byte order); BOM-less UTF-16 / UTF-32 in both byte orders whenever the part holds a NUL
+    byte (UTF-8 XML never does); and a declared UTF-7 or an EBCDIC ``<?xml`` start."""
+    out = []
+    for bom, enc in _BOMS:
+        if data.startswith(bom):
+            out.append(data[len(bom):].decode(enc, "replace").encode("utf-8"))
+            break
+    else:
+        out.append(data)
+    if b"\x00" in data:
+        out += [data.decode(enc, "replace").encode("utf-8") for enc in _WIDE_ENCODINGS]
+    declared = _DECLARED_ENCODING_RE.match(data)
+    if declared and declared.group(1).lower().replace(b"_", b"-") in (b"utf-7", b"utf7", b"unicode-1-1-utf-7"):
+        out.append(data.decode("utf-7", "replace").encode("utf-8"))
+    if data.startswith(b"\x4c\x6f\xa7\x94"):  # "<?xm" in EBCDIC
+        out.append(data.decode("cp037", "replace").encode("utf-8"))
+    return out
+
+
 def xml_has_dtd(data: bytes) -> bool:
-    """True if an XML part declares a DTD or an entity (also for UTF-16 encoded parts)."""
-    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
-        data = data.decode("utf-16", "replace").encode("utf-8")
-    return _DTD_RE.search(data) is not None
+    """True if an XML part declares a DTD or an entity (``<!DOCTYPE`` / ``<!ENTITY``) in whatever encoding it is
+    written — UTF-8, UTF-16 or UTF-32, with or without a byte-order mark. Escaped text such as ``&lt;!DOCTYPE``
+    inside an element is content, not a declaration, and is not flagged."""
+    return any(_DTD_RE.search(v) for v in xml_text_variants(data))
 
 
 def check_archive(source: Union[bytes, str, Path, zipfile.ZipFile], *, scan_xml: bool = True,

@@ -38,7 +38,7 @@ No form at hand? The five fictional, non-medical demos are listed by the MCP too
 | `A／B／Cのうち該当するもの` or an Excel drop-down | `required_format: choice`, `allowed_values`, `multi_select` |
 
 Each slot also reports `model_tier`: the Claude model live `--model-tier auto` mode routes it to —
-`claude-haiku-5-5` for structured fields (dates, IDs, choices), `claude-sonnet-5-5` for standard text, amounts and
+`claude-haiku-4-5-20251001` for structured fields (dates, IDs, choices), `claude-sonnet-5` for standard text, amounts and
 names, `claude-opus-5-5` for long-text condensation (and every self-correction). Lines starting with `!` are
 warnings ("cell is not empty — refusing to overwrite printed text", "part not found", a refused formula cell or
 merged continuation …). Resolve them with the human before filling. Excel: every sheet is scanned; worksheets

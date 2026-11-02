@@ -34,8 +34,8 @@
       <select id="tierSelect">
         <option value="auto" data-t="自動：Haiku / Sonnet / Opus|Auto: Haiku / Sonnet / Opus">Auto: Haiku / Sonnet / Opus</option>
         <option value="opus" data-t="Opus 5.5 のみ|Opus 5.5 only">Opus 5.5 only</option>
-        <option value="sonnet" data-t="Sonnet 5.5 のみ|Sonnet 5.5 only">Sonnet 5.5 only</option>
-        <option value="haiku" data-t="Haiku 5.5 のみ|Haiku 5.5 only">Haiku 5.5 only</option>
+        <option value="sonnet" data-t="Sonnet 5 のみ|Sonnet 5 only">Sonnet 5 only</option>
+        <option value="haiku" data-t="Haiku 4.5 のみ|Haiku 4.5 only">Haiku 4.5 only</option>
       </select>
     </label>
     <span id="engineBadge" class="pill pill-neutral">…</span>
@@ -87,8 +87,8 @@
       <summary><span data-bi="なぜ Form-Guard か？（解決する現場課題）|Why Form-Guard? (the problem it solves)"></span></summary>
       <ol class="why-points">
         <li><b>①</b><span data-l="ja">行政・大学・施設の指定様式は、罫線1本・結合セル1個の崩れで差し戻される。</span><span data-l="en">Official forms of municipalities, universities and facilities are sent back for a single broken border or split merged cell.</span></li>
-        <li><b>②</b><span data-l="ja">従来の AI 生成は文書を作り直すため、罫線・結合セル・定型文・用紙サイズごと様式が壊れる。</span><span data-l="en">Conventional AI generation re-creates the document, so borders, merged cells, legal text and the page size break with it.</span></li>
-        <li><b>③</b><span data-l="ja">Form-Guard は XML のテキストノードだけを外科手術的に差し替え、21項目の決定論的検査＋視覚 Diff＋原文ハイライト＋人間承認ゲートで「様式不変」（指定欄以外は1バイトも変わらないこと）を数学的に証明する。記入内容の事実確認と提出判断は人が行います。</span><span data-l="en">Form-Guard surgically replaces only XML text nodes and proves "form invariance" — not one byte outside the designated fields changes — with 21 deterministic checks, a visual diff, source highlighting and a human approval gate. Checking the facts and deciding to submit stay with a person.</span></li>
+        <li><b>②</b><span data-l="ja">文書を再生成する方式では、罫線・結合セル・定型文・用紙サイズが変わってしまうことがあります（画面の比較例は失敗を再現した模擬データです）。</span><span data-l="en">Methods that re-generate the document can alter borders, merged cells, boilerplate text and page setup (the comparison file is a simulated reproduction of those failures).</span></li>
+        <li><b>③</b><span data-l="ja">Form-Guard は XML のテキストノードだけを外科手術的に差し替え、21項目の決定論的検査（描画のずれ・セルのはみ出しを検出した場合は VIS-01 を追加）＋視覚 Diff＋原文ハイライト＋人間承認ゲートで指定欄以外の変更を検査します。Word / Excel 実機での表示・印刷と記入内容の最終確認は人が行います。</span><span data-l="en">Form-Guard surgically replaces only XML text nodes and checks for any change outside the designated fields with 21 deterministic checks (plus VIS-01 if layout drift or overflow is detected), a visual diff, source highlighting and a human approval gate. Final display/print review in Word or Excel and fact sign-off stay with a person.</span></li>
       </ol>
     </details>
     <nav id="tourBar" class="tour" aria-label="Judge quick walkthrough">
@@ -116,17 +116,17 @@
         </div>
         <div class="pitch-card">
           <div class="pitch-h" data-bi="どんな課題か|What problem"></div>
-          <p data-l="ja">生成AIに頼むと様式ごと作り直され、罫線・結合セル・定型文が崩れ、メモに無い数字まで入る。罫線1本・文言1つで差し戻しになるため、AIを安全に使えない。</p>
-          <p data-l="en">Chat AI re-creates the document: borders, merged cells and legal text break, and numbers the notes never said appear. One broken border or paraphrased clause means rejection — so they cannot use AI safely.</p>
+          <p data-l="ja">文書ごと作り直す方式では罫線・結合セル・定型文が変わることがあり、メモに無い数字が入ることもある。罫線1本・文言1つで差し戻しになるため、AIを安全に使えない。</p>
+          <p data-l="en">Methods that re-create the whole document can change borders, merged cells and legal text, and can add numbers the notes never stated. One broken border or paraphrased clause means rejection — so they cannot use AI safely.</p>
         </div>
         <div class="pitch-card">
           <div class="pitch-h" data-bi="どう解決するか|How Form-Guard solves it"></div>
-          <p data-l="ja">指定欄だけを XML のバイト範囲で書き換え、21項目の決定論的検査で「他は何も変わっていない」ことを証明。各値に原文の根拠を示し、人が確認するまでダウンロードをロックします。</p>
-          <p data-l="en">It rewrites only the designated fields at the XML byte level, proves with 21 deterministic checks that nothing else changed, shows the verbatim source of every value, and locks the download until a person signs off.</p>
+          <p data-l="ja">指定欄だけを XML のバイト範囲で書き換え、21項目の決定論的検査で指定欄以外の変更を検査。各値に原文の根拠を示し、人が確認するまでダウンロードをロックします。Word / Excel での表示と内容の最終確認は人が行います。</p>
+          <p data-l="en">It rewrites only the designated fields at the XML byte level, checks for any change outside them with 21 deterministic checks, shows the verbatim source of every value, and locks the download until a person signs off. The final review in Word / Excel and of the content stays with a person.</p>
         </div>
       </div>
       <ol class="steps">
-        <li><b data-t="スキャン|Scan">スキャン</b><span data-t="欄と印刷ルール（字数・和暦・上限）を読む|find fields and printed rules (字数・和暦・上限)">欄と印刷ルール（字数・和暦・上限）を読む</span></li>
+        <li><b data-t="スキャン|Scan">スキャン</b><span data-t="欄と印刷ルール（字数・和暦・上限）を読む|find fields and printed rules (character limits, Japanese era dates, caps)">欄と印刷ルール（字数・和暦・上限）を読む</span></li>
         <li><b data-t="対応付け・自己修正|Map &amp; self-correct">対応付け・自己修正</b><span data-t="Claude（Haiku / Sonnet / Opus）またはオフライン、原文引用のみ|Claude (Haiku / Sonnet / Opus) or offline, verbatim quotes only">Claude（Haiku / Sonnet / Opus）またはオフライン、原文引用のみ</span></li>
         <li><b data-t="外科的な書き込み|Surgical write">外科的な書き込み</b><span data-t="XML のマーカー文字だけを置換|replace only the marker characters in the XML">XML のマーカー文字だけを置換</span></li>
         <li><b data-t="構造検査（21項目）|Verify (21 checks)">構造検査（21項目）</b><span data-t="ZIP・XML骨格・表・罫線・定型文・根拠|ZIP · XML skeleton · tables · borders · text · grounding">ZIP・XML骨格・表・罫線・定型文・根拠</span></li>

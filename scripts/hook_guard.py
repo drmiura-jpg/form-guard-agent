@@ -10,8 +10,16 @@ Stage 1 — PreToolUse, BEFORE anything reaches the disk (a violation exits with
 * Blank-template guard. The blank forms in samples/blank_forms/ (*.docx, *.xlsx) are the untouched "before" of
   every structural proof. A Write / Edit / MultiEdit / NotebookEdit of such a file, or a shell command that writes,
   copies over, moves or deletes one (redirection, cp/mv/rm, tee, Set-Content, Copy-Item, sed -i, an inline
-  python / node / .NET write …), is refused. The deterministic sample generator (``form_guard.cli
-  --generate-samples``) is allowed. A human can override by starting Claude Code with
+  python / node / .NET write …), is refused — and so is deleting, moving or renaming the samples/blank_forms
+  folder itself, the samples folder or any folder above them (``rm -rf samples/blank_forms``, ``Remove-Item
+  -LiteralPath samples/blank_forms -Recurse``, ``rmdir /s``, ``rm -rf .`` at the project root, ``cd samples`` then
+  ``rm -rf blank_forms``), a wildcard that can match a template or that folder (``rm samples/blank_forms/*``,
+  ``rm -rf samples/*``), ``find … -delete`` / ``-exec rm`` over them, a listing of them piped into ``rm`` /
+  ``Remove-Item`` / ``xargs rm``, and ``shutil.rmtree`` / ``Directory::Delete`` on that folder. Only the
+  deterministic sample generator itself — a Python launcher running ``-m form_guard.cli`` (or ``form-guard``) with
+  ``--generate-samples`` as a real argument, not a word in a ``# comment`` — is allowed, and never with an output
+  redirection into a template. A shell is a programming language, so this is a best-effort guard of the direct
+  forms; the verifier's byte-level comparison stays the backstop. A human can override by starting Claude Code with
   FORM_GUARD_ALLOW_TEMPLATE_WRITE=1: the hook reads its own environment, so an agent cannot switch the guard off
   from inside the command it wants to run.
 * Secret & hygiene guard. The text a Write / Edit / MultiEdit / NotebookEdit is about to put into a project file
@@ -47,6 +55,7 @@ from __future__ import annotations
 
 import json
 import os
+import posixpath
 import py_compile
 import re
 import shlex
@@ -54,6 +63,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
@@ -223,13 +233,26 @@ INLINE_WRITES = [  # write calls whose own argument is a template path literal
                re.I),
     re.compile(r"\[(?:System\.)?IO\.File\]::Copy\([^)]*?,\s*" + _LIT, re.I),
 ]
-WRITE_VERBS = {"rm", "del", "erase", "unlink", "shred", "truncate", "remove-item", "ri", "set-content", "sc",
-               "add-content", "ac", "clear-content", "clc", "out-file", "new-item", "ni", "tee", "tee-object",
-               "mv", "move", "move-item", "mi", "ren", "rename", "rename-item", "rni"}
+# the samples folder or samples/blank_forms itself as a string literal (directly after the quote or after a slash)
+_DIR_LIT = r"[\"'](?:[^\"']*[\\/])?samples(?:[\\/]+blank_forms)?[\\/]*[\"']"
+INLINE_WRITES += [  # folder deletions / moves whose own argument is that folder
+    re.compile(r"\b(?:shutil\.)?(?:rmtree|move)\(\s*" + _DIR_LIT, re.I),
+    re.compile(r"\b(?:os\.(?:rmdir|removedirs|rename|replace)|rmSync|rmdirSync|renameSync)\(\s*" + _DIR_LIT, re.I),
+    re.compile(_DIR_LIT + r"\s*\)\s*\.(?:rmdir|rename|replace)\(", re.I),
+    re.compile(r"\[(?:System\.)?IO\.Directory\]::(?:Delete|Move)\(\s*" + _DIR_LIT, re.I),
+]
+DELETE_VERBS = {"rm", "del", "erase", "unlink", "shred", "remove-item", "ri", "rmdir", "rd"}
+MOVE_VERBS = {"mv", "move", "move-item", "mi", "ren", "rename", "rename-item", "rni"}
+WRITE_VERBS = DELETE_VERBS | MOVE_VERBS | {"truncate", "set-content", "sc", "add-content", "ac", "clear-content", "clc",
+                                           "out-file", "new-item", "ni", "tee", "tee-object"}
 COPY_VERBS = {"cp", "copy", "copy-item", "cpi", "xcopy", "robocopy", "install", "rsync", "scp", "ln"}
-CMD_VERBS = {"copy", "xcopy", "robocopy", "move", "del", "erase", "ren", "rename"}  # options look like /Y
+CMD_VERBS = {"copy", "xcopy", "robocopy", "move", "del", "erase", "ren", "rename", "rd", "rmdir"}  # options look like /Y
+LIST_VERBS = {"ls", "dir", "gci", "get-childitem"}  # listings that can feed a pipeline into rm / Remove-Item
+_CD_VERBS = {"cd", "chdir", "pushd", "set-location", "sl", "push-location"}
 _WRAPPERS = {"sudo", "env", "command", "builtin", "exec", "nohup", "time", "nice", "&", "call", "start"}
-_GENERATOR_RE = re.compile(r"(?:\bform_guard(?:\.cli)?\b|\bform-guard\b)")
+GENERATOR_MODULES = ("form_guard.cli", "form_guard")
+_PYTHON_VERB_RE = re.compile(r"^(?:python|pythonw|py)(?:\d+(?:\.\d+)*)?$")  # python, python3, python3.13, py …
+_GLOB_RE = re.compile(r"[*?\[]")
 
 
 def is_template_path(path: str) -> bool:
@@ -302,7 +325,7 @@ def _positional(verb: str, args: List[str]) -> List[str]:
         if skip:
             skip = False
             continue
-        if a.lower() in ("-destination", "-path", "-literalpath", "-filepath", "-t", "--target-directory"):
+        if a.lower() in ("-destination", "-path", "-literalpath", "-filepath", "-newname", "-t", "--target-directory"):
             skip = True
             continue
         if a.startswith("-") or (verb in CMD_VERBS and re.match(r"^/[A-Za-z]{1,4}(:\S*)?$", a)):
@@ -322,29 +345,227 @@ def _named(args: List[str], *names: str) -> Optional[str]:
     return None
 
 
-def _shell_violation(segment: str) -> Optional[str]:
-    """Why this simple command would change a blank template, or None."""
-    if _GENERATOR_RE.search(segment) and any(flag in segment for flag in GENERATOR_FLAGS):
-        return None  # the deterministic sample generator rebuilds the templates on purpose
-    for target in _redirect_targets(segment):
-        if is_template_path(target):
+def _strip_comment(segment: str) -> str:
+    """The segment without an unquoted ``# …`` comment (a ``#`` that starts a word, as sh and PowerShell read it)."""
+    quote = ""
+    for i, ch in enumerate(segment):
+        if quote:
+            quote = "" if ch == quote else quote
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "#" and (i == 0 or segment[i - 1] in " \t"):
+            return segment[:i]
+    return segment
+
+
+def _is_generator(segment: str) -> bool:
+    """True only for the deterministic sample generator itself: a Python launcher (python, python3, py, a path to
+    python.exe …) running ``-m form_guard.cli`` / ``-m form_guard`` / ``form_guard/cli.py`` — or the ``form-guard``
+    console script — with --generate-samples / --regenerate-samples as a real argument. A flag in a ``# comment``,
+    after another command or in ``python -c`` code is not the generator."""
+    verb, args = _verb(_tokens(_strip_comment(segment)))
+    if verb != "form-guard":
+        if not _PYTHON_VERB_RE.match(verb):
+            return False
+        rest: Optional[List[str]] = None
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a == "-m":
+                if i + 1 < len(args) and args[i + 1] in GENERATOR_MODULES:
+                    rest = args[i + 2:]
+                break
+            if a.startswith("-c"):  # inline code is never the generator
+                return False
+            if a.startswith("-"):  # interpreter options: -u, -B, -X utf8, -W ignore …
+                i += 2 if a in ("-X", "-W") else 1
+                continue
+            if a.replace("\\", "/").lower().endswith("form_guard/cli.py"):
+                rest = args[i + 1:]
+            break
+        if rest is None:
+            return False
+        args = rest
+    low = [a.lower() for a in args]
+    return any(a in GENERATOR_FLAGS for a in low) and not any(a in WRITE_VERBS | COPY_VERBS for a in low)
+
+
+def _native(raw: str) -> str:
+    """A Git Bash path (/c/hackathon/…) as the Windows path it names; anything else unchanged."""
+    m = re.match(r"^/([A-Za-z])(?=/|$)", raw)
+    return f"{m.group(1)}:{raw[2:] or '/'}" if m and os.name == "nt" else raw
+
+
+def _could_hold_template(name: str) -> bool:
+    """A (lower-case) file name — or a wildcard for one — that is or can match a blank template (.docx / .xlsx …)."""
+    if not _GLOB_RE.search(name):
+        return name.endswith(TEMPLATE_EXTS)
+    ext = re.search(r"\.[a-z0-9]+$", name)  # a literal extension at the end of the wildcard decides
+    return ext is None or name.endswith(TEMPLATE_EXTS)
+
+
+def _below_guard(rest: List[str]) -> set:
+    """What a path below samples/blank_forms reaches: the folder itself, a template, or nothing protected."""
+    if not rest:
+        return {"folder"}
+    if any(_GLOB_RE.search(r) for r in rest[:-1]) or _could_hold_template(rest[-1]):
+        return {"template"}
+    return set()
+
+
+def _reaches(arg: str, cwd: Optional[Path], roots: Iterable[Path], resolve_ancestors: bool = True) -> set:
+    """What a path or wildcard argument can reach: ``template`` (a blank form), ``folder`` (samples/blank_forms
+    itself) and / or ``ancestor`` (the samples folder or any folder above it). Read from the text — a
+    ``blank_forms`` component counts in any directory, ``samples/*`` matches that folder — and, with a known
+    ``cwd``, from the resolved path (``.``, ``..``, ``*`` at the project root …)."""
+    found: set = set()
+    raw = arg.strip().strip("\"'").replace("\\", "/")
+    if not raw or raw.startswith(("$", "%", "~", "{")):
+        return found
+    parts = [c.lower() for c in posixpath.normpath(raw).split("/") if c not in ("", ".")]
+    for k, c in enumerate(parts):
+        if c == "blank_forms" or (k and parts[k - 1] == "samples" and _GLOB_RE.search(c)
+                                  and fnmatchcase("blank_forms", c)):
+            found |= _below_guard(parts[k + 1:])
+            break
+    if parts and parts[-1] == "samples" and (cwd is None or len(parts) == 1):
+        found.add("ancestor")
+    if cwd is None:
+        return found
+    p = Path(_native(raw))
+    p = Path(os.path.normpath(str(p if p.is_absolute() else cwd / p)))
+    full = [s.lower() for s in p.parts]
+    for root in roots:
+        guard = [s.lower() for s in (root / "samples" / "blank_forms").parts]
+        n = min(len(full), len(guard))
+        if not all(fnmatchcase(g, a) for a, g in zip(full[:n], guard[:n])):
+            continue
+        if len(full) > len(guard):
+            found |= _below_guard(full[len(guard):])
+        elif len(full) == len(guard):
+            found.add("folder")
+        elif resolve_ancestors:
+            found.add("ancestor")
+    return found
+
+
+def _operands(verb: str, args: List[str]) -> List[str]:
+    """Path operands: every argument that is not an option — PowerShell parameter values (``-Path X``,
+    ``-Path:X``) and ``--opt=X`` values included."""
+    out = []
+    for a in args:
+        if a.startswith("-"):
+            m = re.match(r"^-{1,2}[A-Za-z][\w-]*[:=](.+)$", a)
+            if m:
+                out.append(m.group(1))
+            continue
+        if verb in CMD_VERBS and re.match(r"^/[A-Za-z]{1,4}(:\S*)?$", a):
+            continue
+        out.append(a)
+    return out
+
+
+def _move_operands(verb: str, args: List[str]) -> Tuple[List[str], Optional[str]]:
+    """(sources, destination) of mv / Move-Item / ren / Rename-Item."""
+    dest = _named(args, "-destination", "-newname", "-t", "--target-directory")
+    pos = _positional(verb, args)
+    sources = [v for v in [_named(args, "-path", "-literalpath")] if v]
+    if dest is None and len(pos) >= 2:
+        dest, pos = pos[-1], pos[:-1]
+    return sources + pos, dest
+
+
+def _search_reaches(verb: str, args: List[str], cwd: Optional[Path], roots: List[Path]) -> Optional[str]:
+    """The start folder of a ``find`` (or a recursive ``ls`` / ``Get-ChildItem``) whose matches can include a blank
+    template or its folder, or None (a -name / -Filter that cannot match one keeps it harmless)."""
+    low = [a.lower() for a in args]
+    if verb == "find":
+        starts = []
+        for a in args:
+            if a.startswith("-") or a in ("(", ")", "!", "\\(", "\\)"):
+                break
+            starts.append(a)
+        names = [args[i + 1] for i, a in enumerate(low[:-1]) if a in ("-name", "-iname", "-path", "-ipath", "-wholename")]
+    else:  # ls / dir / Get-ChildItem: what it lists (the folder's entries, or everything below it with -Recurse)
+        names = [v for v in [_named(args, "-filter"), _named(args, "-include")] if v]
+        starts = [a for a in _operands(verb, args) if a not in names and a != _named(args, "-exclude")]
+    if names and not any(_could_hold_template(n.lower()) or fnmatchcase("blank_forms", n.lower())
+                         or fnmatchcase("samples", n.lower()) for n in names):
+        return None
+    return next((s for s in starts or ["."] if _reaches(s, cwd, roots)), None)
+
+
+def _xargs_verb(args: List[str]) -> str:
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-I", "-n", "-P", "-d", "-L", "-s", "-E", "-a", "--delimiter", "--max-args", "--max-procs",
+                 "--arg-file", "--replace"):
+            i += 2
+        elif a.startswith("-"):
+            i += 1
+        else:
+            return _verb(args[i:])[0]
+    return ""
+
+
+def _consumes_paths(segment: str) -> bool:
+    """A command that deletes or moves the paths piped into it: ``xargs rm``, ``Remove-Item`` / ``rm`` without a
+    path of its own, ``ForEach-Object { Remove-Item $_ }``."""
+    verb, args = _verb(_tokens(segment))
+    if verb == "xargs":
+        return _xargs_verb(args) in DELETE_VERBS | MOVE_VERBS
+    if verb in ("foreach-object", "%", "foreach"):
+        return any(a.lower().strip("{}();") in DELETE_VERBS | MOVE_VERBS for a in args)
+    return verb in DELETE_VERBS | MOVE_VERBS and not _operands(verb, args)
+
+
+def _shell_violation(segment: str, cwd: Optional[Path] = None, roots: Iterable[Path] = ()) -> Optional[str]:
+    """Why this simple command would change, move or delete a blank template (or its folder), or None. ``cwd`` —
+    followed through ``cd`` by the caller — resolves relative paths such as ``.`` or ``*``; without it only the
+    paths written in the command are checked."""
+    roots = list(roots)
+    for target in _redirect_targets(segment):  # never exempt: the generator writes its files itself
+        if is_template_path(target) or _reaches(target, cwd, roots, resolve_ancestors=False):
             return f"output redirection into {target}"
+    if _is_generator(segment):
+        return None  # the deterministic sample generator rebuilds the templates on purpose
     for rx in INLINE_WRITES:
         m = rx.search(segment)
         if m:
             return f"inline file write «{m.group(0)[:80]}»"
     verb, args = _verb(_tokens(segment))
     hits = [a for a in args if TEMPLATE_RE.search(a)]
-    if verb in WRITE_VERBS and hits:
-        return f"{verb} {hits[0]}"
+    if verb in DELETE_VERBS:
+        hit = next((a for a in _operands(verb, args) if _reaches(a, cwd, roots)), None)
+        if hit:
+            return f"{verb} {hit}"
+    if verb in MOVE_VERBS:
+        sources, dest = _move_operands(verb, args)
+        hit = next((a for a in sources if _reaches(a, cwd, roots)), None)
+        if hit is None and dest and _reaches(dest, cwd, roots, resolve_ancestors=False):
+            hit = dest
+        if hit:
+            return f"{verb} {hit}"
+    if verb in WRITE_VERBS:
+        hit = next((a for a in _operands(verb, args) if _reaches(a, cwd, roots, resolve_ancestors=False)), None)
+        if hits or hit:
+            return f"{verb} {hits[0] if hits else hit}"
+    if verb == "find" and ("-delete" in args or any(
+            a in ("-exec", "-execdir", "-ok", "-okdir") and _verb(args[k + 1:])[0] in WRITE_VERBS
+            for k, a in enumerate(args))):
+        start = _search_reaches(verb, args, cwd, roots)
+        if start:
+            return f"find {start} … deletes or moves what it finds"
     if verb in COPY_VERBS:
         pos = _positional(verb, args)
         dest = _named(args, "-destination", "-t", "--target-directory")
         sources = pos + [v for v in [_named(args, "-path", "-literalpath")] if v]
         if dest is None and len(pos) >= 2:
             dest, sources = (pos[1], pos[2:]) if verb == "robocopy" else (pos[-1], pos[:-1])
-        into_dir = dest is not None and TEMPLATE_DIR_RE.search(dest.rstrip("/\\") + "/") is not None
-        if dest and (is_template_path(dest) or (into_dir and (verb == "robocopy" or any(
+        reach = _reaches(dest, cwd, roots, resolve_ancestors=False) if dest else set()
+        into_dir = dest is not None and (TEMPLATE_DIR_RE.search(dest.rstrip("/\\") + "/") is not None or "folder" in reach)
+        if dest and (is_template_path(dest) or "template" in reach or (into_dir and (verb == "robocopy" or any(
                 s.lower().endswith(TEMPLATE_EXTS) or "*" in s for s in sources)))):
             return f"{verb} into {dest}"
     if verb == "dd" and any(a.startswith("of=") and is_template_path(a[3:]) for a in args):
@@ -357,21 +578,67 @@ def _shell_violation(segment: str) -> Optional[str]:
         return f"zip updates {pos[0]} in place"
     if verb in ("7z", "7za", "7zz") and len(pos) >= 2 and pos[0].lower() in ("a", "u", "d", "rn") and is_template_path(pos[1]):
         return f"7z {pos[0]} updates {pos[1]} in place"
-    if verb == "git" and pos[:1] in (["rm"], ["mv"]) and hits:
-        return f"git {pos[0]} {hits[0]}"
+    if verb == "git" and pos[:1] in (["rm"], ["mv"]):
+        sources, dest = (pos[1:], None) if pos[0] == "rm" else _move_operands("mv", args[args.index(pos[0]) + 1:])
+        hit = hits[0] if hits else next((a for a in sources if _reaches(a, cwd, roots)), None)
+        if hit is None and dest and _reaches(dest, cwd, roots, resolve_ancestors=False):
+            hit = dest
+        if hit:
+            return f"git {pos[0]} {hit}"
     return None
 
 
-def template_violation(tool: str, tool_input: dict) -> Tuple[Optional[str], str]:
+def _after_cd(segment: str, cwd: Optional[Path]) -> Optional[Path]:
+    """The working directory after ``cd`` / ``pushd`` / ``Set-Location`` (None once it can no longer be followed)."""
+    verb, args = _verb(_tokens(segment))
+    if verb not in _CD_VERBS:
+        return cwd
+    target = _named(args, "-path", "-literalpath") or next((a for a in args if not a.startswith("-")), None)
+    if not target or target == "-" or target.startswith(("$", "%", "~")) or _GLOB_RE.search(target):
+        return None
+    p = Path(_native(target.replace("\\", "/")))
+    if not p.is_absolute() and cwd is None:
+        return None
+    return Path(os.path.normpath(str(p if p.is_absolute() else cwd / p)))
+
+
+def _shell_command_violation(command: str, payload: Optional[dict] = None) -> Tuple[Optional[str], str]:
+    """Check each simple command of a shell command line, following ``cd`` from the hook's ``cwd``, and the pipelines
+    that feed a listing of the blank templates into ``rm`` / ``Remove-Item`` / ``xargs rm``."""
+    payload = payload or {}
+    roots = _project_roots(payload)
+    cwd: Optional[Path] = Path(os.path.abspath(str(payload.get("cwd") or os.getcwd())))
+    steps: List[Tuple[str, Optional[Path]]] = []
+    for segment in _segments(command):
+        why = _shell_violation(segment, cwd, roots)
+        if why:
+            return why, segment
+        steps.append((segment, cwd))
+        cwd = _after_cd(segment, cwd)
+    if "|" in command and any(_consumes_paths(s) for s, _ in steps):  # e.g. Get-ChildItem samples\blank_forms | Remove-Item
+        for segment, at in steps:
+            verb, args = _verb(_tokens(segment))
+            if _consumes_paths(segment) or not verb:
+                continue
+            if verb == "find" or verb in LIST_VERBS:
+                start = _search_reaches(verb, args, at, roots)
+                if start:
+                    return f"{verb} {start} piped into a delete / move", segment
+            hit = next((a for a in _operands(verb, args) if _reaches(a, at, roots, resolve_ancestors=False)), None)
+            if hit:
+                return f"{hit} piped into a delete / move", segment
+    return None, ""
+
+
+def template_violation(tool: str, tool_input: dict, payload: Optional[dict] = None) -> Tuple[Optional[str], str]:
     if tool in WRITE_TOOLS:
         target = str(tool_input.get("file_path") or tool_input.get("notebook_path") or "")
         if target and is_template_path(target):
             return f"{tool} tool", target
     elif tool in SHELL_TOOLS:
-        for segment in _segments(str(tool_input.get("command") or "")):
-            why = _shell_violation(segment)
-            if why:
-                return f"{tool} command: {why}", segment[:200]
+        why, segment = _shell_command_violation(str(tool_input.get("command") or ""), payload)
+        if why:
+            return f"{tool} command: {why}", segment[:200]
     return None, ""
 
 
@@ -427,7 +694,7 @@ def pre_tool_use(payload: dict) -> int:
     tool_input = payload.get("tool_input") or {}
     if not isinstance(tool_input, dict):
         return 0
-    reason, target = template_violation(tool, tool_input)
+    reason, target = template_violation(tool, tool_input, payload)
     if reason is not None:
         if os.environ.get(OVERRIDE_ENV) == "1":
             _stderr(f"form-guard template guard: allowed by {OVERRIDE_ENV}=1 ({reason})")
