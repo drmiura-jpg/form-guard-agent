@@ -622,7 +622,7 @@ function renderDiscPreview() {
         h("ul", { class: "preview-facts" },
           h("li", {}, `✓ ${rep.passed_count}/${rep.passed_count + rep.failed_count} ${L("項目の決定論的検査に合格", "deterministic checks passed")}`),
           h("li", {}, `✓ ${written.length} ${L("欄に原文引用つきで記入", "fields written, each with a verbatim quote")}`),
-          h("li", {}, `🔒 ${L("事務局専用欄は空欄のまま", "office-only cells left empty")}: ${office.join("・") || "—"}`),
+          h("li", {}, `⊘ ${L("事務局専用欄は空欄のまま", "office-only cells left empty")}: ${office.join("・") || "—"}`),
           h("li", {}, `↔ ${L("指定欄以外の描画のずれ", "layout drift outside the fields")}: ${(r.visual || {}).max_shift_px ?? 0} px`)),
         h("div", { class: "preview-fields" }, written.map((m) => h("div", { class: "pf" },
           h("b", {}, m.slot_id), h("span", { class: "f-value" }, m.filled_value), modelBadge(m)))),
@@ -1289,7 +1289,7 @@ function suiteSections(s, run) {
   out.push(h("div", { class: "suite-hero" },
     h("div", { class: "pitch-card" }, h("div", { class: "pitch-h" }, B("開発：Claude Code が中心", "Development — built with Claude Code")),
       h("p", {}, L(`設計・実装・テスト・ドキュメントを会期中に Claude Code で作成。リポジトリには Skills ${nSkills}・サブエージェント ${nAgents}・フック ${nHooks}・MCP ツール ${nTools} を同梱し、Claude Code から同じ検証エンジンを安全に使えます。`,
-        `Designed, implemented, tested and documented with Claude Code during the hackathon. The repository ships ${nSkills} skills, ${nAgents} subagents, ${nHooks} hook and ${nTools} MCP tools, so Claude Code can drive the same verifier safely.`))),
+        `Designed, implemented, tested and documented with Claude Code during the hackathon. The repository ships ${nSkills} skills, ${nAgents} subagents, ${nHooks} hook${nHooks === 1 ? "" : "s"} and ${nTools} MCP tools, so Claude Code can drive the same verifier safely.`))),
     h("div", { class: "pitch-card" }, h("div", { class: "pitch-h" }, B("実行時：欄ごとにモデルを使い分け", "Runtime — per-field model routing")),
       h("p", {}, L("定型の欄は Haiku、通常の文章・金額・氏名は Sonnet、長文の要約と検証器に差し戻された後の自己修正は Opus。どの欄をどのモデルが担当したかは、監査ログ・レポート・この画面に残ります。",
         "Structured fields go to Haiku, standard text / amounts / names to Sonnet, long-text condensation and every self-correction after a validator rejection to Opus. Which model handled which field is kept in the audit log, the report and this screen.")))));
@@ -1305,25 +1305,30 @@ function suiteSections(s, run) {
       h("div", {}, L(f.ja, f.en)),
       h("div", { class: "chips" }, f.uses.map((u) => h("span", { class: `use use-${u.kind}${u.present ? "" : " missing"}` },
         `${L(...KIND[u.kind])} · ${u.name}${u.present ? "" : " ✗"}`))))))));
-  const hook = s.settings.hooks[0];
+  const hooks = s.settings.hooks;  // every stage (PreToolUse before the write, PostToolUse after it)
+  const hookCmd = (hk) => (hk.command && hk.command.length <= 80 ? hk.command : `${hk.runner} …`);
+  const hookCard = h("div", { class: "card asset" }, h("div", { class: "card-h" },
+    hooks.length > 1 ? L(`フック（${hooks.length} 段）`, `Hooks (${hooks.length} stages)`) : L("フック", "Hook"), h("span", {}, s.settings.path)),
+    hooks.length ? hooks.map((hk) => h("div", { class: "asset-item" },
+      h("b", { class: "mono" }, `${hk.event} · ${hk.matcher.split("|").join(" | ")}`),  // spaces let the matcher wrap
+      h("div", { class: "f-ctx mono" }, `${hookCmd(hk)}${hk.timeout ? L(`（${hk.timeout}秒）`, ` (${hk.timeout} s)`) : ""}`),
+      hk.when && (hk.when.ja || hk.when.en) ? h("div", { class: "f-ctx" }, L(hk.when.ja, hk.when.en)) : null,
+      h("div", { class: "chips" }, hk.checks.map((c) => h("span", { class: "chip" }, L(c.ja, c.en))))))
+      : h("p", { class: "muted" }, L("未設定", "not installed")),
+    h("div", { class: "asset-item" }, h("b", {}, L("権限で読み取り禁止", "Denied reads")), h("div", { class: "chips" }, s.settings.deny.map((d) => h("span", { class: "chip mono" }, d))),
+      h("div", { class: "f-ctx" }, s.settings.bypass_permissions ? "⚠ bypassPermissions" : L("bypassPermissions は不使用", "no bypassPermissions"))));
+  const mcpCard = h("div", { class: "card asset" }, h("div", { class: "card-h" }, L("MCP サーバー", "MCP server"), h("span", {}, s.mcp.path)),
+    ...s.mcp.servers.map((sv) => h("div", { class: "asset-item" }, h("b", { class: "mono" }, sv.name), h("div", { class: "f-ctx mono" }, `${sv.type}: ${sv.command} ${sv.args.join(" ")}`))),
+    ...s.mcp.tools.map((t) => h("div", { class: "asset-item" }, h("b", { class: "mono" }, t.name), h("div", { class: "f-ctx" }, t.description.split(". ")[0]))));
+  const agentCard = h("div", { class: "card asset" }, h("div", { class: "card-h" }, L("サブエージェント", "Subagents"), h("span", {}, ".claude/agents/")),
+    ...s.agents.map((a) => h("div", { class: "asset-item" }, h("b", { class: "mono" }, a.name), " ",
+      a.model ? modelChip(a.model, false, a.model) : null,
+      h("div", { class: "chips" }, a.tools.map((t) => h("span", { class: "chip" }, t))), h("div", { class: "f-ctx" }, a.description))));
+  const skillCard = h("div", { class: "card asset" }, h("div", { class: "card-h" }, "Skills", h("span", {}, ".claude/skills/")),
+    ...s.skills.map((x) => h("div", { class: "asset-item" }, h("b", { class: "mono" }, x.name), h("div", { class: "f-ctx" }, x.description))));
+  // the guard rails first (hooks before / after every write, the MCP tools), then who checks and the procedures
   out.push(section("リポジトリ同梱の Claude Code 資産（ファイルから読み込み）", "Claude Code assets in this repository (read from the files)",
-    h("div", { class: "suite-grid" },
-      h("div", { class: "card asset" }, h("div", { class: "card-h" }, "Skills", h("span", {}, ".claude/skills/")),
-        ...s.skills.map((x) => h("div", { class: "asset-item" }, h("b", { class: "mono" }, x.name), h("div", { class: "f-ctx" }, x.description)))),
-      h("div", { class: "card asset" }, h("div", { class: "card-h" }, L("サブエージェント", "Subagents"), h("span", {}, ".claude/agents/")),
-        ...s.agents.map((a) => h("div", { class: "asset-item" }, h("b", { class: "mono" }, a.name), " ",
-          a.model ? modelChip(a.model, false, a.model) : null,
-          h("div", { class: "chips" }, a.tools.map((t) => h("span", { class: "chip" }, t))), h("div", { class: "f-ctx" }, a.description)))),
-      h("div", { class: "card asset" }, h("div", { class: "card-h" }, L("フック", "Hook"), h("span", {}, s.settings.path)),
-        hook ? h("div", { class: "asset-item" }, h("b", { class: "mono" }, `${hook.event} · ${hook.matcher}`),
-          h("div", { class: "f-ctx" }, L(`${hook.runner} -c "…"（${hook.timeout}秒）— 編集のたびに自動実行${hook.feeds_back_to_claude ? "。指摘は終了コード 2 で Claude に返す" : ""}`,
-            `${hook.runner} -c "…" (${hook.timeout} s) — runs after every edit${hook.feeds_back_to_claude ? "; findings go back to Claude via exit code 2" : ""}`)),
-          h("div", { class: "chips" }, hook.checks.map((c) => h("span", { class: "chip" }, L(c.ja, c.en))))) : h("p", { class: "muted" }, L("未設定", "not installed")),
-        h("div", { class: "asset-item" }, h("b", {}, L("権限で読み取り禁止", "Denied reads")), h("div", { class: "chips" }, s.settings.deny.map((d) => h("span", { class: "chip mono" }, d))),
-          h("div", { class: "f-ctx" }, s.settings.bypass_permissions ? "⚠ bypassPermissions" : L("bypassPermissions は不使用", "no bypassPermissions")))),
-      h("div", { class: "card asset" }, h("div", { class: "card-h" }, L("MCP サーバー", "MCP server"), h("span", {}, s.mcp.path)),
-        ...s.mcp.servers.map((sv) => h("div", { class: "asset-item" }, h("b", { class: "mono" }, sv.name), h("div", { class: "f-ctx mono" }, `${sv.type}: ${sv.command} ${sv.args.join(" ")}`))),
-        ...s.mcp.tools.map((t) => h("div", { class: "asset-item" }, h("b", { class: "mono" }, t.name), h("div", { class: "f-ctx" }, t.description.split(". ")[0])))))));
+    h("div", { class: "suite-grid" }, hookCard, mcpCard, agentCard, skillCard)));
   const w = s.workflow;
   if (w) {
     const t = w.totals;

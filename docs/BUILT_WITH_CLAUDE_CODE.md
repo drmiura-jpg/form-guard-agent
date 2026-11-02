@@ -170,6 +170,35 @@ The suite covers fake and mock-transport Claude clients (including the 404 fallb
 archive gate, the web API's human gate, the MCP server over stdio on a cp932 console, and both hook stages. Claude Code made it practical to add regression tests in every
 iteration and, in Phase 3, to drive the web UI end to end in a headless browser before committing.
 
+## 6. Real-machine verification (2026-11-03（火）)
+
+Beyond the offline suite, two checks were run on real software on 2026-11-03（火）.
+
+**Live Claude Code CLI MCP verification.** In a live Claude Code session started with the hackathon CLI wrapper
+(`claude-hackathon.cmd`) in this repository, the `form-guard` server registered in `.mcp.json` answered through all
+five tools:
+
+| MCP tool | Called on | Result |
+|---|---|---|
+| `form_guard_list_demos` | — | 5 demos (3 marked, 2 unmarked) |
+| `form_guard_scan` | form1 | 8 slots |
+| `form_guard_discover_blank_cells` | form4 | 11 candidates — 7 applicant, 4 office-only |
+| `form_guard_fill` | form1 + memo1 (`mode: demo`) | `PASS` draft (`UNAPPROVED_DRAFT_REQUIRES_HUMAN_SIGN_OFF`) with its `review_url` |
+| `form_guard_verify` | blank form1 vs. that draft | `PASS` — 21/21 checks + VIS-01 (0 px drift, no overflow) |
+
+`GET /api/runs/<run_id>` — the draft's `review_url` — then loaded the exact same draft (same SHA-256) into the web UI
+without any AI regeneration, re-verified it against the blank form and left it unapproved for the named reviewer.
+
+**Live Microsoft Word 16.0 & Excel 16.0 COM verification.** The blank and filled copies of all five forms (form1–form5)
+were opened through COM automation in real Microsoft Word 16.0 and Excel 16.0: 0 warnings, exact page counts preserved
+(1 page → 1 page for form1, form2 and form4), clean PDF export, and Excel recalculated the formulas to the expected
+values — form3 `D13 =COUNTIF($F$8:$F$12,"良")` → 3, `F13 =COUNTIF($F$8:$F$12,"要注意")` → 1,
+`H13 =COUNTIF($F$8:$F$12,"要是正")` → 1; form5 `E16 =SUM(E13:E15)` → 17. This complements APP-01 (an independent OOXML
+library opens every file) and the built-in previews, which are close to, but not identical with, Word/Excel rendering.
+
+The 3-minute Japanese demo video follows [DEMO_VIDEO_SCRIPT_JA.md](DEMO_VIDEO_SCRIPT_JA.md): 175 seconds, one step per
+guided-tour deep link `#tour=1` … `#tour=5` of the web UI.
+
 ---
 
 <a id="日本語"></a>
@@ -303,3 +332,24 @@ git の履歴に、Claude Code で進めた各段階が残っています。ど�
 テストは、偽の Claude クライアントとモックの通信（404 フォールバックを含む）、改ざん攻撃、ファイルの関門、Web API の承認ゲート、
 cp932 環境での stdio 経由の MCP サーバー、2 段のフックを対象にしています。Claude Code によって、どの段階でも回帰テストを追加し、Phase 3 ではコミット前にヘッドレス
 ブラウザーで Web 画面を端から端まで操作して確認する進め方を無理なく続けられました。
+
+### 6. 実機での検証（2026-11-03（火））
+
+オフラインのテストに加えて、2026-11-03（火）に実際のソフトウェアで次の 2 つを確認しました。
+
+**Claude Code CLI からの MCP 実行。** このリポジトリでハッカソン用 CLI（`claude-hackathon.cmd`）から起動した Claude Code の
+セッションで、`.mcp.json` に登録した `form-guard` サーバーの 5 ツールをすべて呼び出しました。`form_guard_list_demos` はデモ 5 件
+（マーカーあり 3・なし 2）、`form_guard_scan` は form1 で 8 欄、`form_guard_discover_blank_cells` は form4 で候補 11（申請者 7・
+事務局 4）、`form_guard_fill` は form1 で `PASS` の未承認下書き（`UNAPPROVED_DRAFT_REQUIRES_HUMAN_SIGN_OFF`）と `review_url`、
+`form_guard_verify` はその下書きで `PASS`（21/21 ＋ VIS-01、ずれ 0 px・はみ出しなし）を返しました。続けて `review_url` の
+`GET /api/runs/<run_id>` で、同じ SHA-256 の下書きを AI で作り直すことなく Web 画面に読み込み、白紙様式に対して再検査したうえで、
+確認者の承認待ちのまま表示しました。
+
+**Microsoft Word 16.0・Excel 16.0 での COM 検証。** form1〜form5 の白紙と記入済みを COM 経由で実機の Word 16.0・Excel 16.0 で
+開き、警告 0、ページ数不変（form1・form2・form4 は 1 ページ → 1 ページ）、PDF への出力、計算式の再計算が期待値と一致すること
+（form3：`D13 =COUNTIF($F$8:$F$12,"良")` → 3、`F13 =COUNTIF($F$8:$F$12,"要注意")` → 1、`H13 =COUNTIF($F$8:$F$12,"要是正")` → 1、
+form5：`E16 =SUM(E13:E15)` → 17）を確認しました。独立した OOXML ライブラリで開けることを確かめる APP-01 と、Word/Excel の描画に
+近いものの同一ではない内蔵プレビューを補う確認です。
+
+3分のデモ動画（日本語ナレーション・175秒）は [DEMO_VIDEO_SCRIPT_JA.md](DEMO_VIDEO_SCRIPT_JA.md) の台本と絵コンテに沿って、
+Web 画面のガイドツアー `#tour=1`〜`#tour=5` を順にたどります。

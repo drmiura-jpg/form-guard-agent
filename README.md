@@ -3,7 +3,7 @@
 **Fill only the designated fields of a Word / Excel form, prove that nothing else changed, and keep a human in the loop.**
 **指定欄だけを記入し、様式の変更を検査する書類記入エージェント**
 
-Built for **Built with Claude: Japan 2026** (development started Monday, 2026-11-02 / 2026-11-02（月）). [日本語版はこちら ↓](#日本語) · [How Claude & Claude Code are used ↓](#claude-usage)
+Built for **Built with Claude: Japan 2026** (development started Monday, 2026-11-02 / 2026-11-02（月）). [日本語版はこちら ↓](#日本語) · [How Claude & Claude Code are used ↓](#claude-usage) · [3分デモ動画の台本 / Demo video script (JA)](docs/DEMO_VIDEO_SCRIPT_JA.md)
 
 ![Visual diff: naive regeneration vs Form-Guard](docs/screenshots/01_visual_diff.png)
 
@@ -91,7 +91,7 @@ pip install -r requirements.txt
 
 python -m form_guard.cli --all-demos     # runs the 3 fictional demos -> output/index.html
 python -m form_guard.cli --serve         # web UI on http://127.0.0.1:8000
-pytest -v                                # 182 tests
+pytest -v                                # 185 tests
 ```
 
 Requires Python 3.10+. Without `ANTHROPIC_API_KEY` everything runs on the deterministic **offline demo engine**, so the
@@ -117,7 +117,8 @@ can be signed off (the auto-preview itself can never be approved). An uploaded f
 automatically, and **🔍 Discover blank cells** is there for your own unmarked forms. Each field in Fields & sources
 carries a model-tier badge (`Opus 5.5` / `Sonnet 5.5` / `Haiku 5.5`, or `Offline Rule` plus the live plan).
 Deep links for recordings: `/#tour=1` … `/#tour=5`, `/#demo=form4` (or `/#unmarked=form4`), `/#demo=form2&tab=hitl`,
-`/#view=claude`, `/#lang=en`.
+`/#view=claude`, `/#lang=en`. The 3-minute demo video (Japanese narration, 175 s) walks through these deep links step by
+step: [docs/DEMO_VIDEO_SCRIPT_JA.md](docs/DEMO_VIDEO_SCRIPT_JA.md).
 
 ## Live Claude mode
 
@@ -189,9 +190,9 @@ The repository ships its own Claude Code setup (details and rationale: [docs/BUI
 | `.claude/agents/` | `memo-extractor` (Sonnet: blind verbatim extraction *before* it sees the slots), `field-mapper` (`claude-opus-5-5`: rule-aware proposals — 和暦, caps, condensation), `structure-auditor` (Sonnet: fast deterministic audit), `form-auditor` (Opus: adversarial re-verification and the HITL list). **No file-editing tools (`Edit`/`Write`)**: `memo-extractor` uses only `Read, Grep, Glob`, and `form-auditor` (like `field-mapper` and `structure-auditor`) uses `Read, Grep, Glob, Bash` for verification commands under `PreToolUse` protection |
 | `.claude/settings.json` + `scripts/hook_guard.py` | **Two-stage hook guard.** `PreToolUse` (`Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `Bash`, `PowerShell`) prevents *before anything is written* — exit code 2 + `permissionDecision: "deny"` — any write, copy-over, move or delete of `samples/blank_forms/*.docx` / `*.xlsx`, and any write that would put an Anthropic API key, a literal `ANTHROPIC_API_KEY = "sk-…"`, a personal user-profile path (`C:\Users\<user>`, `/Users/<user>`, `/home/<user>` — any user name, Japanese ones included; placeholders such as `<user>`, `runner` or `root` are fine) or an e-mail address outside `example.com` / `example.jp` / `example.org` (and their subdomains) and `users.noreply.github.com` into a project file — the only other address allowed is exactly `noreply@anthropic.com`. `PostToolUse` (`Write`, `Edit`, `MultiEdit`) verifies *after the write* that Python compiles (`py_compile`) and the edited module imports (< 1.8 s), that JSON parses, and re-scans the file; extensions are compared case-insensitively (`X.PY`, `X.JSON`). Commands: `python scripts/hook_guard.py pre-tool-use` / `post-tool-use` — no `$`, `%` or backtick, so they run identically in Git Bash, PowerShell, cmd, macOS and Linux (activate `.venv` first, see Quick start) |
 | `.mcp.json` | registers the `form-guard` MCP server: `python -m form_guard.mcp_server` (stdio JSON-RPC 2.0, no extra dependencies, UTF-8 forced, messages capped at 10 MB) with `form_guard_list_demos` (all five fictional demos, marked vs unmarked), `form_guard_scan`, `form_guard_discover_blank_cells`, `form_guard_fill` (writes only an **unapproved draft** into `output/mcp_runs/`, `approval_status: UNAPPROVED_DRAFT_REQUIRES_HUMAN_SIGN_OFF` in the result and in `audit_log.json` — nothing is stamped into the document itself; the result's `review_url` opens that exact draft in the web app for sign-off) and `form_guard_verify` (with VIS-01). `mode` defaults to `demo` (offline); `live` is an explicit opt-in. Paths with a `.env*`, `.git`, `.ssh` or `.claude-hackathon` component are refused |
-| Web UI tab **Claude Code 連携 · Architecture** | `GET /api/claude-suite` reads the files above (skills, subagents with their models and tools, the hook's checks, the permission denials, the MCP tools) and shows how they work together, this run's per-field model routing, the routing policy and the measured workflow numbers |
+| Web UI tab **Claude Code 連携 · Architecture** | `GET /api/claude-suite` reads the files above (skills, subagents with their models and tools, both hook stages — `PreToolUse` and `PostToolUse` — with their commands and checks, the permission denials, the MCP tools) and shows how they work together, this run's per-field model routing, the routing policy and the measured workflow numbers |
 
-![Claude Code 連携 · Architecture tab: per-field Haiku / Sonnet / Opus routing and the routing policy](docs/screenshots/07_claude_code_architecture.png)
+![Claude Code 連携 · Architecture tab: the two-stage PreToolUse / PostToolUse hooks, the 5-tool MCP server and the 4 subagents without editing tools, read from the repository files](docs/screenshots/07_claude_code_architecture.png)
 
 <a id="claude-usage"></a>
 ## How Claude & Claude Code Are Used / Claude と Claude Code 機能の目的別使い分け
@@ -268,7 +269,7 @@ auto-preview run (`auto_preview: true`, refused by `/approve`), and with the rev
 (multipart, with `discovery_id` and `confirmed_targets`). `GET /api/unmarked-demos` lists only the two unmarked forms.
 The discovery stays on the server: the client only names candidate ids, and any other field is refused.
 
-![4-stage blank-cell discovery inspector: applicant cells pre-checked, office-only cells locked](docs/screenshots/06_unmarked_discovery.png)
+![Blank-cell discovery inspector on the unmarked form4: applicant cells pre-checked, office-only cells locked, and the ✅ 検出した空欄を承認して外科的差込を実行 button](docs/screenshots/06_unmarked_discovery.png)
 
 ## The demos (100% fictional, non-medical)
 
@@ -320,6 +321,19 @@ tool. It always checks structure and printed constraints; memo grounding is chec
 matching `audit_log.json` (same SHA-256) sits next to the filled file. Without either, the report says
 "structural verification only (no memo provided — grounding not verified)". Reviewer-entered values can be declared
 with `--set SLOT=VALUE`.
+
+## Verified on real machines (2026-11-03（火）)
+
+* **Claude Code CLI → MCP.** In a live Claude Code session (`claude-hackathon.cmd`), all five tools of the `.mcp.json`
+  server answered: `form_guard_list_demos` 5 demos, `form_guard_scan` 8 slots (form1), `form_guard_discover_blank_cells`
+  11 candidates (form4: 7 applicant, 4 office-only), `form_guard_fill` a `PASS` draft with its `review_url`, and
+  `form_guard_verify` `PASS` 21/21 + VIS-01. `GET /api/runs/<run_id>` then opened that exact draft (same SHA-256) in the
+  web UI without any AI regeneration.
+* **Microsoft Word 16.0 & Excel 16.0 (COM).** The blank and filled copies of all five forms opened with 0 warnings, kept
+  their page counts (1 → 1 page for form1, form2, form4), exported to PDF, and recalculated the formulas to the expected
+  values (form3 `COUNTIF` → 3 / 1 / 1, form5 `=SUM(E13:E15)` → 17).
+
+Details: [docs/BUILT_WITH_CLAUDE_CODE.md](docs/BUILT_WITH_CLAUDE_CODE.md) (section 6).
 
 ## Designating fields in your own forms
 
@@ -394,7 +408,7 @@ form_guard/
   static/         vanilla HTML/CSS/JS web UI (Japanese first, 日本語 / EN)
 .claude/          5 skills, 4 read-only subagents, two-stage hooks (settings.json); .mcp.json registers the MCP server
 scripts/          hook_guard.py — PreToolUse template + secret guard, PostToolUse compile / import / JSON check
-docs/             BUILT_WITH_CLAUDE_CODE.md, measure_workflow.py, screenshots
+docs/             BUILT_WITH_CLAUDE_CODE.md, DEMO_VIDEO_SCRIPT_JA.md (3-min demo script), measure_workflow.py, screenshots
 samples/          blank forms (3 marked + 2 unmarked), slot specs, memos, naive regenerations (samples.py)
 tests/            pytest suite (fake + mock-transport Claude, 404 fallback, tampering, archive gate, API gate,
                   MCP over stdio, hooks)
@@ -402,7 +416,8 @@ tests/            pytest suite (fake + mock-transport Claude, 404 fallback, tamp
 
 ## Limitations
 
-* Previews come from a built-in layout engine. They are close to, but not identical with, Word/Excel rendering.
+* Previews come from a built-in layout engine. They are close to, but not identical with, Word/Excel rendering (the
+  demo forms themselves were also checked in real Word / Excel 16.0 — see *Verified on real machines*).
 * The offline engine is rule-based and works best with `label：value` or `■ heading` style memos. Use live mode
   for free-form text.
 * In `.docx` slots, line breaks in a value are folded into one paragraph, so the run structure stays unchanged.
@@ -480,7 +495,8 @@ Claude Code を起動し直してください。
 Web 画面は日本語が既定です（右上で EN に切替）。上部の「🎬 審査員向け 90秒ガイドツアー」の①〜⑤から、①生成AIの作り直し版との
 視覚比較、②マーカーなし白紙からの空欄発見、③原文根拠のハイライトと推測拒否（483万6千円→4,836,000円、印刷された上限、
 法人番号は人の入力待ち）、④Claude のモデル使い分けと Claude Code 連携、⑤21項目の構造検査と人間承認ロック、の各画面へ
-直接移動できます。
+直接移動できます。3分デモ動画の台本と絵コンテ（日本語ナレーション・175秒）は
+[docs/DEMO_VIDEO_SCRIPT_JA.md](docs/DEMO_VIDEO_SCRIPT_JA.md) にあり、このガイドツアー（`#tour=1`〜`#tour=5`）に沿って画面をたどります。
 
 `ANTHROPIC_API_KEY` を設定すると（`.env` も可、Git には含まれません）、`--mode auto` / `--mode live` で Claude を使います。
 既定の `--model-tier auto` では、定型の欄（和暦日付・期間・桁数・書式・選択肢）と空欄ラベルの分類を `claude-haiku-5-5`、
@@ -542,6 +558,17 @@ Web 画面の承認へ引き継ぎます）・`form_guard_verify` の 5 ツー�
 「Claude Code 連携 · Architecture」タブ（`GET /api/claude-suite`）は、これらのファイルを読み込んで連携の流れ、この実行の
 欄ごとのモデル割り当て、ルーティング方針、計測した作業量を表示します。詳しくは
 [docs/BUILT_WITH_CLAUDE_CODE.md](docs/BUILT_WITH_CLAUDE_CODE.md) を参照してください。
+
+### 実機での検証（2026-11-03（火））
+
+- **Claude Code CLI → MCP**：ハッカソン用 CLI（`claude-hackathon.cmd`）で起動した Claude Code から、`.mcp.json` の 5 ツールを
+  すべて実行しました（`form_guard_list_demos` はデモ 5 件、`form_guard_scan` は form1 で 8 欄、`form_guard_discover_blank_cells` は
+  form4 で候補 11（申請者 7・事務局 4）、`form_guard_fill` は `PASS` の下書きと `review_url`、`form_guard_verify` は `PASS` 21/21 ＋
+  VIS-01）。`GET /api/runs/<run_id>` で、同じ SHA-256 の下書きを AI で作り直さずに Web 画面へ読み込みました。
+- **Microsoft Word 16.0・Excel 16.0（COM）**：5 様式の白紙と記入済みを実機で開き、警告 0、ページ数不変（form1・form2・form4 は
+  1 ページ → 1 ページ）、PDF への出力、計算式の再計算が期待値と一致（form3 の `COUNTIF` が 3・1・1、form5 の `=SUM(E13:E15)` が 17）。
+
+詳しくは [docs/BUILT_WITH_CLAUDE_CODE.md](docs/BUILT_WITH_CLAUDE_CODE.md) の第 6 節を参照してください。
 
 ### デモ（すべて架空・医療以外）
 

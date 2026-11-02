@@ -3744,3 +3744,61 @@ def test_r1_audit_a8_model_capabilities_use_an_explicit_known_model_table():
         for claim in ("no call fails with a 400", "so no 400", "400 エラーは起きません", "400エラーは起きません",
                       "旧モデルでもエラーになりません"):
             assert claim not in text, (doc, claim)
+
+
+# ------------------------------------- demo video script, README screenshots, every hook stage in the Claude Code tab
+
+
+def test_demo_video_script_is_japanese_fits_175_seconds_and_follows_the_walkthrough():
+    import importlib.util
+
+    script = (ROOT / "docs" / "DEMO_VIDEO_SCRIPT_JA.md").read_text(encoding="utf-8")
+    steps = re.findall(r"^### Step (\d)（(\d):(\d\d)–(\d):(\d\d)・(\d+)秒）.+ — `#tour=(\d)`$", script, re.M)
+    assert [s[0] for s in steps] == ["1", "2", "3", "4", "5"]
+    assert sorted(s[6] for s in steps) == ["1", "2", "3", "4", "5"]  # every walkthrough step is shown once
+    clock = 0
+    for n, m0, s0, m1, s1, secs, _ in steps:  # back-to-back windows that add up to the stated length
+        start, end = int(m0) * 60 + int(s0), int(m1) * 60 + int(s1)
+        assert start == clock and end - start == int(secs), n
+        clock = end
+    assert clock == 175 <= 180 and "175秒" in script and "180秒以内" in script and "日本語" in script
+    sections = re.split(r"^### Step \d", script, flags=re.M)[1:]
+    for (n, *_, secs, _), sec in zip(steps, sections):  # the stated narration length matches the text, ≤ 6 字/秒
+        narration = re.search(r"\*\*ナレーション\*\*（(\d+)字[^\n]*\n\n((?:> .*\n)+)", sec)
+        stated, quote = int(narration.group(1)), narration.group(2)
+        text = "".join(line[2:] for line in quote.splitlines()).replace(" ", "")
+        assert len(text) == stated and stated / int(secs) <= 6.0, (n, len(text), stated)
+    for needle in ("http://127.0.0.1:8000/", "検出した空欄を承認して外科的差込を実行", "needs_human_input", "PreToolUse",
+                   "PostToolUse", "MODEL_FALLBACK_CHAIN", "web_handoff.json", "VIS-01", "最終判断は、いつも人です"):
+        assert needle in script, needle
+    spec = importlib.util.spec_from_file_location("hook_guard_probe_script", HOOK)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.hygiene_findings(script) == []  # no user-profile path, real e-mail address or key
+    assert "](docs/DEMO_VIDEO_SCRIPT_JA.md)" in (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "](DEMO_VIDEO_SCRIPT_JA.md)" in (ROOT / "docs" / "BUILT_WITH_CLAUDE_CODE.md").read_text(encoding="utf-8")
+
+
+def test_readme_screenshots_are_real_landscape_pngs():
+    import struct
+
+    shots = sorted((ROOT / "docs" / "screenshots").glob("*.png"))
+    assert [p.name for p in shots] == ["01_visual_diff.png", "02_fields_and_sources.png", "03_structural_audit.png",
+                                       "04_human_approval.png", "05_slider_xlsx.png", "06_unmarked_discovery.png",
+                                       "07_claude_code_architecture.png"]
+    for p in shots:
+        head = p.read_bytes()[:24]
+        assert head[:8] == b"\x89PNG\r\n\x1a\n" and head[12:16] == b"IHDR", p.name
+        w, h = struct.unpack(">II", head[16:24])
+        assert w >= 1280 and 800 <= h <= w and p.stat().st_size > 100_000, (p.name, w, h)  # a real capture
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    for name in ("01_visual_diff.png", "06_unmarked_discovery.png", "07_claude_code_architecture.png"):
+        assert f"](docs/screenshots/{name})" in readme, name
+
+
+def test_claude_code_tab_lists_every_hook_stage_and_puts_hooks_and_mcp_first():
+    js = (ROOT / "form_guard" / "static" / "app.js").read_text(encoding="utf-8")
+    suite = js[js.index("function suiteSections") :]
+    assert "settings.hooks[0]" not in suite and "hooks.map((hk)" in suite  # was: only the first hook (PreToolUse)
+    assert "L(hk.when.ja, hk.when.en)" in suite and "hookCmd(hk)" in suite and 'runner} -c "…"' not in suite
+    assert 'h("div", { class: "suite-grid" }, hookCard, mcpCard, agentCard, skillCard)' in suite
