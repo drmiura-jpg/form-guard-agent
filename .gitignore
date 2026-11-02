@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+
+# Test / tool caches
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Secrets — never commit API keys
+.env
+.env.*
+
+# Generated pipeline outputs (re-create with: python -m form_guard.cli --all-demos)
+output/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+~$*

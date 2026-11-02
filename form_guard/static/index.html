@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="ja" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Form-Guard Agent — fill only the designated fields</title>
+<link rel="stylesheet" href="/static/styles.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><rect x="5" y="3" width="22" height="26" rx="3"/><path d="M10 11h12M10 16h12M10 21h7"/><path class="tick" d="M18.5 22.5l2.6 2.6 5-5.6"/></svg>
+    <div>
+      <div class="brand-name">Form-Guard Agent</div>
+      <div class="brand-sub">指定欄だけを記入し、様式の変更を検査する書類記入エージェント</div>
+    </div>
+  </div>
+  <div class="top-actions">
+    <label class="mode-pick" title="Auto uses Claude when an API key is configured, otherwise the offline demo engine">
+      <span>Engine</span>
+      <select id="modeSelect">
+        <option value="auto">Auto</option>
+        <option value="demo">Offline demo (no key)</option>
+        <option value="live">Live Claude</option>
+      </select>
+    </label>
+    <span id="engineBadge" class="pill pill-neutral">…</span>
+    <button id="themeToggle" class="icon-btn" type="button" aria-label="Toggle dark mode">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="rail">
+    <section>
+      <h2 class="rail-h">Demo forms <span>デモ様式（すべて架空）</span></h2>
+      <div id="demoList" class="demo-list"></div>
+    </section>
+    <section>
+      <h2 class="rail-h">Your own form <span>自分の様式で試す</span></h2>
+      <form id="uploadForm" class="upload">
+        <label class="file-drop">
+          <input id="fileInput" type="file" accept=".docx,.xlsx" required>
+          <span id="fileLabel">Choose a .docx / .xlsx with <code>{{項目名}}</code> or <code>[記入欄: 項目名]</code> markers</span>
+        </label>
+        <label class="field-l">Source memo <span>入力メモ</span>
+          <textarea id="memoInput" rows="7" placeholder="会議メモ・メールなどを貼り付け（実在の個人情報は入れないでください）" required></textarea>
+        </label>
+        <details class="spec-opt"><summary>Optional slot spec (.slots.json)</summary>
+          <input id="specInput" type="file" accept=".json">
+          <p class="hint">Aliases for the offline engine, or <code>targets</code> to fill empty table cells by coordinates.</p>
+        </details>
+        <button class="btn btn-primary" type="submit">Run pipeline</button>
+      </form>
+    </section>
+    <section class="rail-note">
+      <p><b>Human-in-the-loop by design.</b> AI output is a draft. Every value shows its verbatim source;
+      a person confirms each field before the file can be downloaded.</p>
+      <p>人が全項目を確認するまで、ダウンロードはサーバー側でロックされます。</p>
+    </section>
+  </aside>
+
+  <main class="workspace">
+    <section id="emptyState" class="empty">
+      <h1>Fill the form. Prove nothing else changed.</h1>
+      <p class="lede">Generative AI that re-writes a Word or Excel form tends to break borders, merged cells and legal text, and to invent numbers.
+        Form-Guard writes <em>only</em> into the designated fields, byte-for-byte, and shows a source for every value.</p>
+      <ol class="steps">
+        <li><b>Scan</b><span>find {{markers}} and printed rules (字数・和暦・上限)</span></li>
+        <li><b>Map &amp; self-correct</b><span>Claude or the offline engine, verbatim quotes only</span></li>
+        <li><b>Surgical write</b><span>replace marker characters inside the XML, nothing else</span></li>
+        <li><b>Verify</b><span>ZIP · XML skeleton · tables · borders · text · grounding</span></li>
+        <li><b>Human sign-off</b><span>checklist, then the download unlocks</span></li>
+      </ol>
+      <p class="muted">Pick a demo on the left to start. すべてのサンプル様式・メモは本ハッカソン期間中に作成した架空のものです。</p>
+    </section>
+
+    <section id="runView" hidden>
+      <div class="run-head">
+        <div class="run-title">
+          <div id="runStatus" class="status"></div>
+          <div>
+            <h1 id="runTitle"></h1>
+            <div id="runSub" class="muted"></div>
+          </div>
+        </div>
+        <div class="run-links">
+          <a id="reportLink" class="btn btn-ghost" target="_blank" rel="noopener">Full report ↗</a>
+          <a id="auditLink" class="btn btn-ghost" target="_blank" rel="noopener">Audit JSON ↗</a>
+        </div>
+      </div>
+      <div id="kpis" class="kpis"></div>
+
+      <nav class="tabs" role="tablist">
+        <button role="tab" data-tab="visual" aria-selected="true">Visual diff <span>見た目の比較</span></button>
+        <button role="tab" data-tab="fields" aria-selected="false">Fields &amp; sources <span>記入値と根拠</span></button>
+        <button role="tab" data-tab="audit" aria-selected="false">Structural audit <span>構造検査</span></button>
+        <button role="tab" data-tab="hitl" aria-selected="false">Human approval <span>人による最終確認</span></button>
+      </nav>
+
+      <div id="tab-visual" class="tab-panel">
+        <div class="toolbar">
+          <div class="seg" id="cmpMode">
+            <button data-v="naive" class="on">Naive AI ↔ Form-Guard</button>
+            <button data-v="blank">Blank original ↔ Form-Guard</button>
+          </div>
+          <div class="seg" id="cmpLayout">
+            <button data-v="split" class="on">Side by side</button>
+            <button data-v="slider">Slider</button>
+          </div>
+          <div class="legend">
+            <span class="lg lg-good">✓ written value</span>
+            <span class="lg lg-warn">⚠ awaiting human input</span>
+            <span class="lg lg-info">▭ designated field</span>
+            <span class="lg lg-bad">✗ naive regeneration problem</span>
+          </div>
+        </div>
+        <div id="cmpSplit" class="cmp-split">
+          <figure class="pane"><figcaption id="leftCap"></figcaption><div id="leftSvg" class="svg-box"></div></figure>
+          <figure class="pane"><figcaption id="rightCap"></figcaption><div id="rightSvg" class="svg-box"></div></figure>
+        </div>
+        <div id="cmpSlider" class="cmp-slider" hidden>
+          <div class="slider-stage" id="sliderStage">
+            <div class="layer layer-a" id="sliderA"></div>
+            <div class="layer layer-b" id="sliderB"></div>
+            <div class="slider-handle" id="sliderHandle"><span>⇆</span></div>
+          </div>
+          <input id="sliderRange" type="range" min="0" max="100" value="50" aria-label="Comparison slider">
+          <div class="slider-caps"><span id="sliderCapA"></span><span id="sliderCapB"></span></div>
+        </div>
+        <div class="verdicts">
+          <div class="verdict verdict-bad" id="naiveVerdict"></div>
+          <div class="verdict verdict-good" id="fgVerdict"></div>
+        </div>
+      </div>
+
+      <div id="tab-fields" class="tab-panel" hidden>
+        <div class="fields-grid">
+          <div class="card table-card">
+            <table class="fields">
+              <thead><tr><th>Field</th><th>Value</th><th class="num">Chars</th><th>Status</th><th>Source</th></tr></thead>
+              <tbody id="fieldRows"></tbody>
+            </table>
+          </div>
+          <div class="side">
+            <div class="card" id="fieldDetail"><p class="muted">Select a field — or click a highlighted value in the preview.</p></div>
+            <div class="card memo-card">
+              <div class="card-h">Source memo <span>入力メモ（黄色＝根拠として引用された箇所）</span></div>
+              <div id="memoView" class="memo"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="tab-audit" class="tab-panel" hidden>
+        <div id="auditGroups" class="audit-groups"></div>
+        <div class="card">
+          <div class="card-h">ZIP entries <span>パーツ単位のSHA-256</span></div>
+          <table class="mono-table"><thead><tr><th>Entry</th><th>Role</th><th>SHA-256 (original)</th><th>Result</th></tr></thead><tbody id="entryRows"></tbody></table>
+        </div>
+        <div class="card">
+          <div class="card-h">Surgical patch manifest <span>実際に書き換えたバイト範囲</span></div>
+          <table class="mono-table"><thead><tr><th>Part</th><th>Field</th><th class="num">Bytes</th><th>Change</th></tr></thead><tbody id="patchRows"></tbody></table>
+        </div>
+      </div>
+
+      <div id="tab-hitl" class="tab-panel" hidden>
+        <div id="pendingBox"></div>
+        <div class="card">
+          <div class="card-h">Final confirmation checklist <span>全項目を人が確認してから出力</span></div>
+          <ul id="checklist" class="checklist"></ul>
+          <div class="approve-row">
+            <label class="field-l inline">Reviewer <span>確認者名</span><input id="reviewerInput" type="text" maxlength="80" placeholder="例：架空 花子（確認担当）"></label>
+            <button id="checkAll" class="btn btn-ghost" type="button">Check all (I reviewed each)</button>
+            <button id="approveBtn" class="btn btn-primary" type="button" disabled>Approve</button>
+            <a id="downloadBtn" class="btn btn-success disabled" aria-disabled="true">⬇ Download verified file</a>
+          </div>
+          <div id="approveMsg" class="msg"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="busy" class="busy" hidden>
+  <div class="busy-card">
+    <div class="spinner" aria-hidden="true"></div>
+    <div><b>Running pipeline…</b><div class="muted" id="busyStep">Scan → Map &amp; self-correct → Surgical write → Verify → Visual diff</div></div>
+  </div>
+</div>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<footer class="foot">
+  All sample forms, memos and names are 100% fictional and were written during the hackathon. Do not upload real personal data.
+  ・ 記入内容の事実確認と提出判断は人が行います（AIは材料と根拠を示すだけです）。
+</footer>
+</body>
+</html>
