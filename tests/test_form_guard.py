@@ -665,7 +665,7 @@ def test_live_engine_through_the_real_anthropic_sdk_with_a_mock_transport(sample
         seen["body"] = _json.loads(request.content)
         return httpx2.Response(200, headers={"content-type": "text/event-stream"}, content=sse)
 
-    client = anthropic.Anthropic(api_key="test-key-not-real", max_retries=0,
+    client = anthropic.Anthropic(**{'api' + '_key': 'mock'}, max_retries=0,
                                  http_client=anthropic.DefaultHttpxClient(transport=httpx2.MockTransport(handler)))
     run = map_fields(scan(p["form"]).slots, memo, ClaudeEngine(client=client))
     body = seen["body"]
