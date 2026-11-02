@@ -85,6 +85,11 @@ def build_report_html(d: dict[str, Any]) -> str:
     filled = sum(1 for m in maps if m["status"] in ("filled", "human_entered"))
     pending = [m for m in maps if m["status"] == "needs_human_input"]
     untouched = [e for e in rep["entry_hashes"] if e["role"] == "untouched"]
+    # count only parts that really are byte-identical (content and raw compressed stream)
+    untouched_identical = [e for e in untouched if e.get("identical") and e.get("raw_identical")]
+    n_changed = len(untouched) - len(untouched_identical)
+    identical_tile = (str(len(untouched_identical)) if not n_changed
+                      else f"{len(untouched_identical)}/{len(untouched)} (changed: {n_changed})")
     stats = rep.get("stats", {})
     prev = d.get("previews", {})
     figs = []
@@ -104,7 +109,7 @@ def build_report_html(d: dict[str, Any]) -> str:
         hist = "".join(f"<li>#{a['attempt']} {'✓' if a['passed'] else '✗'} {E(a['action'])} → «{E(a['value'][:80])}»"
                        + (f" <span class='muted'>[{E(', '.join(i['code'] for i in a['issues']))}]</span>" if a["issues"] else "")
                        + "</li>" for a in m["attempts"])
-        status_cls = {"filled": "ok", "human_entered": "info", "needs_human_input": "warn"}[m["status"]]
+        status_cls = {"filled": "ok", "human_entered": "info", "needs_human_input": "warn"}.get(m["status"], "warn")
         warn = "".join(f"<div class='muted'>⚠ {E(w)}</div>" for w in m["warnings"][:3])
         rows.append(f"<tr><td><b>{E(s.get('label', m['slot_id']))}</b><div class='muted'>{E(s.get('context_label', ''))}</div></td>"
                     f"<td class='v'>{E(val)}{warn}</td><td>{E(lim)}</td><td><span class='badge {status_cls}'>{E(m['status'])}</span>{flags}</td>"
@@ -123,6 +128,12 @@ def build_report_html(d: dict[str, Any]) -> str:
                      f"<div class='card'>{_checks_table(naive['checks'])}</div>"
     eng = d["engine"]
     fb = f" — <b>fallback:</b> {E(eng['fallback_reason'])}" if eng.get("fallback_reason") else ""
+    # Never claim an uploaded form, an edited memo or reviewer-typed values are fictional.
+    footer = ("This report is generated from the supplied form and memo. Reviewing the facts and deciding to submit "
+              "is the human reviewer's responsibility. ｜ このレポートは入力された様式・メモに基づきます。"
+              "記入内容の最終確認と提出判断は人が行います。")
+    if d.get("is_builtin_demo"):
+        footer += "（Built-in demo: all sample forms, memos and data are 100% fictional / 付属デモの様式・メモ・データはすべて架空です）"
     return f"""<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Form-Guard report — {E(d['form']['title'])}</title><style>{CSS}</style></head><body>
 <header><div class="muted">Form-Guard Agent · verification report · {E(d['created_at'])}</div>
@@ -133,7 +144,7 @@ def build_report_html(d: dict[str, Any]) -> str:
 <div class="tile"><b>{filled}/{len(maps)}</b><span>fields filled / 記入済み</span></div>
 <div class="tile"><b>{len(pending)}</b><span>awaiting human input / 人の入力待ち</span></div>
 <div class="tile"><b>{rep['passed_count']}/{rep['passed_count'] + rep['failed_count']}</b><span>checks passed / 検査合格</span></div>
-<div class="tile"><b>{len(untouched)}</b><span>ZIP entries byte-identical / 無変更パーツ</span></div>
+<div class="tile"><b>{E(identical_tile)}</b><span>ZIP entries byte-identical / 無変更パーツ</span></div>
 <div class="tile"><b>{stats.get('boilerplate_blocks', '–')}</b><span>boilerplate blocks unchanged / 定型文</span></div>
 <div class="tile"><b>{rep['ungrounded_claims_count']}</b><span>ungrounded claims / 根拠なし</span></div>
 </div>
@@ -147,9 +158,7 @@ def build_report_html(d: dict[str, Any]) -> str:
 <h2>Human-in-the-Loop checklist / 人による最終確認</h2><div class="card"><p class="muted">Sign-off and download happen in the
 web app (<code>python -m form_guard.cli --serve</code>); the download stays locked until every item is confirmed.</p><ul>{hitl}</ul></div>
 <h2>Surgical patch manifest / 変更箇所一覧</h2><div class="card"><table><tr><th>Part</th><th>Slot</th><th>Bytes</th><th>Kind</th><th>Change</th></tr>{patches}</table></div>
-</main><footer>All forms, memos and data in this report are 100% fictional and were created from scratch for this demo.
-Form-Guard prepares a draft and evidence; checking the facts and deciding to submit is the human reviewer's responsibility.
-｜ 本レポートの様式・メモ・データはすべて架空です。記入内容の最終確認と提出判断は人が行います。</footer></body></html>"""
+</main><footer>{footer}</footer></body></html>"""
 
 
 def build_index_html(summaries: list[dict[str, Any]]) -> str:

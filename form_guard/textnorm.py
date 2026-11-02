@@ -11,11 +11,17 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from datetime import date
-from typing import Optional
+from typing import Any, Optional
 
 # ----------------------------------------------------------------------- dates
 
 ERAS = [("令和", date(2019, 5, 1)), ("平成", date(1989, 1, 8)), ("昭和", date(1926, 12, 25))]
+# First and last day of each era (令和 is open-ended).
+ERA_BOUNDS: dict[str, tuple[date, Optional[date]]] = {
+    "令和": (date(2019, 5, 1), None),
+    "平成": (date(1989, 1, 8), date(2019, 4, 30)),
+    "昭和": (date(1926, 12, 25), date(1989, 1, 7)),
+}
 WEEKDAYS_JA = "月火水木金土日"
 
 _D = "[0-9０-９]"
@@ -36,6 +42,8 @@ class DateMatch:
     day: int
     weekday: Optional[str] = None
     kind: str = "western"
+    era: Optional[str] = None
+    era_year: Optional[int] = None
 
     @property
     def as_date(self) -> Optional[date]:
@@ -49,14 +57,55 @@ class DateMatch:
     def key(self) -> tuple[Optional[int], int, int]:
         return (self.year, self.month, self.day)
 
+    def problem(self) -> Optional[tuple[str, str]]:
+        """``(code, message)`` if this is not a real date: impossible day, outside its era, or wrong weekday."""
+        if self.year is None:
+            try:
+                date(2000, self.month, self.day)  # a leap year: only days that never exist are rejected
+            except ValueError:
+                return "date_invalid", f"{self.month}月{self.day}日 does not exist / 存在しない日付です"
+            return None
+        d = self.as_date
+        if d is None:
+            return "date_invalid", f"{self.year}年{self.month}月{self.day}日 is not a real calendar date / 存在しない日付です"
+        if self.era:
+            err = era_problem(self.era, self.era_year, d)
+            if err:
+                return "date_invalid", err
+        if self.weekday and weekday_ja(d) != self.weekday:
+            return "weekday_mismatch", (f"{d.isoformat()} is a {weekday_ja(d)}曜日, not （{self.weekday}） "
+                                        f"/ 曜日が暦と一致しません（{weekday_ja(d)}曜日）")
+        return None
+
 
 def _n(s: str) -> int:
     return int(unicodedata.normalize("NFKC", s))
 
 
+def _era_number(y: str) -> int:
+    return 1 if y == "元" else _n(y)
+
+
+def era_problem(era: str, era_year: Optional[int], d: Optional[date] = None) -> Optional[str]:
+    """Why an era year / era date is impossible (year 0, before the era began, after it ended), or None."""
+    start, end = ERA_BOUNDS[era]
+    if era_year is not None and era_year < 1:
+        return f"{era}{era_year}年 does not exist (era years start at 元年) / 存在しない年です"
+    if era_year is not None and end is not None and start.year + era_year - 1 > end.year:
+        return f"{era}{era_year}年 is after the {era} era ended ({end.isoformat()}) / 元号の期間外です"
+    if d is not None and (d < start or (end is not None and d > end)):
+        span = f"{start.isoformat()}～{end.isoformat() if end else ''}"
+        return f"{d.isoformat()} is outside the {era} era ({span}) / 元号の期間外の日付です"
+    return None
+
+
 def era_to_year(era: str, y: str) -> int:
-    start = dict(ERAS)[era]
-    return start.year + (1 if y == "元" else _n(y)) - 1
+    """Western year of an era year; raises ValueError for 0年 or a year after the era ended."""
+    n = _era_number(y)
+    err = era_problem(era, n)
+    if err:
+        raise ValueError(err)
+    return ERA_BOUNDS[era][0].year + n - 1
 
 
 def find_dates(text: str) -> list[DateMatch]:
@@ -67,7 +116,7 @@ def find_dates(text: str) -> list[DateMatch]:
     def free(a: int, b: int) -> bool:
         return all(b <= s or a >= e for s, e in taken)
 
-    def add(m, year, month, day, kind):
+    def add(m, year, month, day, kind, era=None, era_year=None):
         if not free(m.start(), m.end()):
             return
         end = m.end()
@@ -79,10 +128,11 @@ def find_dates(text: str) -> list[DateMatch]:
         if not (1 <= month <= 12 and 1 <= day <= 31):
             return
         taken.append((m.start(), end))
-        found.append(DateMatch(m.start(), end, year, month, day, wd, kind))
+        found.append(DateMatch(m.start(), end, year, month, day, wd, kind, era, era_year))
 
     for m in _WAREKI_RE.finditer(text):
-        add(m, era_to_year(m.group(1), m.group(2)), _n(m.group(3)), _n(m.group(4)), "wareki")
+        n = _era_number(m.group(2))  # the year is kept even if the era year is impossible; problem() reports it
+        add(m, ERA_BOUNDS[m.group(1)][0].year + n - 1, _n(m.group(3)), _n(m.group(4)), "wareki", m.group(1), n)
     for m in _WESTERN_KANJI_RE.finditer(text):
         add(m, _n(m.group(1)), _n(m.group(2)), _n(m.group(3)), "western")
     for m in _WESTERN_SEP_RE.finditer(text):
@@ -95,29 +145,69 @@ def find_dates(text: str) -> list[DateMatch]:
     return found
 
 
-def to_wareki(d: date) -> str:
-    for name, start in ERAS:
-        if d >= start:
-            y = d.year - start.year + 1
-            return f"{name}{'元' if y == 1 else y}年{d.month}月{d.day}日"
-    raise ValueError(f"date before supported eras: {d}")
+def find_invalid_dates(text: str) -> list[tuple[DateMatch, str, str]]:
+    """Date expressions that cannot be real: 2026年2月30日, 2026/02/29, 令和元年1月1日, 平成31年5月1日, wrong （曜）."""
+    out = []
+    for d in find_dates(text):
+        p = d.problem()
+        if p:
+            out.append((d, p[0], p[1]))
+    return out
 
 
 def weekday_ja(d: date) -> str:
     return WEEKDAYS_JA[d.weekday()]
 
 
-WAREKI_FULL_RE = re.compile(r"^(令和|平成|昭和)(元|[0-9]{1,2})年([0-9]{1,2})月([0-9]{1,2})日$")
+def to_wareki(d: date, include_weekday: bool = True) -> str:
+    """令和8年11月2日（月） — human-facing dates carry the weekday unless ``include_weekday`` is False."""
+    for name, start in ERAS:
+        if d >= start:
+            y = d.year - start.year + 1
+            out = f"{name}{'元' if y == 1 else y}年{d.month}月{d.day}日"
+            return out + (f"（{weekday_ja(d)}）" if include_weekday else "")
+    raise ValueError(f"date before supported eras: {d}")
+
+
+def to_western(d: date, include_weekday: bool = True) -> str:
+    return f"{d.year}年{d.month}月{d.day}日" + (f"（{weekday_ja(d)}）" if include_weekday else "")
+
+
+_WD_SUFFIX = r"(?:[（(]([月火水木金土日])[）)])?"
+WAREKI_FULL_RE = re.compile(rf"^(令和|平成|昭和)(元|[0-9]{{1,2}})年([0-9]{{1,2}})月([0-9]{{1,2}})日{_WD_SUFFIX}$")
+WESTERN_FULL_RE = re.compile(rf"^([0-9]{{4}})(?:年([0-9]{{1,2}})月([0-9]{{1,2}})日|[/\-.]([0-9]{{1,2}})[/\-.]([0-9]{{1,2}})){_WD_SUFFIX}$")
+
+
+def check_wareki(s: str) -> tuple[Optional[date], Optional[tuple[str, str]]]:
+    """Strict 和暦 date (optional （曜）): ``(date, None)`` if valid, ``(None, None)`` if it is not
+    和暦 syntax at all, ``(None, (code, message))`` if it is 和暦 but impossible (2月30日, outside the
+    era, 令和0年, weekday that does not match the calendar)."""
+    m = WAREKI_FULL_RE.match(s.strip())
+    if not m:
+        return None, None
+    era, y, mo, dd, wd = m.groups()
+    n = _era_number(y)
+    dm = DateMatch(0, len(s), ERA_BOUNDS[era][0].year + n - 1, int(mo), int(dd), wd, "wareki", era, n)
+    p = dm.problem()
+    return (None, p) if p else (dm.as_date, None)
+
+
+def check_full_date(s: str) -> tuple[Optional[date], Optional[tuple[str, str]]]:
+    """Like ``check_wareki`` but also accepts Western dates (2026年11月2日（月）, 2026/11/02)."""
+    d, p = check_wareki(s)
+    if d is not None or p is not None:
+        return d, p
+    m = WESTERN_FULL_RE.match(s.strip())
+    if not m:
+        return None, None
+    y, mo1, d1, mo2, d2, wd = m.groups()
+    dm = DateMatch(0, len(s), int(y), int(mo1 or mo2), int(d1 or d2), wd, "western")
+    p = dm.problem()
+    return (None, p) if p else (dm.as_date, None)
 
 
 def parse_wareki_exact(s: str) -> Optional[date]:
-    m = WAREKI_FULL_RE.match(s)
-    if not m:
-        return None
-    try:
-        return date(era_to_year(m.group(1), m.group(2)), int(m.group(3)), int(m.group(4)))
-    except ValueError:
-        return None
+    return check_wareki(s)[0]
 
 
 # --------------------------------------------------------------------- numbers
@@ -217,20 +307,30 @@ def parse_yen_exact(s: str) -> Optional[int]:
 
 
 def quantities(text: str) -> set[float]:
-    """All numeric quantities in a text, with 万/千/億 compounds expanded (dates excluded)."""
+    """All numeric quantities in a text, with 万/千/億 compounds expanded (dates excluded).
+
+    A compound such as ``483万6千円`` contributes only its total (4,836,000): its digit groups
+    ``483`` and ``6`` are not quantities the text states, so they are never exposed on their own
+    (otherwise a value of ``6円`` would look supported by ``483万6千円``).
+    """
     t = unicodedata.normalize("NFKC", text)
     vals: set[float] = set()
     for d in sorted(find_dates(t), key=lambda d: -d.start):
         vals.update(float(x) for x in (d.year, d.month, d.day) if x is not None)
-        t = t[: d.start] + " " + t[d.end :]
+        t = t[: d.start] + " " * (d.end - d.start) + t[d.end :]
+    covered: list[tuple[int, int]] = []
     for a in find_amounts(t):
         vals.add(float(a.value))
+        covered.append((a.start, a.end))
     for m in re.finditer(rf"(?:{_NUM}\s*[億万千]\s*)+(?:{_NUM})?", t):
         try:
             vals.add(float(parse_compound(m.group(0))))
         except ValueError:
-            pass
+            continue
+        covered.append((m.start(), m.end()))
     for m in _PLAIN_NUM_RE.finditer(t):
+        if any(s <= m.start() < e for s, e in covered):
+            continue
         try:
             vals.add(_to_float(m.group(0)))
         except ValueError:
@@ -309,10 +409,17 @@ def char_width_em(ch: str) -> float:
 # --------------------------------------------------------- extractive condenser
 
 _FILLER_START = re.compile(r"^(?:なお|ちなみに|参考までに|余談|念のため|補足)")
+_STATUS_REMARK = re.compile(r"(?:異常|異状|問題)(?:は)?(?:なし|無し|ありません)")
 _ACTION_WORDS = re.compile(
     r"交換|依頼|実施|提出|確認|是正|修理|変更|追加|削減|増額|減額|合意|中止|延期|予定|必要|補う|賄う|導入|申請|対応|改修"
 )
+_PROVISIONAL_WORDS = re.compile(r"短縮|補う|完了まで|増額|追加負担金")
+# Conditions / restrictions: deleting text that contains one of these can change what the value permits.
+RESTRICTIVE_WORDS = re.compile(r"ただし|但し|場合に限り|限り|禁止|除く|除き|不可|条件|なければ")
+# Interim measures / scope limits: kept ahead of anything else, but deletable as a last resort.
+_SAFETY_WORDS = re.compile(r"完了まで|短縮|のみ")
 _PAREN_RE = re.compile(r"[（(][^（）()]*[）)]")
+_WEEKDAY_NOTE_RE = re.compile(r"[（(][月火水木金土日](?:曜日?)?[）)]")
 
 
 def split_sentences(text: str) -> list[tuple[int, int]]:
@@ -347,17 +454,39 @@ def _bigrams(s: str) -> set[str]:
     return {s[i : i + 2] for i in range(len(s) - 1)}
 
 
+def is_remark(sentence: str) -> bool:
+    """Supplementary or status remarks: 「なお、…」「念のため…」「…異常なし」."""
+    return bool(_FILLER_START.match(sentence.lstrip()) or _STATUS_REMARK.search(sentence))
+
+
+def protection(piece: str) -> int:
+    """2 = states a condition / restriction, 1 = interim measure or scope limit, 0 = neither."""
+    if RESTRICTIVE_WORDS.search(piece):
+        return 2
+    if _SAFETY_WORDS.search(piece):
+        if is_remark(piece) and not re.search(r"完了まで|短縮", piece):
+            return 0  # 「なお、…清掃のみで異常なし」: 'のみ' in a status remark is not a condition
+        return 1
+    return 0
+
+
+def _long_aside(sentence: str) -> bool:
+    return any(len(m.group(0)) > 10 for m in _PAREN_RE.finditer(sentence))
+
+
 def _sentence_score(sentence: str, first: bool) -> float:
     score = 0.0
     if re.search(r"[0-9０-９]", sentence):
         score += 3
     if _ACTION_WORDS.search(sentence):
         score += 2
+    if _PROVISIONAL_WORDS.search(sentence):
+        score += 2
     if first:
         score += 2
-    if _FILLER_START.match(sentence):
+    if is_remark(sentence):
         score -= 3
-    if "（" in sentence or "(" in sentence:
+    if _long_aside(sentence):
         score -= 1
     return score
 
@@ -367,67 +496,146 @@ class Condensed:
     text: str
     fragments: list[str]
     removed: list[str]
+    unsafe: bool = False  # a deleted piece stated a condition / restriction: a human must confirm the wording
 
 
 def condense_extractive(text: str, max_chars: int, joiner: str = "") -> Optional[Condensed]:
-    """Shorten text to <= max_chars by deleting whole sentences / long asides only.
+    """Shorten text to <= max_chars by deleting whole sentences / asides only.
 
-    Every fragment of the result is a verbatim substring of the input, so the
-    result stays 100% grounded. Returns None if it cannot fit without rewriting.
+    Every fragment of the result is a verbatim substring of the input, so the result stays
+    grounded. Deletion order, least important first:
+
+      1. supplementary or status remarks (「なお、…」「…異常なし」) and content-free sentences;
+      2. long parenthetical asides that state no condition;
+      3. weekday notes after dates (「11月6日（金）」→「11月6日」), redundant once the date is given;
+      4. other sentences without conditions or interim measures (redundancy penalised);
+      5. last resort: interim measures (完了まで, 短縮, のみ), then conditions / restrictions
+         (ただし, 場合に限り, 禁止, 除く, 不可, 条件 …) — deleting the latter marks the result
+         ``unsafe`` so it is only offered as a suggestion, never written automatically.
+
+    Anything deleted that fits back afterwards is restored. ``removed`` lists every deleted piece
+    in reading order. Returns None if the text cannot fit without rewriting.
     """
     if len(text) <= max_chars:
         return Condensed(text, [text], [])
     spans = split_sentences(text)
     if not spans:
         return None
-    items = [{"span": sp, "text": text[sp[0] : sp[1]], "score": _sentence_score(text[sp[0] : sp[1]], i == 0),
-              "pieces": [text[sp[0] : sp[1]]], "keep": True} for i, sp in enumerate(spans)]
-    removed: list[str] = []
+    items = []
+    for i, (s, e) in enumerate(spans):
+        sent, units, cur = text[s:e], [], 0
+        for m in _PAREN_RE.finditer(sent):
+            if m.start() > cur:
+                units.append({"kind": "body", "start": s + cur, "end": s + m.start(), "kept": True})
+            weekday = bool(_WEEKDAY_NOTE_RE.fullmatch(m.group(0))) and m.start() > 0 and sent[m.start() - 1] == "日"
+            units.append({"kind": "weekday" if weekday else "paren", "start": s + m.start(), "end": s + m.end(),
+                          "kept": True})
+            cur = m.end()
+        if cur < len(sent):
+            units.append({"kind": "body", "start": s + cur, "end": e, "kept": True})
+        items.append({"start": s, "end": e, "first": i == 0, "score": _sentence_score(sent, i == 0), "units": units,
+                      "kept": True})
+    ops: list[tuple[str, Any]] = []
+
+    def sent_text(it) -> str:
+        return "".join(text[u["start"] : u["end"]] for u in it["units"] if u["kept"])
+
+    def unit_text(u) -> str:
+        return text[u["start"] : u["end"]]
+
+    def kept_items():
+        return [it for it in items if it["kept"]]
 
     def total() -> int:
-        kept = [it for it in items if it["keep"]]
-        return sum(len("".join(it["pieces"])) for it in kept) + len(joiner) * max(0, len(kept) - 1)
+        kept = kept_items()
+        return sum(len(sent_text(it)) for it in kept) + len(joiner) * max(0, len(kept) - 1)
 
-    # 1) drop filler sentences ("なお、…")
-    for it in sorted(items, key=lambda it: (it["score"], -it["span"][0])):
+    def drop_sentence(it) -> None:
+        it["kept"] = False
+        ops.append(("sentence", it))
+
+    def drop_units(us) -> None:
+        for u in us:
+            u["kept"] = False
+        ops.append(("units", us))
+
+    def adjusted(it, kept) -> float:
+        others = set().union(*(_bigrams(sent_text(o)) for o in kept if o is not it))
+        mine = _bigrams(sent_text(it))
+        return it["score"] - 4 * len(mine & others) / max(1, len(mine))
+
+    def drop_sentences(level: int) -> None:
+        while total() > max_chars:
+            kept = kept_items()
+            cands = [it for it in kept if not it["first"] and protection(sent_text(it)) == level]
+            if not cands:
+                return
+            drop_sentence(min(cands, key=lambda it: (adjusted(it, kept), -it["start"])))
+
+    def drop_asides(level: int, min_len: int) -> None:
+        while total() > max_chars:
+            cands = [u for it in kept_items() for u in it["units"] if u["kept"] and u["kind"] == "paren"
+                     and u["end"] - u["start"] > min_len and protection(unit_text(u)) == level]
+            if not cands:
+                return
+            drop_units([max(cands, key=lambda u: (u["end"] - u["start"], -u["start"]))])
+
+    # 1) supplementary / status remarks and content-free sentences
+    for it in sorted(items, key=lambda it: (it["score"], -it["start"])):
         if total() <= max_chars:
             break
-        if it["score"] <= 0 and sum(1 for x in items if x["keep"]) > 1:
-            it["keep"] = False
-            removed.append(it["text"])
-    # 2) remove long parenthetical asides (short ones such as IDs are kept)
-    while total() > max_chars:
-        best = None
-        for it in items:
-            if not it["keep"]:
+        if it["first"] or len(kept_items()) <= 1:
+            continue
+        t = sent_text(it)
+        if (is_remark(t) or it["score"] <= 0) and protection(t) == 0:
+            drop_sentence(it)
+    # 2) long parenthetical asides that state no condition (short ones such as IDs are kept)
+    drop_asides(0, 10)
+    # 3) weekday notes after dates
+    if total() > max_chars:
+        notes = [u for it in kept_items() for u in it["units"] if u["kept"] and u["kind"] == "weekday"]
+        if notes:
+            drop_units(notes)
+    # 4) sentences without conditions or interim measures
+    drop_sentences(0)
+    # 5) last resort: interim measures, then conditions / restrictions
+    for level in (1, 2):
+        drop_asides(level, 0)
+        drop_sentences(level)
+    if total() > max_chars:
+        return None
+    # restore anything that fits again, most valuable (= removed last) first
+    for kind, obj in reversed(ops):
+        if kind == "sentence":
+            obj["kept"] = True
+            if total() > max_chars:
+                obj["kept"] = False
+        else:
+            for u in obj:
+                u["kept"] = True
+            if total() > max_chars:
+                for u in obj:
+                    u["kept"] = False
+
+    removed: list[str] = []
+    fragments: list[str] = []
+    for it in items:
+        if not it["kept"]:
+            removed.append(text[it["start"] : it["end"]])
+            continue
+        run: list[str] = []
+        for u in it["units"]:
+            if u["kept"]:
+                run.append(unit_text(u))
                 continue
-            for pi, piece in enumerate(it["pieces"]):
-                for m in _PAREN_RE.finditer(piece):
-                    if len(m.group(0)) > 10 and (best is None or len(m.group(0)) > best[3]):
-                        best = (it, pi, m, len(m.group(0)))
-        if best is None:
-            break
-        it, pi, m, _ = best
-        piece = it["pieces"][pi]
-        left, right = piece[: m.start()], piece[m.end() :]
-        removed.append(m.group(0))
-        it["pieces"][pi : pi + 1] = [p for p in (left, right) if p]
-    # 3) drop lowest-value sentences, penalising redundancy with the rest
-    while total() > max_chars:
-        kept = [it for it in items if it["keep"]]
-        if len(kept) <= 1:
-            return None
-        def adjusted(it):
-            others = set().union(*(_bigrams("".join(o["pieces"])) for o in kept if o is not it))
-            mine = _bigrams("".join(it["pieces"]))
-            overlap = len(mine & others) / max(1, len(mine))
-            return it["score"] - 4 * overlap
-        victim = min((it for it in kept[1:]), key=lambda it: (adjusted(it), -it["span"][0]))
-        victim["keep"] = False
-        removed.append("".join(victim["pieces"]))
-    kept = [it for it in items if it["keep"]]
-    fragments = [p for it in kept for p in it["pieces"] if re.search(r"[^\s、。，．,.！？!?（）()「」『』]", p)]
-    out = joiner.join("".join(it["pieces"]) for it in kept)
+            removed.append(unit_text(u))
+            if run:
+                fragments.append("".join(run))
+            run = []
+        if run:
+            fragments.append("".join(run))
+    fragments = [f for f in fragments if re.search(r"[^\s、。，．,.！？!?（）()「」『』]", f)]
+    out = joiner.join(sent_text(it) for it in kept_items())
     if len(out) > max_chars:
         return None
-    return Condensed(out, fragments, removed)
+    return Condensed(out, fragments, removed, unsafe=any(protection(r) == 2 for r in removed))

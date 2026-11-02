@@ -12,7 +12,8 @@ from pydantic import BaseModel, Field
 
 FileType = Literal["docx", "xlsx"]
 MarkerKind = Literal["braces", "kinyuran", "empty_cell"]
-MappingStatus = Literal["filled", "needs_human_input", "human_entered"]
+# recovered = a value read back from a filled file whose provenance is unknown (CLI --verify without memo / audit log)
+MappingStatus = Literal["filled", "needs_human_input", "human_entered", "recovered"]
 Severity = Literal["critical", "major", "minor", "info"]
 
 
@@ -112,10 +113,11 @@ class FieldMapping(BaseModel):
     attempts: list[CorrectionAttempt] = Field(default_factory=list)
     normalizations: list[str] = Field(default_factory=list)
     engine: str = ""
+    condensed_removed: list[str] = Field(default_factory=list)  # full text deleted to meet a character limit
 
     @property
     def is_written(self) -> bool:
-        return self.status in ("filled", "human_entered") and bool(self.filled_value)
+        return self.status in ("filled", "human_entered", "recovered") and bool(self.filled_value)
 
 
 class AuditCheckItem(BaseModel):

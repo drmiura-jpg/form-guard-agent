@@ -18,11 +18,11 @@ import re
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, Optional, Sequence, Union
 
 from lxml import etree
 
-from .ooxml import PKG_REL_NS, R_NS, W_NS
+from .ooxml import MAX_XLSX_COL, MAX_XLSX_ROW, PKG_REL_NS, R_NS, W_NS, check_xlsx_limits
 from .textnorm import char_width_em
 
 W = f"{{{W_NS}}}"
@@ -33,6 +33,32 @@ SERIF = "'Yu Mincho','YuMincho','Hiragino Mincho ProN','Noto Serif JP','MS Minch
 SANS = "'Yu Gothic','YuGothic','Hiragino Sans','Noto Sans JP','Meiryo',sans-serif"
 NO_LINE_START = set("、。，．,.）)」』】〕〉》！？!?ー…・：；ぁぃぅぇぉっゃゅょァィゥェォッャュョ％")
 NO_LINE_END = set("（(「『【〔〈《")
+_HEX_COLOR = re.compile(r"#?([0-9A-Fa-f]{6}|[0-9A-Fa-f]{3})")
+
+
+def _safe_color(val: Optional[str], default: Optional[str] = "#000000") -> Optional[str]:
+    """``#RRGGBB`` from a form's colour attribute, or ``default``.
+
+    Colours come from the uploaded file (w:color, w:shd/@w:fill, border colours, Excel RGB) and
+    end up inside SVG attributes, so anything that is not plain hex — ``000000" onload="…``,
+    ``<script>`` — is discarded instead of being interpolated. 8-digit Excel ARGB keeps the RGB part.
+    """
+    if not isinstance(val, str):
+        return default
+    v = val.strip()
+    if len(v) == 8 and re.fullmatch(r"[0-9A-Fa-f]{8}", v):
+        v = v[2:]
+    m = _HEX_COLOR.fullmatch(v)
+    if not m:
+        return default
+    h = m.group(1)
+    if len(h) == 3:
+        h = "".join(ch * 2 for ch in h)
+    return "#" + h.upper()
+
+
+def _attr(v: Any) -> str:
+    return html.escape(str(v), quote=True)
 
 
 # ------------------------------------------------------------------ primitives
@@ -68,6 +94,8 @@ class Box:
     h: float
     kind: str
     text: str = ""
+    overflow_x: float = 0.0  # px the text sticks out of an Excel cell sideways (no wrap) …
+    overflow_y: float = 0.0  # … or below it (wrapped text taller than the cell)
 
 
 @dataclass
@@ -160,7 +188,9 @@ class _Styles:
             d["bold"] = _on(b)
         c = rpr.find(f"{W}color")
         if c is not None and c.get(W + "val") not in (None, "auto"):
-            d["color"] = "#" + c.get(W + "val")
+            color = _safe_color(c.get(W + "val"), None)
+            if color:
+                d["color"] = color
         f = rpr.find(f"{W}rFonts")
         if f is not None:
             names = " ".join(v for k, v in f.attrib.items() if not k.endswith("Theme"))
@@ -452,7 +482,7 @@ class _DocxRenderer:
                 own: dict[str, Any] = {}
                 _border_map(tcPr.find(f"{W}tcBorders") if tcPr is not None else None, own)
                 shd = tcPr.find(f"{W}shd") if tcPr is not None else None
-                fill = shd.get(W + "fill") if shd is not None and shd.get(W + "fill") not in (None, "auto") else None
+                fill = _safe_color(shd.get(W + "fill"), None) if shd is not None and shd.get(W + "fill") not in (None, "auto") else None
                 va = tcPr.find(f"{W}vAlign") if tcPr is not None else None
                 row_cells.append({"tc": tc, "row": ri, "col": col, "span": span, "vmerge": vmerge, "borders": own,
                                   "fill": fill, "valign": va.get(W + "val") if va is not None else "top", "rows": 1})
@@ -508,7 +538,7 @@ class _DocxRenderer:
                 cx0, cx1 = xs[c["col"]], xs[c["col"] + c["span"]]
                 prims = self.pages[page].prims
                 if c["fill"]:
-                    prims.append(Prim("rect", cx0, top, cx1 - cx0, h, fill="#" + c["fill"]))
+                    prims.append(Prim("rect", cx0, top, cx1 - cx0, h, fill=c["fill"]))
                 last_row = ri + c["rows"] - 1 == n_rows - 1
                 edges = {
                     "top": c["borders"].get("top", tb.get("top") if ri == 0 else tb.get("insideH")),
@@ -542,7 +572,7 @@ class _DocxRenderer:
         if val in ("nil", "none"):
             return
         w = max(0.75, sz / 8 * PT_TO_PX)
-        col = "#000" if color in (None, "auto") else "#" + color
+        col = "#000000" if color in (None, "auto") else _safe_color(color, "#000000")
         dash = {"dashed": "4 3", "dotted": "1 2", "dotDash": "4 2 1 2"}.get(val)
         coords = {"top": (x0, y0, x1, y0), "bottom": (x0, y1, x1, y1), "left": (x0, y0, x0, y1), "right": (x1, y0, x1, y1)}[side]
         if val == "double":
@@ -618,9 +648,7 @@ def _rgb(color) -> Optional[str]:
         v = color.rgb
     except AttributeError:
         return None
-    if isinstance(v, str) and len(v) in (6, 8) and re.fullmatch(r"[0-9A-Fa-f]+", v):
-        return "#" + v[-6:]
-    return None
+    return _safe_color(v, None)
 
 
 _COUNTIF = re.compile(r'^=COUNTIF\(\$?([A-Z]+)\$?(\d+):\$?([A-Z]+)\$?(\d+),"([^"]*)"\)$', re.I)
@@ -637,20 +665,53 @@ def _format_number(v, fmt: str) -> str:
     return str(v)
 
 
-def layout_xlsx(src: Union[str, Path, bytes], sheet_index: int = 0) -> Layout:
+def layout_xlsx(src: Union[str, Path, bytes], sheet_indices: Optional[Sequence[int]] = None) -> Layout:
+    """Render every worksheet (or ``sheet_indices``, in workbook order) as one page each.
+
+    Box IDs are ``s{sheet}!{cell}`` — the same IDs the scanner gives slot occurrences — so overlays,
+    drift and overflow checks work on every sheet, not just the first.
+    """
     import openpyxl
+
+    blob = src if isinstance(src, bytes) else Path(src).read_bytes()
+    with zipfile.ZipFile(io.BytesIO(blob)) as z:
+        check_xlsx_limits(z)
+    wb = openpyxl.load_workbook(io.BytesIO(blob), data_only=False)
+    order = list(wb.sheetnames)  # workbook order, as in xl/workbook.xml (the scanner's sheet index)
+    wanted = [ws for ws in wb.worksheets if sheet_indices is None or order.index(ws.title) in set(sheet_indices)]
+    pages: list[Page] = []
+    boxes: dict[str, Box] = {}
+    sheets_meta = []
+    for ws in wanted:
+        page, meta = _layout_sheet(ws, order.index(ws.title), len(pages), boxes)
+        pages.append(page)
+        sheets_meta.append(meta)
+    if not pages:
+        pages.append(Page(200.0, 100.0))
+    first = sheets_meta[0] if sheets_meta else {"sheet": "", "range": "", "page_px": (200, 100)}
+    meta = {"sheet": first["sheet"], "range": first["range"], "pages": len(pages), "page_px": first["page_px"],
+            "sheets": sheets_meta}
+    return Layout(pages, boxes, meta=meta)
+
+
+def _layout_sheet(ws, sheet_index: int, page_no: int, boxes: dict[str, Box]) -> tuple[Page, dict[str, Any]]:
     from openpyxl.utils import column_index_from_string, get_column_letter
     from openpyxl.utils.cell import range_boundaries
 
-    blob = src if isinstance(src, bytes) else Path(src).read_bytes()
-    wb = openpyxl.load_workbook(io.BytesIO(blob), data_only=False)
-    ws = wb.worksheets[min(sheet_index, len(wb.worksheets) - 1)]
+    used_r, used_c = max(ws.max_row, 1), max(ws.max_column, 1)
+    min_c, min_r, max_c, max_r = 1, 1, used_c, used_r
     area = ws.print_area
     if area:
         ref = str(area).split("!")[-1].replace("$", "").split(",")[0]
-        min_c, min_r, max_c, max_r = range_boundaries(ref)
-    else:
-        min_c, min_r, max_c, max_r = 1, 1, max(ws.max_column, 1), max(ws.max_row, 1)
+        try:
+            b = range_boundaries(ref)
+        except (TypeError, ValueError):
+            b = (None, None, None, None)
+        # whole-column / whole-row print areas ("A:H") come back with None bounds: use the used range
+        min_c, min_r = b[0] or 1, b[1] or 1
+        max_c, max_r = b[2] or used_c, b[3] or used_r
+    max_r, max_c = min(max_r, MAX_XLSX_ROW), min(max_c, MAX_XLSX_COL)
+    min_r, min_c = min(min_r, max_r), min(min_c, max_c)
     margin = 28.0
     xs = [margin]
     for c in range(min_c, max_c + 1):
@@ -663,6 +724,12 @@ def layout_xlsx(src: Union[str, Path, bytes], sheet_index: int = 0) -> Layout:
     prims = page.prims
     merged = {}
     covered = set()
+
+    from openpyxl.cell.cell import Cell
+
+    def cell_at(r: int, c: int):
+        return ws._cells.get((r, c)) or Cell(ws, row=r, column=c)
+
     for rng in ws.merged_cells.ranges:
         merged[(rng.min_row, rng.min_col)] = (rng.max_row, rng.max_col)
         for r in range(rng.min_row, rng.max_row + 1):
@@ -679,9 +746,10 @@ def layout_xlsx(src: Union[str, Path, bytes], sheet_index: int = 0) -> Layout:
             if m:
                 c0, r0, c1, r1, crit = m.groups()
                 n = 0
-                for rr in range(int(r0), int(r1) + 1):
-                    for cc in range(column_index_from_string(c0), column_index_from_string(c1) + 1):
-                        if str(ws.cell(row=rr, column=cc).value or "") == crit:
+                for rr in range(int(r0), min(int(r1), MAX_XLSX_ROW) + 1):
+                    for cc in range(column_index_from_string(c0), min(column_index_from_string(c1), MAX_XLSX_COL) + 1):
+                        hit = ws._cells.get((rr, cc))
+                        if hit is not None and str(hit.value or "") == crit:
                             n += 1
                 return _format_number(n, cell.number_format)
             return v
@@ -692,7 +760,6 @@ def layout_xlsx(src: Union[str, Path, bytes], sheet_index: int = 0) -> Layout:
             x0, y0 = xs[c - min_c], ys[r - min_r]
             prims.append(Prim("rect", x0, y0, xs[c - min_c + 1] - x0, ys[r - min_r + 1] - y0, stroke="#e3e6ea",
                               stroke_w=0.6, dash="2 2"))
-    boxes: dict[str, Box] = {}
     for r in range(min_r, max_r + 1):
         for c in range(min_c, max_c + 1):
             if (r, c) in covered:
@@ -701,11 +768,12 @@ def layout_xlsx(src: Union[str, Path, bytes], sheet_index: int = 0) -> Layout:
             r1, c1 = min(r1, max_r), min(c1, max_c)
             x0, y0 = xs[c - min_c], ys[r - min_r]
             x1, y1 = xs[c1 - min_c + 1], ys[r1 - min_r + 1]
-            cell = ws.cell(row=r, column=c)
+            cell = cell_at(r, c)
             fill = _rgb(cell.fill.fgColor) if cell.fill is not None and cell.fill.fill_type == "solid" else None
             if fill:
                 prims.append(Prim("rect", x0, y0, x1 - x0, y1 - y0, fill=fill))
             text = value_of(cell)
+            overflow = (0.0, 0.0)
             if text:
                 font = cell.font
                 size = (font.sz or 11) * PT_TO_PX
@@ -717,6 +785,8 @@ def layout_xlsx(src: Union[str, Path, bytes], sheet_index: int = 0) -> Layout:
                     _Line([(i, ch, st, _measure(ch, st)) for i, ch, _ in items], size * 1.2,
                           sum(_measure(ch, st) for _, ch, _ in items))]
                 total_h = sum(ln.height for ln in lines)
+                max_line_w = max((ln.width for ln in lines), default=0.0)
+                overflow = (max(0.0, max_line_w - (x1 - x0 - 4)), max(0.0, total_h - (y1 - y0 - 2)))
                 if al.vertical == "top":
                     ty = y0 + 3
                 elif al.vertical == "center":
@@ -736,7 +806,8 @@ def layout_xlsx(src: Union[str, Path, bytes], sheet_index: int = 0) -> Layout:
                                       color=color or "#111", sans=True))
                     ty += ln.height
             bid = f"s{sheet_index}!{get_column_letter(c)}{r}"
-            boxes[bid] = Box(bid, 0, x0, y0, x1 - x0, y1 - y0, "cell", text)
+            ox, oy = overflow if text else (0.0, 0.0)
+            boxes[bid] = Box(bid, page_no, x0, y0, x1 - x0, y1 - y0, "cell", text, ox, oy)
     # borders drawn last so they sit on top of fills; Excel never draws edges inside a merged range
     owner = {}
     for (tr, tc), (br, bc) in merged.items():
@@ -745,7 +816,7 @@ def layout_xlsx(src: Union[str, Path, bytes], sheet_index: int = 0) -> Layout:
                 owner[(r, c)] = (tr, tc, br, bc)
     for r in range(min_r, max_r + 1):
         for c in range(min_c, max_c + 1):
-            b = ws.cell(row=r, column=c).border
+            b = cell_at(r, c).border
             x0, y0, x1, y1 = xs[c - min_c], ys[r - min_r], xs[c - min_c + 1], ys[r - min_r + 1]
             tr, tc, br, bc = owner.get((r, c), (r, c, r, c))
             outline = {"left": c == tc, "right": c == bc, "top": r == tr, "bottom": r == br}
@@ -757,10 +828,12 @@ def layout_xlsx(src: Union[str, Path, bytes], sheet_index: int = 0) -> Layout:
                 w = {"thin": 1.0, "medium": 2.0, "thick": 3.0, "double": 2.5}.get(s.style, 1.0)
                 dash = {"dashed": "4 3", "dotted": "1 2", "hair": "1 1"}.get(s.style)
                 prims.append(Prim("line", coords[0], coords[1], x2=coords[2], y2=coords[3],
-                                  stroke=_rgb(s.color) or "#000" if s.color is not None else "#000", stroke_w=w, dash=dash))
-    meta = {"sheet": ws.title, "range": f"{get_column_letter(min_c)}{min_r}:{get_column_letter(max_c)}{max_r}",
-            "pages": 1, "page_px": (round(page.width), round(page.height))}
-    return Layout([page], boxes, meta=meta)
+                                  stroke=(_rgb(s.color) if s.color is not None else None) or "#000000", stroke_w=w,
+                                  dash=dash))
+    meta = {"sheet": ws.title, "sheet_index": sheet_index,
+            "range": f"{get_column_letter(min_c)}{min_r}:{get_column_letter(max_c)}{max_r}",
+            "page_px": (round(page.width), round(page.height))}
+    return page, meta
 
 
 # ================================================================ rendering
@@ -813,7 +886,7 @@ def svg_document(layout: Layout, overlays: list[Overlay], title: str = "", banne
            '<defs><filter id="fgshadow" x="-5%" y="-5%" width="110%" height="110%"><feDropShadow dx="0" dy="1.5" '
            'stdDeviation="2" flood-opacity=".18"/></filter></defs>']
     if banner:
-        out.append(f'<rect x="8" y="6" width="{width:.0f}" height="24" rx="5" class="fg-banner-{banner_cls}"/>'
+        out.append(f'<rect x="8" y="6" width="{width:.0f}" height="24" rx="5" class="fg-banner-{_attr(banner_cls)}"/>'
                    f'<text x="18" y="22" font-size="12.5" fill="#fff" font-family="{SANS}" font-weight="700">'
                    f"{html.escape(banner)}</text>")
     for pi, p in enumerate(layout.pages):
@@ -825,10 +898,10 @@ def svg_document(layout: Layout, overlays: list[Overlay], title: str = "", banne
         for ov in overlays:
             if ov.page != pi:
                 continue
-            attrs = f' data-slot-id="{html.escape(ov.slot_id)}"' if ov.slot_id else ""
-            attrs += f' data-box-id="{html.escape(ov.box_id)}"' if ov.box_id else ""
+            attrs = f' data-slot-id="{_attr(ov.slot_id)}"' if ov.slot_id else ""
+            attrs += f' data-box-id="{_attr(ov.box_id)}"' if ov.box_id else ""
             out.append(f'<rect x="{ov.x - 1.5:.1f}" y="{ov.y - 1:.1f}" width="{ov.w + 3:.1f}" height="{ov.h + 2:.1f}" rx="2.5" '
-                       f'class="{ov.cls}"{attrs}><title>{html.escape(ov.title)}</title></rect>')
+                       f'class="{_attr(ov.cls)}"{attrs}><title>{html.escape(ov.title)}</title></rect>')
         out.append("</g>")
     out.append("</svg>")
     return "".join(out)
@@ -836,20 +909,20 @@ def svg_document(layout: Layout, overlays: list[Overlay], title: str = "", banne
 
 def _svg_prim(p: Prim) -> str:
     if p.kind == "rect":
-        st = f' fill="{p.fill}"' if p.fill else ' fill="none"'
+        st = f' fill="{_attr(p.fill)}"' if p.fill else ' fill="none"'
         if p.stroke:
-            st += f' stroke="{p.stroke}" stroke-width="{p.stroke_w:.2f}"'
+            st += f' stroke="{_attr(p.stroke)}" stroke-width="{p.stroke_w:.2f}"'
         if p.dash:
-            st += f' stroke-dasharray="{p.dash}"'
+            st += f' stroke-dasharray="{_attr(p.dash)}"'
         return f'<rect x="{p.x:.1f}" y="{p.y:.1f}" width="{p.w:.1f}" height="{p.h:.1f}"{st}/>'
     if p.kind == "line":
-        d = f' stroke-dasharray="{p.dash}"' if p.dash else ""
-        return (f'<line x1="{p.x:.1f}" y1="{p.y:.1f}" x2="{p.x2:.1f}" y2="{p.y2:.1f}" stroke="{p.stroke}" '
+        d = f' stroke-dasharray="{_attr(p.dash)}"' if p.dash else ""
+        return (f'<line x1="{p.x:.1f}" y1="{p.y:.1f}" x2="{p.x2:.1f}" y2="{p.y2:.1f}" stroke="{_attr(p.stroke)}" '
                 f'stroke-width="{p.stroke_w:.2f}" stroke-linecap="square"{d}/>')
     fam = SANS if p.sans else SERIF
     weight = ' font-weight="700"' if p.bold else ""
-    return (f'<text x="{p.x:.1f}" y="{p.y:.1f}" font-size="{p.size:.1f}" font-family="{fam}"{weight} fill="{p.color}" '
-            f'class="fg-t" xml:space="preserve">{html.escape(p.text)}</text>')
+    return (f'<text x="{p.x:.1f}" y="{p.y:.1f}" font-size="{p.size:.1f}" font-family="{fam}"{weight} '
+            f'fill="{_attr(p.color)}" class="fg-t" xml:space="preserve">{html.escape(p.text)}</text>')
 
 
 # ---------------------------------------------------------------- PNG output
@@ -923,15 +996,30 @@ def render_png(layout: Layout, overlays: list[Overlay], out_path: Union[str, Pat
 # ---------------------------------------------------------------- comparison
 
 
+OVERFLOW_X_PX = 6.0
+OVERFLOW_Y_PX = 4.0
+
+
 def compare_layouts(blank: Layout, filled: Layout, slot_boxes: set[str], tolerance: float = 0.6) -> dict[str, Any]:
-    """Geometry of every non-slot box must be unchanged; reports drift honestly if not."""
-    drift, compared, max_shift = [], 0, 0.0
+    """Geometry of every non-slot box must be unchanged, and no filled slot may spill out of its cell.
+
+    Excel cells never grow, so a value that is too long does not move anything — it runs past the
+    cell edge (or below it when wrapped). That overflow is reported as drift as well.
+    """
+    drift, compared, max_shift, overflows = [], 0, 0.0, 0
     for bid, b in blank.boxes.items():
         f = filled.boxes.get(bid)
         if f is None:
             drift.append({"box": bid, "issue": "missing"})
             continue
-        if bid in slot_boxes or b.kind == "table":
+        if bid in slot_boxes:
+            ox, oy = f.overflow_x, f.overflow_y
+            if (ox > OVERFLOW_X_PX and ox > b.overflow_x + 0.5) or (oy > OVERFLOW_Y_PX and oy > b.overflow_y + 0.5):
+                overflows += 1
+                drift.append({"box": bid, "issue": f"cell text overflow ({ox:.0f}px wide / {oy:.0f}px tall)",
+                              "text": f.text[:40]})
+            continue
+        if b.kind == "table":
             continue
         compared += 1
         shift = max(abs(b.x - f.x), abs(b.y - f.y), abs(b.w - f.w), abs(b.h - f.h))
@@ -941,7 +1029,7 @@ def compare_layouts(blank: Layout, filled: Layout, slot_boxes: set[str], toleran
     return {
         "pages_blank": len(blank.pages), "pages_filled": len(filled.pages),
         "boxes_compared": compared, "slot_boxes": len(slot_boxes),
-        "drift_outside_slots": drift[:20], "drift_count": len(drift),
+        "drift_outside_slots": drift[:20], "drift_count": len(drift), "overflow_count": overflows,
         "max_shift_px": round(max_shift, 2), "identical_outside_slots": not drift and len(blank.pages) == len(filled.pages),
         "page": blank.meta.get("page_mm") or blank.meta.get("page_px"),
     }

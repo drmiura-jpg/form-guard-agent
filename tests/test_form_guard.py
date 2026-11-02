@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import io
 import re
+import shutil
+import time
 import zipfile
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import docx
@@ -16,24 +18,31 @@ from lxml import etree
 
 from conftest import fake_message
 from form_guard.constraints import pattern_from_example, validate_value
-from form_guard.grounding import ground_value, locate_quote
-from form_guard.mapper import ClaudeEngine, DemoEngine, LiveEngineError, human_mapping, map_fields
-from form_guard.ooxml import S_NS, UnsafeXMLError, index_part, raw_char_offsets
+from form_guard.grounding import affirmed_options, ground_value, locate_quote
+from form_guard.mapper import ClaudeEngine, DemoEngine, Draft, LiveEngineError, human_mapping, map_fields
+from form_guard.models import FormSlot
+from form_guard.ooxml import S_NS, UnsafeXMLError, UnsupportedXMLError, add_preserve_attr, index_part, raw_char_offsets
 from form_guard.pipeline import run_pipeline
+from form_guard.report import build_report_html
 from form_guard.samples import DEMOS, demo_paths, generate_samples, read_memo
 from form_guard.scanner import scan
 from form_guard.textnorm import (
+    check_wareki,
     condense_extractive,
+    era_to_year,
     find_amounts,
     find_dates,
+    find_invalid_dates,
     kanji_to_int,
     parse_compound,
+    parse_wareki_exact,
+    quantities,
     to_wareki,
 )
-from form_guard.verifier import compare_naive, infer_values_from_filled, verify
-from form_guard.visual_diff import compare_layouts, layout_docx
+from form_guard.verifier import build_hitl_checklist, compare_naive, flag_label, infer_values_from_filled, verify
+from form_guard.visual_diff import _safe_color, compare_layouts, layout_docx, layout_xlsx, svg_document
 from form_guard.writer import fill_form, patch_part
-from form_guard.ziputil import read_raw_zip
+from form_guard.ziputil import read_raw_zip, rewrite_zip
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
@@ -244,8 +253,9 @@ def test_shared_strings_workbook_rich_text_split_and_phonetic_runs(samples_dir, 
 
 
 def test_wareki_dates_weekdays_and_amounts():
-    assert to_wareki(date(2026, 11, 2)) == "令和8年11月2日"
-    assert to_wareki(date(2019, 5, 1)) == "令和元年5月1日" and to_wareki(date(2019, 4, 30)) == "平成31年4月30日"
+    assert to_wareki(date(2026, 11, 2)) == "令和8年11月2日（月）"  # human-facing dates carry the weekday
+    assert to_wareki(date(2026, 11, 2), include_weekday=False) == "令和8年11月2日"
+    assert to_wareki(date(2019, 5, 1)) == "令和元年5月1日（水）" and to_wareki(date(2019, 4, 30)) == "平成31年4月30日（火）"
     d = find_dates("提出日：2026年11月2日（月）に提出")[0]
     assert (d.year, d.month, d.day, d.weekday) == (2026, 11, 2, "月")
     assert [x.kind for x in find_dates("令和8年11月2日、12月8日（火）、11/2（月）、補助率1/3")] == ["wareki", "month_day", "month_day"]
@@ -272,7 +282,7 @@ def test_validate_value_enforces_printed_rules(samples_dir):
     assert codes("補助金申請額", "1,000,000円") == []
     assert codes("法人番号", "12345") == ["format"] and codes("法人番号", "1234567890123") == []
     assert codes("申請日", "2026年11月2日") == ["format"] and codes("申請日", "令和8年11月2日") == []
-    assert codes("事業実施期間", "令和9年2月26日～令和8年12月1日") == ["format"]
+    assert codes("事業実施期間", "令和9年2月26日～令和8年12月1日") == ["period_order"]
 
 
 # ====================================================================== mapper
@@ -295,7 +305,7 @@ def test_demo_engine_fills_form1_with_exact_source_spans(samples_dir):
 def test_self_correction_converts_formats(demo_runs):
     by = {m.slot_id: m for m in demo_runs("form1").mappings}
     date_m = by["提出日"]
-    assert date_m.filled_value == "令和8年11月2日"
+    assert date_m.filled_value == "令和8年11月2日（月）"
     assert [a.passed for a in date_m.attempts] == [False, True] and date_m.attempts[0].issues[0].code == "format"
     assert {"wareki", "weekday_ok"} <= set(date_m.normalizations)
     assert by["研究課題番号"].filled_value == "JR-2026-047" and "halfwidth" in by["研究課題番号"].normalizations
@@ -313,7 +323,7 @@ def test_printed_cap_triggers_constraint_guided_reextraction(demo_runs):
     assert m.attempts[0].value == "1,612,000円" and m.attempts[0].issues[0].code == "max_value"
     assert m.filled_value == "1,000,000円" and "re_extracted" in m.normalizations
     assert by["導入予定金額_税抜"].filled_value == "4,836,000円"
-    assert by["事業実施期間"].filled_value == "令和8年12月1日～令和9年2月26日"
+    assert by["事業実施期間"].filled_value == "令和8年12月1日（火）～令和9年2月26日（金）"
 
 
 def test_missing_fact_is_never_guessed(demo_runs):
@@ -326,7 +336,7 @@ def test_missing_fact_is_never_guessed(demo_runs):
 
 def test_inferred_year_is_flagged_for_the_reviewer(demo_runs):
     m = {x.slot_id: x for x in demo_runs("form3").mappings}["次回点検予定日"]
-    assert m.filled_value == "令和8年12月8日" and "year_inferred" in m.normalizations
+    assert m.filled_value == "令和8年12月8日（火）" and "year_inferred" in m.normalizations
     hitl = next(h for h in demo_runs("form3").report.hitl_checklist if h.slot_id == "次回点検予定日")
     assert "year_inferred" in hitl.flags
 
@@ -436,7 +446,7 @@ def test_xlsx_writer_changes_only_text_inside_the_sheet(demo_runs):
     r = demo_runs("form3")
     wo, wf = openpyxl.load_workbook(r.form_path), openpyxl.load_workbook(r.filled_path)
     so, sf = wo.active, wf.active
-    assert sf["F8"].value == "要是正" and sf["D18"].value == "令和8年12月8日"
+    assert sf["F8"].value == "要是正" and sf["D18"].value == "令和8年12月8日（火）"
     assert [str(x) for x in so.merged_cells.ranges] == [str(x) for x in sf.merged_cells.ranges]
     assert so["D13"].value == sf["D13"].value and so["H13"].number_format == sf["H13"].number_format
     assert str(sf.data_validations.dataValidation[0].sqref) == "F8:F12"
@@ -678,3 +688,657 @@ def test_live_engine_through_the_real_anthropic_sdk_with_a_mock_transport(sample
     assert body["cache_control"] == {"type": "ephemeral"} and "tool_choice" not in body and "temperature" not in body
     assert all(m.status == "filled" for m in run.mappings)
     assert run.usage["output_tokens"] == 321 and run.usage["models"] == ["claude-opus-5-5"]
+
+
+# =============================================================== R1 audit fixes
+# One block per audit item (R1-A1 … R1-A19, R1-O1 … R1-O7). Every test below fails on the
+# pre-fix code and documents the exact failure mode it guards against.
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def surgical_rewrite(src: Path, dst: Path, name: str, fn) -> None:
+    """Change one ZIP entry and copy every other entry as raw bytes (so only that part differs)."""
+    raw = read_raw_zip(Path(src).read_bytes())
+    data = zipfile.ZipFile(src).read(name)
+    Path(dst).write_bytes(rewrite_zip(raw, {name: fn(data)}))
+
+
+def check(rep, check_id):
+    return next(c for c in rep.checks if c.check_id == check_id)
+
+
+class FixedEngine:
+    """Proposes fixed drafts (as a mis-behaving engine might) and never revises."""
+
+    name = "fixed"
+    label = "fixed test engine"
+
+    def __init__(self, drafts):
+        self.drafts, self.usage = drafts, {}
+
+    def propose(self, slots, memo, form_title=""):
+        return {k: Draft(d.slot_id, d.status, d.value, list(d.quotes), d.confidence) for k, d in self.drafts.items()}
+
+    def revise(self, failing, memo):
+        return {}
+
+
+def _text_slot(slot_id="記入欄", max_chars=None, fmt="text", **constraints):
+    return FormSlot(slot_id=slot_id, label=slot_id, location_path="test", file_type="docx", current_text="",
+                    max_chars=max_chars, required_format=fmt, constraints=constraints)
+
+
+# ------------------------------------------------------------- #1 R1-A1 grounding
+
+
+def test_r1_a1_grounding_rejects_wrong_names_ids_options_and_composite_parts(samples_dir):
+    sc1, memo1 = scan(paths(samples_dir, "form1")["form"]), read_memo(paths(samples_dir, "form1")["memo"])
+    sc3, memo3 = scan(paths(samples_dir, "form3")["form"]), read_memo(paths(samples_dir, "form3")["memo"])
+    memo2 = read_memo(paths(samples_dir, "form2")["memo"])
+    errors = lambda g: [i.code for i in g.issues if i.severity == "error"]
+    name = sc1.slot("研究代表者氏名")
+    # (a) quoting 架空 太郎 while filling 架空 花子 is an error, not a warning
+    assert "value_unsupported" in errors(ground_value("架空 花子", ["架空 太郎"], memo1, name))
+    assert errors(ground_value("架空 太郎", ["架空 太郎（理工学研究科 機械システム専攻 教授）"], memo1, name)) == []
+    # IDs: width / dash normalised, but the ID itself must be the one quoted
+    rid = sc1.slot("研究課題番号")
+    assert errors(ground_value("JR-2026-047", ["ＪＲ－２０２６－０４７"], memo1, rid)) == []
+    assert "value_unsupported" in errors(ground_value("JR-2099-999", ["ＪＲ－２０２６－０４７"], memo1, rid))
+    digits = _text_slot("法人番号", fmt="digits", digits=13, pattern="^[0-9]{13}$")
+    memo_d = "法人番号：１２３４５６７８９０１２３（確認済み）\n"
+    assert errors(ground_value("1234567890123", ["１２３４５６７８９０１２３"], memo_d, digits)) == []
+    assert "value_unsupported" in errors(ground_value("1234567890124", ["１２３４５６７８９０１２３"], memo_d, digits))
+    # (b) choice: the option must be the one the quote affirmatively states
+    ac = sc3.slot("空調設備_判定")
+    assert "choice_unsupported" in errors(ground_value("良", ["判定は要是正"], memo3, ac))
+    assert errors(ground_value("要是正", ["判定は要是正"], memo3, ac)) == []
+    opts = ["良", "要注意", "要是正"]
+    assert affirmed_options(opts, "良好だが判定は要是正")[0] == {"要是正"}  # 良 inside 良好 is not a judgement
+    assert affirmed_options(opts, "要是正ではなく要注意")[0] == {"要注意"}  # negated option is not affirmed
+    # (c) 483万6千円 states 4,836,000 only — never 483 or 6 on their own
+    assert quantities("税抜で483万6千円") == {4_836_000.0}
+    assert "number_unsupported" in errors(ground_value("6円", ["税抜で483万6千円"], memo2))
+    assert "number_unsupported" in errors(ground_value("483円", ["税抜で483万6千円"], memo2))
+    # (d) the legitimate conversions still pass
+    assert errors(ground_value("4,836,000円", ["税抜で483万6千円"], memo2)) == []
+
+
+def test_r1_a1_verifier_fails_a_value_that_contradicts_its_quote(demo_runs, tmp_path):
+    r = demo_runs("form1")
+    bad = tmp_path / "name.docx"
+    surgical_rewrite(r.filled_path, bad, "word/document.xml", lambda b: b.replace("架空 太郎".encode(), "架空 花子".encode()))
+    forged = [m.model_copy(update={"filled_value": "架空 花子"}) if m.slot_id == "研究代表者氏名" else m for m in r.mappings]
+    rep = verify(r.scan, bad, forged, r.memo_text)
+    assert check(rep, "TEXT-02").passed  # the file matches the forged mapping …
+    assert not check(rep, "GRD-01").passed and rep.overall_status == "FAIL"  # … but the quote says 架空 太郎
+    assert "研究代表者氏名" in check(rep, "GRD-01").evidence["ungrounded"]
+
+    r3 = demo_runs("form3")
+    bad3 = tmp_path / "choice.xlsx"
+    surgical_rewrite(r3.filled_path, bad3, "xl/worksheets/sheet1.xml", lambda b: b.replace("要是正".encode(), "良".encode(), 1))
+    assert openpyxl.load_workbook(bad3).active["F8"].value == "良"
+    forged3 = [m.model_copy(update={"filled_value": "良"}) if m.slot_id == "空調設備_判定" else m for m in r3.mappings]
+    rep3 = verify(r3.scan, bad3, forged3, r3.memo_text)
+    assert check(rep3, "TEXT-02").passed and check(rep3, "CON-03").passed  # 良 is an allowed option …
+    assert not check(rep3, "GRD-01").passed and rep3.overall_status == "FAIL"  # … but the quote says 要是正
+
+    r2 = demo_runs("form2")
+    forged2 = [m.model_copy(update={"source_spans": [], "source_quote": "税抜で483万6千円"}) if m.slot_id == "導入予定金額_税抜" else m
+               for m in r2.mappings]
+    forged2 = [m.model_copy(update={"filled_value": "6円"}) if m.slot_id == "導入予定金額_税抜" else m for m in forged2]
+    assert "導入予定金額_税抜" in check(verify(r2.scan, r2.filled_path, forged2, r2.memo_text), "GRD-02").evidence["unsupported"]
+
+
+def test_r1_a1_mapper_never_writes_values_that_fail_grounding(samples_dir):
+    p = paths(samples_dir, "form1")
+    memo = read_memo(p["memo"])
+    slots = [s for s in scan(p["form"]).slots if s.slot_id in ("研究代表者氏名", "研究課題番号")]
+    engine = FixedEngine({
+        "研究代表者氏名": Draft("研究代表者氏名", value="架空 花子", quotes=["架空 太郎"], confidence=0.9),
+        "研究課題番号": Draft("研究課題番号", value="JR-2099-999", quotes=["ＪＲ－２０２６－０４７"], confidence=0.9),
+    })
+    by = {m.slot_id: m for m in map_fields(slots, memo, engine).mappings}
+    for sid, proposed in (("研究代表者氏名", "架空 花子"), ("研究課題番号", "JR-2099-999")):
+        m = by[sid]
+        assert m.status == "needs_human_input" and m.filled_value == "" and not m.is_written
+        assert m.suggested_value == proposed and m.errors
+    p3 = paths(samples_dir, "form3")
+    slot = scan(p3["form"]).slot("空調設備_判定")
+    m = map_fields([slot], read_memo(p3["memo"]), FixedEngine({
+        "空調設備_判定": Draft("空調設備_判定", value="良", quotes=["判定は要是正"], confidence=0.9)})).mappings[0]
+    assert m.status == "needs_human_input" and m.suggested_value == "良" and m.filled_value == ""
+
+
+# ----------------------------------------------- #2 / #23 R1-A2, R1-O4 condensation
+
+
+def test_r1_a2_condensation_never_silently_drops_a_condition():
+    text = "この設備（安全性が第三者により確認された場合に限り）を使用する。"
+    c = condense_extractive(text, 15)
+    assert c is not None and c.text == "この設備を使用する。" and c.unsafe
+    assert c.removed == ["（安全性が第三者により確認された場合に限り）"]
+    # supplementary / status remarks go first; interim measures are kept
+    c2 = condense_extractive("点検は完了した。なお、給湯室の換気扇は清掃のみで異常なし。交換完了までは運転時間を短縮する。", 30)
+    assert c2.text == "点検は完了した。交換完了までは運転時間を短縮する。" and not c2.unsafe
+    assert c2.removed == ["なお、給湯室の換気扇は清掃のみで異常なし。"]
+
+    slot = _text_slot("使用条件", max_chars=15)
+    m = map_fields([slot], text, FixedEngine({"使用条件": Draft("使用条件", value=text, quotes=[text], confidence=0.9)})).mappings[0]
+    assert m.status == "needs_human_input" and m.filled_value == "" and not m.is_written  # NOT auto-filled
+    assert m.suggested_value == "この設備を使用する。" and "unsafe_condensation" in m.normalizations
+    assert any("場合に限り" in e for e in m.errors)
+    assert "condensed — removed: （安全性が第三者により確認された場合に限り）" in m.warnings
+    assert m.condensed_removed == ["（安全性が第三者により確認された場合に限り）"]
+
+
+def test_r1_a2_demo3_keeps_the_interim_measure_and_hitl_shows_full_removed_text(demo_runs):
+    r3 = demo_runs("form3")
+    m = {x.slot_id: x for x in r3.mappings}["指摘事項および是正措置"]
+    assert m.status == "filled" and len(m.filled_value) <= 120 and "condensed" in m.normalizations
+    assert "交換完了までは同機の運転時間を短縮し、隣接区画の空調で補う。" in m.filled_value
+    removed_sentence = "給湯室の排水不良については、清掃業者に高圧洗浄を依頼済み。"
+    assert removed_sentence in m.condensed_removed
+    assert any(w.startswith("condensed — removed: ") and removed_sentence in w for w in m.warnings)
+    item = next(h for h in r3.report.hitl_checklist if h.slot_id == "指摘事項および是正措置")
+    assert "字数制限のため削除した文：" in item.prompt and removed_sentence in item.prompt
+    assert "フィルターの目詰まりも著しく、冷房効率の低下が見られる。" in item.prompt
+    assert "必要な条件や措置が欠けていないか確認 / Condensed for char limit; confirm no essential condition was lost" in item.prompt
+    # Demo 1: the long aside is disclosed in full (no 24-character truncation anywhere)
+    m1 = {x.slot_id: x for x in demo_runs("form1").mappings}["変更理由および予算影響"]
+    aside = "（直接経費総額に占める割合は約6％で、20％未満のため経費変更承認申請は不要）"
+    assert aside in m1.condensed_removed and any(aside in w for w in m1.warnings)
+    assert aside in m1.attempts[-1].action and "…»" not in m1.attempts[-1].action
+    item1 = next(h for h in demo_runs("form1").report.hitl_checklist if h.slot_id == "変更理由および予算影響")
+    assert aside in item1.prompt
+
+
+def test_r1_a2_hitl_explains_a_suggestion_that_was_held_back(samples_dir):
+    text = "この設備（安全性が第三者により確認された場合に限り）を使用する。"
+    slot = _text_slot("使用条件", max_chars=15)
+    m = map_fields([slot], text, FixedEngine({"使用条件": Draft("使用条件", value=text, quotes=[text], confidence=0.9)})).mappings[0]
+    from form_guard.models import VerificationReport
+
+    fake_scan = type("S", (), {"slots": [slot]})()
+    items = build_hitl_checklist(fake_scan, [m], VerificationReport(file_type="docx", zip_integrity_passed=True,
+                                 xml_schema_wellformed=True, non_target_xml_unchanged=True, style_and_borders_unchanged=True,
+                                 all_slots_filled=False, ungrounded_claims_count=0))
+    pending = items[0]
+    assert pending.kind == "pending_input" and pending.value == "この設備を使用する。"
+    assert "unsafe_condensation" in pending.flags and "（安全性が第三者により確認された場合に限り）" in pending.prompt
+
+
+# --------------------------------------------- #3 R1-A3 xml:space / runs outside slots
+
+
+def test_r1_a3_xml_space_change_on_a_non_slot_node_fails_xml03(demo_runs, tmp_path):
+    r = demo_runs("form1")
+    xml = zipfile.ZipFile(r.filled_path).read("word/document.xml")
+    target = 'xml:space="preserve">　下記のとおり'.encode()
+    assert xml.count(target) == 1  # a boilerplate paragraph, not a slot
+    bad = tmp_path / "space.docx"
+    surgical_rewrite(r.filled_path, bad, "word/document.xml",
+                     lambda b: b.replace(target, 'xml:space="default">　下記のとおり'.encode()))
+    rep = verify(r.scan, bad, r.mappings, r.memo_text)
+    assert _failing(rep) == {"XML-03"} and rep.overall_status == "FAIL"
+    assert check(rep, "ZIP-04").passed and check(rep, "TEXT-01").passed  # text and other parts untouched
+
+
+def _bold_run_docx(path: Path) -> None:
+    d = docx.Document()
+    p = d.add_paragraph()
+    r = p.add_run("注")
+    r.bold = True
+    p.add_run("意事項：架空の様式です")
+    d.add_paragraph("{{A}}")
+    d.save(path)
+
+
+def test_r1_a3_moving_a_character_between_runs_fails_text01(tmp_path):
+    src, out = tmp_path / "runs.docx", tmp_path / "runs_filled.docx"
+    _bold_run_docx(src)
+    sc = scan(src)
+    fill_form(sc, {"A": "記入値"}, out)
+    maps = [human_mapping(sc.slot("A"), "記入値")]
+    assert not _failing(verify(sc, out, maps, ""))  # the untouched fill passes
+    bad = tmp_path / "moved.docx"
+    surgical_rewrite(out, bad, "word/document.xml", lambda b: b.replace("<w:t>注</w:t>".encode(), "<w:t>注意</w:t>".encode())
+                     .replace("<w:t>意事項：".encode(), "<w:t>事項：".encode()))
+    assert docx.Document(bad).paragraphs[0].text == "注意事項：架空の様式です"  # same paragraph text …
+    rep = verify(sc, bad, maps, "")
+    assert {"TEXT-01", "XML-03"} <= _failing(rep) and rep.overall_status == "FAIL"  # … but the bold run grew
+    assert "moved between runs" in check(rep, "TEXT-01").details
+
+
+def test_r1_a3_split_markers_and_preserve_on_slot_nodes_still_pass(demo_runs, tmp_path):
+    rep = demo_runs("form1").report  # form1 has markers split over three runs ({{研究|代表者|氏名}})
+    assert check(rep, "XML-03").passed and check(rep, "TEXT-01").passed and check(rep, "TEXT-02").passed
+    src, out = tmp_path / "pres.docx", tmp_path / "pres_filled.docx"
+    _bold_run_docx(src)
+    sc = scan(src)
+    w = fill_form(sc, {"A": "記入  値"}, out)  # a double space needs xml:space="preserve"
+    assert any(p.kind == "attr" for p in w.patches)  # … which is added to the slot node only
+    assert not _failing(verify(sc, out, [human_mapping(sc.slot("A"), "記入  値")], ""))
+
+
+# ------------------------------------------------------------ #4 R1-A4 approval binding
+
+
+def test_r1_a4_approval_is_bound_to_the_verified_bytes_and_revision(api):
+    run = api.post("/api/runs", json={"demo_id": "form1", "mode": "demo"}).json()
+    rid = run["run_id"]
+    assert run["can_approve"] and run["revision"] == 0
+    st = api.app.state.store.runs[rid]
+    path = st.result.filled_path
+    good = path.read_bytes()
+    assert run["filled"]["sha256"] == hashlib.sha256(good).hexdigest() == st.verified_sha256 and st.verified_bytes == good
+    required = [h["item_id"] for h in run["report"]["hitl_checklist"] if h["required"]]
+    body = {"reviewer": "架空 花子", "checked": required}
+    url = f"/api/runs/{rid}/approve"
+    # (b) a stale view (other hash / other revision) is refused
+    assert api.post(url, json={**body, "filled_sha256": "0" * 64}).status_code == 409
+    assert api.post(url, json={**body, "revision": 7}).status_code == 409
+    # (a) the file was changed on disk after verification, before approval
+    path.write_bytes(good + b"tampered")
+    assert api.post(url, json={**body, "filled_sha256": run["filled"]["sha256"], "revision": 0}).status_code == 409
+    path.write_bytes(good)
+    ok = api.post(url, json={**body, "filled_sha256": run["filled"]["sha256"], "revision": 0})
+    assert ok.status_code == 200 and ok.json()["filled_sha256"] == st.verified_sha256 and ok.json()["revision"] == 0
+    # (c) the file was changed after approval: download refuses
+    path.write_bytes(good[:-8] + b"XXXXXXXX")
+    assert api.get(f"/api/runs/{rid}/download").status_code == 409
+    path.write_bytes(good)
+    dl = api.get(f"/api/runs/{rid}/download")
+    assert dl.status_code == 200 and dl.content == good  # the exact verified bytes, served from memory
+    # an edit creates a new revision and clears the approval; the old view can no longer approve
+    edited = api.post(f"/api/runs/{rid}/overrides", json={"values": {"所属部局": "理工学研究科"}}).json()
+    assert edited["revision"] == 1 and edited["approval"] is None
+    assert api.post(url, json={**body, "revision": 0}).status_code == 409
+
+
+# ------------------------------------------------------------ #5 R1-A5 --verify
+
+
+def test_r1_a5_cli_verify_grounds_values_against_the_memo(demo_runs, samples_dir, tmp_path, capsys):
+    from form_guard.cli import main
+
+    r = demo_runs("form1")
+    p = paths(samples_dir, "form1")
+    tampered = tmp_path / "tampered.docx"
+    surgical_rewrite(r.filled_path, tampered, "word/document.xml", lambda b: b.replace(b"JR-2026-047", b"JR-2099-999"))
+    assert main(["--verify", str(p["form"]), str(tampered), "--memo", str(p["memo"])]) == 1
+    out = capsys.readouterr().out
+    assert re.search(r"✗ GRD-01 ", out) and re.search(r"✗ GRD-02 ", out) and "JR-2099-999" in out
+    assert "attested by reviewer" not in out
+    clean = tmp_path / "clean" / r.filled_path.name
+    clean.parent.mkdir()
+    shutil.copy(r.filled_path, clean)
+    assert main(["--verify", str(p["form"]), str(clean), "--memo", str(p["memo"])]) == 0
+    assert re.search(r"✓ GRD-01 .*8 values grounded", capsys.readouterr().out)
+    # no memo and no audit log: structure only, and the report says so
+    assert main(["--verify", str(p["form"]), str(clean)]) == 0
+    out = capsys.readouterr().out
+    assert "attested by reviewer" not in out
+    assert "structural verification only (no memo provided — grounding not verified)" in out
+    assert "grounding NOT verified" in out
+    # the audit log written next to the filled file is used when its SHA-256 matches
+    assert main(["--verify", str(p["form"]), str(r.filled_path)]) == 0
+    out = capsys.readouterr().out
+    assert "audit_log.json (SHA-256 matches the filled file)" in out and "8 values grounded" in out
+
+
+# ---------------------------------------------------------------- #6 R1-A6 SVG
+
+
+def test_r1_a6_svg_previews_never_carry_attribute_injection(tmp_path):
+    src = tmp_path / "colors.docx"
+    d = docx.Document()
+    d.add_paragraph().add_run("色付きの文字（架空）")
+    t = d.add_table(rows=1, cols=1)
+    t.cell(0, 0).text = "{{A}}"
+    d.save(src)
+    W_ = f"{{{W}}}"
+    root = etree.fromstring(zipfile.ZipFile(src).read("word/document.xml"))
+    rpr = etree.SubElement(next(root.iter(f"{W_}r")), f"{W_}rPr")
+    next(root.iter(f"{W_}r")).insert(0, rpr)
+    etree.SubElement(rpr, f"{W_}color").set(f"{W_}val", '000000" data-audit-probe="1')
+    tcpr = next(root.iter(f"{W_}tc")).find(f"{W_}tcPr")
+    etree.SubElement(tcpr, f"{W_}shd").set(f"{W_}fill", "<script>alert(1)</script>")
+    borders = etree.SubElement(tcpr, f"{W_}tcBorders")
+    top = etree.SubElement(borders, f"{W_}top")
+    top.set(f"{W_}val", "single")
+    top.set(f"{W_}color", '"/><script>alert(2)</script><x a="')
+    bad = tmp_path / "colors_bad.docx"
+    surgical_rewrite(src, bad, "word/document.xml", lambda _b: etree.tostring(root, xml_declaration=True, encoding="UTF-8"))
+    svg = svg_document(layout_docx(bad)[0], [], "t", "banner", "ok")
+    assert "data-audit-probe" not in svg and "<script" not in svg and "alert(" not in svg
+    parsed = etree.fromstring(svg.encode("utf-8"))
+    assert not [el for el in parsed.iter() if "data-audit-probe" in el.attrib or etree.QName(el).localname == "script"]
+    fills = {el.get("fill") for el in parsed.iter() if el.get("fill")} | {el.get("stroke") for el in parsed.iter() if el.get("stroke")}
+    assert all(re.fullmatch(r"#[0-9A-Fa-f]{3,6}|none|#fff|url\(#fgshadow\)", f) or f.startswith("rgba") for f in fills if f)
+    assert _safe_color("ff00ff") == "#FF00FF" and _safe_color("#abc") == "#AABBCC" and _safe_color("FF102030") == "#102030"
+    assert _safe_color('000000" onload="x', None) is None and _safe_color("<script>", "#000000") == "#000000"
+
+
+# ------------------------------------------------------- #7 R1-A7 Excel overflow
+
+
+def test_r1_a7_excel_cell_overflow_fails_vis01(demo_runs, samples_dir, tmp_path):
+    vis = demo_runs("form3").visual
+    assert vis["drift_count"] == 0 and vis["overflow_count"] == 0 and vis["identical_outside_slots"]
+    p = paths(samples_dir, "form3")
+    r = run_pipeline(p["form"], read_memo(p["memo"]), tmp_path / "overflow", mode="demo",
+                     overrides={"点検対象施設": "架空" * 240})
+    assert len({m.slot_id: m for m in r.mappings}["点検対象施設"].filled_value) == 480
+    assert r.visual["overflow_count"] >= 1 and not r.visual["identical_outside_slots"]
+    vis01 = check(r.report, "VIS-01")
+    assert not vis01.passed and "overflow" in vis01.details and r.report.overall_status == "FAIL"
+    assert any(d["box"] == "s0!D4" and "cell text overflow" in d["issue"] for d in vis01.evidence["drift"])
+
+
+# ---------------------------------------------------------- #8 R1-A8 multi-sheet
+
+
+def test_r1_a8_every_worksheet_is_rendered_highlighted_and_checked(tmp_path):
+    src = tmp_path / "two_sheets.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active.title = "表紙"
+    wb.active["A1"] = "架空の申請書（表紙）"
+    ws2 = wb.create_sheet("明細")
+    ws2["A2"] = "項目"
+    ws2["B2"] = "{{項目}}"
+    ws2.column_dimensions["B"].width = 24
+    wb.save(src)
+    sc = scan(src)
+    assert sc.slot("項目").occurrences[0].box_id == "s1!B2"
+    lay = layout_xlsx(src)
+    assert len(lay.pages) == 2 and lay.boxes["s1!B2"].page == 1 and lay.boxes["s0!A1"].page == 0
+    r = run_pipeline(src, "項目：テスト値\n", tmp_path / "ms", mode="demo")
+    assert {m.slot_id: m for m in r.mappings}["項目"].filled_value == "テスト値"
+    filled_svg = r.previews["filled"]
+    assert filled_svg.count('<g transform="translate(8,') == 2 and 'data-slot-id="項目"' in filled_svg
+    assert r.visual["pages_filled"] == 2 and r.report.overall_status == "PASS"
+    long = run_pipeline(src, "項目：テスト値\n", tmp_path / "ms_long", mode="demo", overrides={"項目": "長い記入値" * 60})
+    assert any(d["box"] == "s1!B2" for d in check(long.report, "VIS-01").evidence["drift"])
+
+
+# ------------------------------------------- #9 / #10 / #18 R1-A9, R1-A10, R1-O2 dates
+
+
+def test_r1_a9_validate_value_rejects_impossible_dates_eras_periods_and_weekdays(samples_dir):
+    sc = scan(paths(samples_dir, "form2")["form"])
+    day, period = sc.slot("申請日"), sc.slot("事業実施期間")
+    western = _text_slot("日付", fmt="date")
+    errs = lambda slot, v: [i.code for i in validate_value(slot, v) if i.severity == "error"]
+    for bad in ("2026年2月29日", "2026年2月30日", "令和元年1月1日", "平成31年5月1日", "令和0年5月1日", "令和8年2月29日",
+                "令和8年11月2日（火）", "昭和64年1月8日"):
+        assert errs(day, bad), bad
+    assert errs(day, "令和元年1月1日") == ["date_invalid"] and errs(day, "令和8年11月2日（火）") == ["weekday_mismatch"]
+    assert errs(day, "2026年2月30日") == ["date_invalid", "format"]  # says why first, not just "not 和暦"
+    for good in ("令和8年11月2日（月）", "令和8年11月2日", "令和元年5月1日（水）", "平成31年4月30日（火）", "昭和64年1月7日"):
+        assert errs(day, good) == [], good
+    assert errs(period, "令和9年1月1日（金）～令和8年12月1日（火）") == ["period_order"]
+    assert errs(period, "令和8年12月1日（火）～令和9年2月26日（金）") == []
+    assert errs(period, "令和8年12月1日（水）～令和9年2月26日（金）") == ["weekday_mismatch"]
+    for bad in ("2026年2月29日", "2026年2月30日", "2026/02/29", "2026年11月2日（火）", "11月2日"):
+        assert errs(western, bad), bad
+    for good in ("2026年11月2日（月）", "2028年2月29日", "2026/11/02", "2026年12月1日（火）～2027年2月26日（金）"):
+        assert errs(western, good) == [], good
+    assert parse_wareki_exact("令和元年1月1日") is None and parse_wareki_exact("令和8年11月2日（月）") == date(2026, 11, 2)
+    assert check_wareki("平成31年5月1日")[1][0] == "date_invalid"
+    with pytest.raises(ValueError):
+        era_to_year("令和", "0")
+    with pytest.raises(ValueError):
+        era_to_year("平成", "32")
+    assert len(find_invalid_dates("2026年2月30日と2026/02/29と2月30日")) == 3
+    assert to_wareki(date(2026, 11, 2)) == "令和8年11月2日（月）"
+
+
+def test_r1_a10_weekday_or_calendar_error_in_the_memo_is_never_auto_filled(samples_dir):
+    slots = [s for s in scan(paths(samples_dir, "form1")["form"]).slots if s.slot_id == "提出日"]
+    m = map_fields(slots, "提出日：2026年11月2日（火）に提出\n", DemoEngine()).mappings[0]
+    assert m.status == "needs_human_input" and m.filled_value == "" and m.suggested_value == "令和8年11月2日（火）"
+    assert any("曜日" in e or "weekday" in e for e in m.errors)
+    m2 = map_fields(slots, "提出日：2026年2月30日に提出\n", DemoEngine()).mappings[0]
+    assert m2.status == "needs_human_input" and any("存在しない" in e or "not a real" in e for e in m2.errors)
+    ok = map_fields(slots, "提出日：2026年11月2日（月）に提出\n", DemoEngine()).mappings[0]
+    assert ok.status == "filled" and ok.filled_value == "令和8年11月2日（月）" and "weekday_ok" in ok.normalizations
+
+
+def test_r1_o2_memos_and_readme_write_dates_with_the_weekday(samples_dir):
+    memos = {d["id"]: read_memo(paths(samples_dir, d["id"])["memo"]) for d in DEMOS}
+    assert "2026年12月1日（火）から2027年2月26日（金）まで" in memos["form2"]
+    assert "11月6日（金）までに" in memos["form3"] and "11月20日（金）までに" in memos["form3"]
+    for memo in memos.values():
+        assert not find_invalid_dates(memo)
+        for d in find_dates(memo):
+            assert d.weekday, memo[d.start : d.end]  # every date in the memos carries （曜）
+            assert "月火水木金土日"[date(d.year or 2026, d.month, d.day).weekday()] == d.weekday
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "(development started Monday, 2026-11-02 / 2026-11-02（月）)" in readme.splitlines()[5]
+    assert "2026-11-02)" not in readme.replace("2026-11-02（月）)", "")
+
+
+def test_r1_a11_demo1_is_submitted_at_least_30_days_before_the_change(samples_dir):
+    memo = read_memo(paths(samples_dir, "form1")["memo"])
+    assert "2026年12月15日（火）" in memo and "2026年12月1日" not in memo
+    line = memo.split("\n")[21]
+    assert "変更予定日（2026年12月15日（火））の30日前までに提出する" in line
+    submitted = next(d for d in find_dates(memo) if (d.month, d.day) == (11, 2) and d.year).as_date
+    change = next(d for d in find_dates(memo) if (d.month, d.day) == (12, 15)).as_date
+    assert submitted == date(2026, 11, 2) and change - submitted >= timedelta(days=30)
+
+
+# ---------------------------------------------------- #11 R1-A12 xml:space duplicates
+
+
+def test_r1_a12_preserve_never_duplicates_an_existing_xml_space(tmp_path):
+    assert add_preserve_attr(b'<w:t xml:space="default">') == b'<w:t xml:space="preserve">'
+    assert add_preserve_attr(b"<w:t xml:space='default'>") == b'<w:t xml:space="preserve">'
+    assert add_preserve_attr(b"<w:t>") == b'<w:t xml:space="preserve">' and add_preserve_attr(b"<w:t/>") == b'<w:t xml:space="preserve"/>'
+    src, mid, out = tmp_path / "sp.docx", tmp_path / "sp2.docx", tmp_path / "sp_filled.docx"
+    d = docx.Document()
+    for k in "ABCD":
+        d.add_paragraph("{{" + k + "}}")
+    d.save(src)
+    surgical_rewrite(src, mid, "word/document.xml", lambda b: b
+                     .replace(b"<w:t>{{B}}</w:t>", b'<w:t xml:space="default">{{B}}</w:t>')
+                     .replace(b"<w:t>{{C}}</w:t>", b"<w:t xml:space='default'>{{C}}</w:t>")
+                     .replace(b"<w:t>{{D}}</w:t>", b'<w:t xml:space="preserve">{{D}}</w:t>'))
+    sc = scan(mid)
+    values = {"A": "A  B", "B": "B  C", "C": "C  D", "D": "D  E"}  # every value needs xml:space="preserve"
+    fill_form(sc, values, out)
+    xml = zipfile.ZipFile(out).read("word/document.xml")
+    root = etree.fromstring(xml)  # well-formed: no "Attribute xml:space redefined"
+    texts = [t.text for t in root.iter(f"{{{W}}}t")]
+    assert texts == ["A  B", "B  C", "C  D", "D  E"]
+    for tag in re.findall(rb"<w:t\b[^>]*>", xml):
+        assert tag.count(b"xml:space") == 1 and b'xml:space="preserve"' in tag
+    assert not _failing(verify(sc, out, [human_mapping(sc.slot(k), v) for k, v in values.items()], ""))
+
+
+# ------------------------------------------------------ #12 R1-A13 huge worksheets
+
+
+def test_r1_a13_huge_cell_coordinates_and_merges_are_refused_quickly(tmp_path):
+    far = tmp_path / "far.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active["A1"] = "{{項目}}"
+    wb.active["XFD1048576"] = "x"
+    wb.save(far)
+    t = time.perf_counter()
+    with pytest.raises(UnsupportedXMLError, match="safe form limits"):
+        scan(far)
+    assert time.perf_counter() - t < 0.5
+    t = time.perf_counter()
+    with pytest.raises(UnsupportedXMLError, match="safe form limits"):
+        layout_xlsx(far)
+    assert time.perf_counter() - t < 0.5
+    small, merged = tmp_path / "small.xlsx", tmp_path / "merged.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active["A1"] = "{{項目}}"
+    wb.save(small)
+    surgical_rewrite(small, merged, "xl/worksheets/sheet1.xml", lambda b: b.replace(
+        b"</sheetData>", b'</sheetData><mergeCells count="1"><mergeCell ref="B1:B1048576"/></mergeCells>', 1))
+    t = time.perf_counter()
+    with pytest.raises(UnsupportedXMLError, match="merged range"):
+        scan(merged)
+    assert time.perf_counter() - t < 0.5
+
+
+def test_r1_a13_full_column_validation_is_not_expanded(tmp_path):
+    from openpyxl.worksheet.datavalidation import DataValidation
+
+    src = tmp_path / "column_rule.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws["C3"], ws["D3"] = "判定", "{{判定}}"
+    dv = DataValidation(type="list", formula1='"良,要注意,要是正"', allow_blank=True)
+    ws.add_data_validation(dv)
+    dv.add("D1:D1048576")
+    wb.save(src)
+    t = time.perf_counter()
+    sc = scan(src)
+    assert time.perf_counter() - t < 0.5
+    assert sc.slot("判定").required_format == "choice" and sc.slot("判定").constraints["allowed_values"] == ["良", "要注意", "要是正"]
+    t = time.perf_counter()
+    lay = layout_xlsx(src)
+    assert time.perf_counter() - t < 0.5 and "s0!D3" in lay.boxes
+
+
+# ------------------------------------------------- #13 R1-A14 override length
+
+
+def test_r1_a14_overrides_are_validated_not_truncated(api):
+    run = api.post("/api/runs", json={"demo_id": "form2", "mode": "demo"}).json()
+    rid = run["run_id"]
+    st = api.app.state.store.runs[rid]
+    ok = api.post(f"/api/runs/{rid}/overrides", json={"values": {"所在地": "架" * 1000}})
+    assert ok.status_code == 200 and ok.json()["revision"] == 1
+    assert {m["slot_id"]: m for m in ok.json()["mappings"]}["所在地"]["filled_value"] == "架" * 1000  # not cut
+    before_result, before = st.result, (dict(st.overrides), st.approval, st.revision, st.verified_sha256)
+    too_long = api.post(f"/api/runs/{rid}/overrides", json={"values": {"所在地": "架" * 1001}})
+    assert too_long.status_code == 422 and "exceeds maximum length (1001 > 1000 chars)" in too_long.json()["detail"]
+    over_slot = api.post(f"/api/runs/{rid}/overrides", json={"values": {"導入設備名称": "高" * 41}})
+    assert over_slot.status_code == 422 and "導入設備名称 exceeds maximum length (41 > 40 chars)" == over_slot.json()["detail"]
+    assert st.result is before_result and (st.overrides, st.approval, st.revision, st.verified_sha256) == before
+
+
+# ---------------------------------------------------- #14 R1-A15 report footer
+
+
+def test_r1_a15_report_only_calls_unmodified_builtin_demos_fictional(demo_runs, api, samples_dir, tmp_path):
+    builtin = (demo_runs("form1").out_dir / "report.html").read_text(encoding="utf-8")
+    assert demo_runs("form1").builtin_demo and "100% fictional" in builtin
+    assert "このレポートは入力された様式・メモに基づきます" in builtin
+    p = paths(samples_dir, "form3")
+    up = api.post("/api/runs/upload", files={"file": ("my_form.xlsx", p["form"].read_bytes())},
+                  data={"memo_text": read_memo(p["memo"]), "mode": "demo"}).json()
+    custom = api.get(f"/api/runs/{up['run_id']}/report").text
+    assert "100% fictional" not in custom and "generated from the supplied form and memo" in custom
+    p1 = paths(samples_dir, "form1")
+    edited = run_pipeline(p1["form"], read_memo(p1["memo"]) + "追記：担当者の私的なメモ\n", tmp_path / "edited",
+                          mode="demo", demo_id="form1")
+    assert not edited.builtin_demo and "100% fictional" not in (edited.out_dir / "report.html").read_text(encoding="utf-8")
+    run = api.post("/api/runs", json={"demo_id": "form2", "mode": "demo"}).json()
+    api.post(f"/api/runs/{run['run_id']}/overrides", json={"values": {"法人番号": "1234567890123"}})
+    assert "100% fictional" not in api.get(f"/api/runs/{run['run_id']}/report").text
+
+
+# ------------------------------------------------ #15 R1-A16 byte-identical tile
+
+
+def test_r1_a16_report_tile_counts_only_byte_identical_parts(demo_runs, tmp_path):
+    r = demo_runs("form1")
+    bad = tmp_path / "core.docx"
+    surgical_rewrite(r.filled_path, bad, "docProps/core.xml",
+                     lambda b: b.replace(b"Form-Guard Agent sample generator", b"someone else", 1))
+    rep = verify(r.scan, bad, r.mappings, r.memo_text)
+    n = sum(1 for e in rep.entry_hashes if e.role == "untouched")
+    d = r.to_dict()
+    d["report"] = rep.model_dump()
+    html = build_report_html(d)
+    assert n == 17 and "<b>16/17 (changed: 1)</b><span>ZIP entries byte-identical" in html
+    assert f"<b>{n}</b><span>ZIP entries byte-identical" in build_report_html(r.to_dict())
+
+
+# ------------------------------------------------------- #16 R1-A17 zero slots
+
+
+def test_r1_a17_a_form_without_slots_never_passes(tmp_path):
+    src = tmp_path / "no_slots.docx"
+    d = docx.Document()
+    d.add_paragraph("この様式には記入欄がありません（架空）")
+    d.save(src)
+    r = run_pipeline(src, "メモ：特になし\n", tmp_path / "none", mode="demo")
+    assert r.report.overall_status == "FAIL" and "TEXT-02" in _failing(r.report)
+    assert "0 fillable slots found" in check(r.report, "TEXT-02").details
+
+
+# ------------------------------------------------- #17 R1-A18 edit any field
+
+
+def test_r1_a18_reviewer_can_correct_an_ai_filled_field(api):
+    run = api.post("/api/runs", json={"demo_id": "form1", "mode": "demo"}).json()
+    rid = run["run_id"]
+    assert {m["slot_id"]: m for m in run["mappings"]}["所属部局"]["status"] == "filled"
+    required = [h["item_id"] for h in run["report"]["hitl_checklist"] if h["required"]]
+    assert api.post(f"/api/runs/{rid}/approve", json={"reviewer": "架空 花子", "checked": required}).status_code == 200
+    edited = api.post(f"/api/runs/{rid}/overrides", json={"values": {"所属部局": "理工学研究科 機械システム専攻"}}).json()
+    m = {x["slot_id"]: x for x in edited["mappings"]}["所属部局"]
+    assert m["status"] == "human_entered" and m["filled_value"] == "理工学研究科 機械システム専攻"
+    assert edited["approval"] is None and api.get(f"/api/runs/{rid}/download").status_code == 403
+    js = (ROOT / "form_guard" / "static" / "app.js").read_text(encoding="utf-8")
+    detail = js[js.index("function renderDetail") : js.index("function editControl")]
+    assert "editControl(s, m)" in detail and "needs_human_input" not in detail.split("editControl(s, m)")[1][:40]
+    assert "Save edit / 値を修正" in js and "editControl(slot, m)" in js  # field detail + HITL checklist
+    assert "filled_sha256: S.run.filled.sha256, revision: S.run.revision" in js
+
+
+# ------------------------------------------------ #18 R1-A19 code-point indexing
+
+
+def test_r1_a19_ui_slices_code_points_like_python():
+    js = (ROOT / "form_guard" / "static" / "app.js").read_text(encoding="utf-8")
+    assert "const chars = Array.from(S.run.memo.text);" in js and 'chars.slice(a, b).join("")' in js
+    assert "memo.slice(" not in js and "(m.filled_value || \"\").length" not in js
+    assert "const n = cpLength(m.filled_value);" in js and "Array.from(s || \"\").length" in js
+    memo = "𠮷野家🧪の件：試料番号は𠮷-01（🧪）\n担当：架空 太郎\n"
+    g = ground_value("架空 太郎", ["架空 太郎"], memo, _text_slot("担当者氏名", fmt="person_name"))
+    sp = g.spans[0]
+    assert memo[sp.start_char : sp.end_char] == "架空 太郎" and sp.start_char == memo.index("架空")
+    assert human_mapping(_text_slot("備考"), "𠮷野家🧪").char_count == 4  # code points, as the UI now counts
+
+
+# ------------------------------------------- #19 R1-O5 / R1-O7 wording & flags
+
+
+def test_r1_o5_o7_readme_wording_and_re_anchored_flag():
+    assert flag_label("re_anchored") == "引用を付け替え / quote re-anchored — check the wording"
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "21 deterministic checks (plus VIS-01 if layout drift or overflow is detected)" in readme
+    assert "21項目を決定論的に検査します（描画位置のずれやセルはみ出しが検出された場合は VIS-01 を追加）" in readme
+    assert ("Form-Guard checks that each value is **traceable to verbatim memo quotes** (numbers, dates, names, IDs and "
+            "choices must match them) and that **the form itself was not altered**.") in readme
+    assert ("本ツールが機械的に確認するのは「各値がメモの原文引用に紐づき、数値・日付・氏名・ID・選択肢が一致すること」と"
+            "「様式そのものが改変されていないこと」です。") in readme
+    assert "memo grounding is checked when `--memo MEMO` is given or a" in readme
+    assert "21 deterministic checks: ZIP" not in readme and "描画位置のずれを含む 21 項目" not in readme
+
+
+# --------------------------------------------------- #20 R1-O6 Host / Origin
+
+
+def test_r1_o6_server_refuses_foreign_hosts_and_cross_site_origins(api):
+    assert api.get("/api/health", headers={"Host": "evil.example.com"}).status_code == 403
+    assert api.get("/api/health", headers={"Host": "evil.example.com"}).json()["detail"] == "forbidden host"
+    assert api.get("/api/health", headers={"Host": "127.0.0.1.evil.example.com:8000"}).status_code == 403
+    cross = api.post("/api/runs", json={"demo_id": "nope"}, headers={"Origin": "https://evil.example.com"})
+    assert cross.status_code == 403 and cross.json()["detail"] == "forbidden origin"
+    assert api.post("/api/runs", json={"demo_id": "nope"}, headers={"Origin": "null"}).status_code == 403
+    assert api.post("/api/runs", json={"demo_id": "nope"}, headers={"Origin": "http://[::1"}).status_code == 403  # unparsable
+    for host in ("testserver", "127.0.0.1:8000", "localhost:8000", "[::1]:8000"):
+        assert api.get("/api/health", headers={"Host": host}).status_code == 200, host
+    for origin in ("http://127.0.0.1:8000", "http://localhost:8000", "http://[::1]:8000"):
+        assert api.post("/api/runs", json={"demo_id": "nope"}, headers={"Origin": origin}).status_code == 404, origin
+    assert api.post("/api/runs", json={"demo_id": "nope"}).status_code == 404  # no Origin (CLI / same-origin GET-less)

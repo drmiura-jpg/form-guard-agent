@@ -7,8 +7,9 @@ filled file, re-indexes both independently and proves, check by check:
           entry (styles.xml, numbering.xml, theme1.xml, …) byte-identical, both
           compressed stream and content (SHA-256).
   XML   — well-formed, namespace declarations preserved, and the *markup
-          skeleton* (every tag and attribute, with text-node contents blanked)
-          byte-identical: no border, merge, property or style reference moved.
+          skeleton* (every tag, attribute — xml:space included — and non-slot
+          text, with only the slot text nodes blanked) byte-identical: no
+          border, merge, property or style reference moved.
   LAYOUT— table topology (tables/rows/cells, gridSpan, vMerge, tblGrid), borders
           & shading, paragraph/run formatting, page setup; for .xlsx merged
           ranges, widths/heights, formulas, data validations, cell styles.
@@ -31,8 +32,8 @@ from typing import Any, Iterable, Optional, Union
 
 from lxml import etree
 
-from .constraints import validate_value
-from .grounding import ground_value
+from .constraints import DATE_CODES, validate_value
+from .grounding import NUMBER_DATE_CODES, ground_value
 from .models import AuditCheckItem, EntryHash, FieldMapping, HITLItem, VerificationReport
 from .ooxml import (
     W_NS,
@@ -40,6 +41,7 @@ from .ooxml import (
     UnsafeXMLError,
     UnsupportedXMLError,
     canonical_text_node_token,
+    check_xlsx_limits,
     ensure_safe_xml,
     index_part,
     iter_start_tags,
@@ -64,8 +66,33 @@ def _check(check_id, category, description, passed, details="", severity="major"
 # ------------------------------------------------------------------- skeletons
 
 
-def skeleton_bytes(idx: PartIndex, cut_containers: Iterable[int] = ()) -> bytes:
-    """Markup with every text node's content blanked (and runs of designated empty cells removed)."""
+def slot_node_keys(idx: PartIndex) -> set[tuple[int, int]]:
+    """``(container index, position within the container)`` of every text node that holds marker characters.
+
+    Computed on the *original* part; the writer never adds or removes text nodes inside a marker
+    container, so the same keys address the corresponding nodes of the filled part.
+    """
+    keys: set[tuple[int, int]] = set()
+    for c in idx.containers:
+        hits = find_markers(idx.container_text(c))
+        if not hits:
+            continue
+        for k, (_ni, ns, ne) in enumerate(idx.node_layout(c)):
+            if any(ns < h.end and ne > h.start for h in hits):
+                keys.add((c.idx, k))
+    return keys
+
+
+def skeleton_bytes(idx: PartIndex, cut_containers: Iterable[int] = (),
+                   slot_keys: Optional[set[tuple[int, int]]] = None) -> bytes:
+    """The part with only slot text blanked.
+
+    Every text node that carries marker characters becomes an empty canonical token (its
+    xml:space dropped, since the writer may have to add it) and the runs of designated empty
+    cells are removed. All other bytes — including the exact start tag (xml:space) and the text
+    of every non-slot node — are kept, so any change outside the slots shows up.
+    ``slot_keys=None`` blanks every text node (structure-only comparison).
+    """
     edits: list[tuple[int, int, bytes]] = []
     cut = set(cut_containers)
     for ci in sorted(cut):
@@ -77,8 +104,14 @@ def skeleton_bytes(idx: PartIndex, cut_containers: Iterable[int] = ()) -> bytes:
         if c.empty:
             st = idx.data[c.start_tag[0] : c.start_tag[1]]
             edits.append((c.start_tag[0], c.start_tag[1], st[:-2].rstrip() + b"></" + c.qname.encode() + b">"))
+    position: dict[int, int] = {}
+    for c in idx.containers:
+        for k, n in enumerate(idx.container_nodes(c)):
+            position[n.idx] = k
     for n in idx.nodes:
         if n.container in cut:
+            continue
+        if slot_keys is not None and (n.container, position.get(n.idx, -1)) not in slot_keys:
             continue
         st = idx.data[n.start_tag[0] : n.start_tag[1]]
         edits.append((n.span[0], n.span[1], canonical_text_node_token(st)))
@@ -184,16 +217,16 @@ def xlsx_structure(path_or_bytes) -> dict[str, Any]:
         widths = {k: v.width for k, v in sorted(ws.column_dimensions.items())}
         heights = {k: v.height for k, v in sorted(ws.row_dimensions.items()) if v.height}
         formulas, styles, borders = {}, {}, 0
-        for row in ws.iter_rows():
-            for c in row:
-                if c.data_type == "f":
-                    formulas[c.coordinate] = str(c.value)
-                b = c.border
-                sides = tuple(getattr(getattr(b, s), "style", None) for s in ("left", "right", "top", "bottom"))
-                borders += sum(1 for s in sides if s)
-                fill = c.fill.fgColor.rgb if c.fill and c.fill.fill_type else None
-                styles[c.coordinate] = (c.number_format, c.font.b, c.font.sz, c.font.name, fill, sides,
-                                        c.alignment.horizontal, c.alignment.vertical, c.alignment.wrap_text)
+        # sparse: only the cells present in the file (iter_rows() would walk the whole used rectangle)
+        for c in sorted(ws._cells.values(), key=lambda c: (c.row, c.column)):
+            if c.data_type == "f":
+                formulas[c.coordinate] = str(c.value)
+            b = c.border
+            sides = tuple(getattr(getattr(b, s), "style", None) for s in ("left", "right", "top", "bottom"))
+            borders += sum(1 for s in sides if s)
+            fill = c.fill.fgColor.rgb if c.fill and c.fill.fill_type else None
+            styles[c.coordinate] = (c.number_format, c.font.b, c.font.sz, c.font.name, fill, sides,
+                                    c.alignment.horizontal, c.alignment.vertical, c.alignment.wrap_text)
         dvs = sorted((str(dv.sqref), dv.type, dv.formula1) for dv in ws.data_validations.dataValidation)
         ps = ws.page_setup
         sheets.append({
@@ -222,7 +255,7 @@ def verify(
     pending = [s.slot_id for s in scan.slots if s.slot_id not in values]
     orig_blob = scan.path.read_bytes()
     filled_blob = filled_path.read_bytes()
-    stats: dict[str, Any] = {}
+    stats: dict[str, Any] = {"filled_sha256": _sha(filled_blob)}  # the exact bytes this report is about
 
     # ---------------------------------------------------------------- ZIP
     entry_hashes: list[EntryHash] = []
@@ -297,6 +330,7 @@ def verify(
         for o in s.occurrences:
             if o.marker_kind == "empty_cell":
                 designated.setdefault(o.part_name, set()).add(o.container_index)
+    slot_keys = {part: slot_node_keys(scan.parts[part]) for part in targets if part in scan.parts}
     tags_compared = 0
     for part in sorted(targets):
         if part not in names_f:
@@ -317,8 +351,8 @@ def verify(
         if _ns_decls(data_o) != _ns_decls(data_f):
             ns_ok = False
             ns_details.append(part)
-        so = skeleton_bytes(scan.parts[part], designated.get(part, ()))
-        sf = skeleton_bytes(filled_parts[part], designated.get(part, ()))
+        so = skeleton_bytes(scan.parts[part], designated.get(part, ()), slot_keys.get(part, set()))
+        sf = skeleton_bytes(filled_parts[part], designated.get(part, ()), slot_keys.get(part, set()))
         tags_compared += sum(1 for _ in iter_start_tags(data_o))
         if so != sf:
             skel_ok = False
@@ -333,7 +367,8 @@ def verify(
     checks.append(_check(
         "XML-03", "xml", "Markup skeleton byte-identical outside slot text (every tag, attribute, property)",
         skel_ok and wellformed,
-        (f"{tags_compared} tags and {n_nodes} text nodes compared; only slot characters differ" if skel_ok and wellformed
+        (f"{tags_compared} tags and {n_nodes} text nodes compared (xml:space and text of every non-slot node included); "
+         f"only slot characters differ" if skel_ok and wellformed
          else " | ".join(skel_details)), "critical", tags=tags_compared))
     stats["tags_compared"] = tags_compared
 
@@ -344,7 +379,7 @@ def verify(
         _xlsx_layout_checks(orig_blob, filled_blob, checks, stats)
 
     # --------------------------------------------------------------- TEXT
-    _text_checks(scan, filled_parts, values, pending, designated, checks, stats)
+    _text_checks(scan, filled_parts, values, pending, designated, checks, stats, slot_keys)
 
     # ------------------------------------------------------- GRD / CON / APP
     _content_checks(scan, mappings, values, memo_text, checks, stats)
@@ -410,6 +445,13 @@ def _docx_layout_checks(scan, zo, zf, checks, stats, designated):
 
 
 def _xlsx_layout_checks(orig_blob, filled_blob, checks, stats):
+    try:
+        with zipfile.ZipFile(io.BytesIO(filled_blob)) as z:
+            check_xlsx_limits(z)
+    except (UnsupportedXMLError, KeyError, etree.XMLSyntaxError) as exc:
+        checks.append(_check("LAYOUT-01", "layout", "Sheet topology identical (sheets, merged ranges)", False,
+                             f"not compared: {exc}", "critical"))
+        return
     so, sf = xlsx_structure(orig_blob), xlsx_structure(filled_blob)
     pairs = list(zip(so["sheets"], sf["sheets"]))
     same_count = len(so["sheets"]) == len(sf["sheets"])
@@ -454,14 +496,18 @@ def _expected_text(text: str, values: dict[str, str]) -> str:
     return "".join(out)
 
 
-def _text_checks(scan, filled_parts, values, pending, designated, checks, stats):
+def _text_checks(scan, filled_parts, values, pending, designated, checks, stats, slot_keys=None):
     from .writer import prepare_value
 
+    slot_keys = slot_keys or {}
     prepared = {k: prepare_value(v, scan.file_type) for k, v in values.items()}
     boiler_ok, slot_ok = True, True
     boiler_bad, slot_bad = [], []
     n_boiler = n_slot = 0
     residual = []
+    if not scan.slots:
+        slot_ok = False
+        slot_bad.append("0 fillable slots found — designate {{markers}}, [記入欄: ...], or table coordinates in .slots.json")
     for part, fidx in filled_parts.items():
         oidx = scan.parts[part]
         if len(oidx.containers) != len(fidx.containers):
@@ -469,6 +515,7 @@ def _text_checks(scan, filled_parts, values, pending, designated, checks, stats)
             boiler_bad.append(f"{part}: container count {len(oidx.containers)}→{len(fidx.containers)}")
             continue
         dset = designated.get(part, set())
+        keys = slot_keys.get(part, set())
         slot_by_container = {o.container_index: s.slot_id for s in scan.slots for o in s.occurrences
                              if o.part_name == part and o.marker_kind == "empty_cell"}
         for co, cf in zip(oidx.containers, fidx.containers):
@@ -481,17 +528,29 @@ def _text_checks(scan, filled_parts, values, pending, designated, checks, stats)
                     slot_ok = False
                     slot_bad.append(f"{sid}: expected «{exp}» got «{tf}»")
                 continue
+            # Compare run by run (<w:t> / <t>), not just per paragraph: moving one character from a bold
+            # run into the next normal run keeps the paragraph text but changes the printed form.
+            no, nf = oidx.container_nodes(co), fidx.container_nodes(cf)
+            fixed_o = [n.text for k, n in enumerate(no) if (co.idx, k) not in keys]
+            fixed_f = [n.text for k, n in enumerate(nf) if (co.idx, k) not in keys]
             if has_marker(to):
                 n_slot += 1
                 exp = _expected_text(to, prepared)
                 if tf != exp:
                     slot_ok = False
                     slot_bad.append(f"«{to[:30]}» expected «{exp[:60]}» got «{tf[:60]}»")
+                if len(no) != len(nf) or fixed_o != fixed_f:
+                    boiler_ok = False
+                    boiler_bad.append(f"«{to[:40]}»: printed text next to the marker changed run by run")
             else:
                 n_boiler += 1
                 if tf != to:
                     boiler_ok = False
                     boiler_bad.append(f"«{to[:40]}» → «{tf[:40]}»")
+                elif len(no) != len(nf) or fixed_o != fixed_f:
+                    boiler_ok = False
+                    boiler_bad.append(f"«{to[:40]}»: same text, but characters moved between runs "
+                                      f"{[n.text for n in no]} → {[n.text for n in nf]}")
             for h in find_markers(tf):
                 residual.append(h.slot_id)
     for part, oidx in scan.parts.items():
@@ -503,7 +562,7 @@ def _text_checks(scan, filled_parts, values, pending, designated, checks, stats)
                          "critical", altered=boiler_bad[:20]))
     checks.append(_check("TEXT-02", "text", "Each slot contains exactly its approved value (text around markers intact)",
                          slot_ok, f"{n_slot} slot text blocks match the approved values" if slot_ok else "; ".join(slot_bad[:6]),
-                         "critical"))
+                         "critical", slots=len(scan.slots)))
     unexpected = sorted(set(residual) - set(pending))
     checks.append(_check("TEXT-03", "text", "No unreplaced markers except fields awaiting human input",
                          not unexpected, (f"pending human input: {', '.join(pending)}" if pending else "no markers left")
@@ -511,8 +570,12 @@ def _text_checks(scan, filled_parts, values, pending, designated, checks, stats)
     stats.update({"boilerplate_blocks": n_boiler, "slot_blocks": n_slot})
 
 
+NOT_VERIFIED = "structural verification only (no memo provided — grounding not verified)"
+
+
 def _content_checks(scan, mappings, values, memo, checks, stats):
     ungrounded, unsupported, limits, formats, options = [], [], [], [], []
+    why_ungrounded, why_unsupported = [], []
     by_id = {s.slot_id: s for s in scan.slots}
     for m in mappings:
         if not m.is_written or m.slot_id not in by_id:
@@ -521,21 +584,40 @@ def _content_checks(scan, mappings, values, memo, checks, stats):
         if m.status == "filled":
             quotes = [sp.text for sp in m.source_spans] or ([m.source_quote] if m.source_quote else [])
             g = ground_value(m.filled_value, quotes, memo, slot, near=[sp.start_char for sp in m.source_spans] or None)
-            if g.ungrounded:
+            # Every error-severity grounding issue fails a check: numbers / dates → GRD-02; everything
+            # else (quote missing, a name / ID / option the quote does not state) → GRD-01.
+            errs = [i for i in g.issues if i.severity == "error"]
+            other = [i for i in errs if i.code not in NUMBER_DATE_CODES]
+            numdate = [i for i in errs if i.code in NUMBER_DATE_CODES]
+            if other:
                 ungrounded.append(m.slot_id)
-            if any(i.code in ("number_unsupported", "date_unsupported") for i in g.issues):
+                why_ungrounded.append(f"{m.slot_id}: {other[0].message}")
+            if numdate:
                 unsupported.append(m.slot_id)
+                why_unsupported.append(f"{m.slot_id}: {numdate[0].message}")
         for i in validate_value(slot, m.filled_value):
             if i.severity != "error":
                 continue
-            {"max_chars": limits, "format": formats}.get(i.code, options).append(f"{m.slot_id}: {i.message}")
+            target = limits if i.code == "max_chars" else formats if i.code in DATE_CODES else options
+            target.append(f"{m.slot_id}: {i.message}")
     n_filled = sum(1 for m in mappings if m.status == "filled" and m.is_written)
-    n_human = sum(1 for m in mappings if m.status == "human_entered")
+    n_human = sum(1 for m in mappings if m.status == "human_entered" and m.is_written)
+    n_recovered = sum(1 for m in mappings if m.status == "recovered" and m.is_written)
+    unverified = n_recovered > 0 and n_filled == 0 and not ungrounded and not unsupported
+    if unverified:
+        ok1 = NOT_VERIFIED + f" — {n_recovered} value(s) read back from the file"
+        ok2 = NOT_VERIFIED
+    else:
+        ok1 = (f"{n_filled} values grounded" + (f"; {n_human} human-entered (attested by reviewer)" if n_human else "")
+               + (f"; {n_recovered} recovered without provenance (not verified)" if n_recovered else ""))
+        ok2 = "all numbers/dates supported"
+    sev = "info" if unverified else "critical"
     checks.append(_check("GRD-01", "grounding", "Every AI-filled value is backed by verbatim quotes found in the memo",
-                         not ungrounded, (f"{n_filled} values grounded" + (f"; {n_human} human-entered (attested by reviewer)" if n_human else ""))
-                         if not ungrounded else f"ungrounded: {ungrounded}", "critical", ungrounded=ungrounded))
+                         not ungrounded, ok1 if not ungrounded else "ungrounded: " + "; ".join(why_ungrounded[:6]),
+                         sev, ungrounded=ungrounded, not_verified=unverified))
     checks.append(_check("GRD-02", "grounding", "Numbers and dates in values appear in the quoted evidence", not unsupported,
-                         "all numbers/dates supported" if not unsupported else f"unsupported in: {unsupported}", "critical"))
+                         ok2 if not unsupported else "unsupported: " + "; ".join(why_unsupported[:6]), sev,
+                         unsupported=unsupported, not_verified=unverified))
     checks.append(_check("CON-01", "constraints", "Character limits printed on the form are respected", not limits,
                          "all within limits" if not limits else "; ".join(limits), "major"))
     checks.append(_check("CON-02", "constraints", "Formats (和暦 dates, yen amounts, ID patterns) are valid", not formats,
@@ -607,7 +689,35 @@ _FLAG_TEXT = {
     "weekday_ok": "曜日一致を確認 / weekday consistent",
     "human": "人が入力 / entered by the reviewer",
     "low_conf": "信頼度低 / low confidence",
+    "re_anchored": "引用を付け替え / quote re-anchored — check the wording",
+    "unsafe_condensation": "要約で条件が欠ける / condensing would drop a condition — review",
+    "weekday": "曜日を付記 / weekday added",
+    "recovered_unverified": "出所不明・根拠未検証 / recovered from the file — grounding not verified",
 }
+
+
+def _quoted(pieces: list[str]) -> str:
+    """「A」「B」「（金）」×2 — consecutive identical pieces are counted, not repeated."""
+    out: list[list] = []
+    for p in pieces:
+        if out and out[-1][0] == p:
+            out[-1][1] += 1
+        else:
+            out.append([p, 1])
+    return "".join(f"「{p}」" + (f"×{n}" if n > 1 else "") for p, n in out)
+
+
+def removed_text_note(m: FieldMapping) -> str:
+    """HITL disclosure of every piece deleted to meet a character limit (full text, never truncated)."""
+    pieces = list(m.condensed_removed)
+    if not pieces:
+        for w in m.warnings:
+            if w.startswith("condensed — removed: "):
+                pieces += [x for x in w.removeprefix("condensed — removed: ").split(" ／ ") if x]
+    if not pieces:
+        return ""
+    return (f"（字数制限のため削除した文：{_quoted(pieces)}— 必要な条件や措置が欠けていないか確認 / "
+            f"Condensed for char limit; confirm no essential condition was lost）")
 
 
 def build_hitl_checklist(scan: ScanResult, mappings: list[FieldMapping], report: VerificationReport) -> list[HITLItem]:
@@ -616,12 +726,21 @@ def build_hitl_checklist(scan: ScanResult, mappings: list[FieldMapping], report:
     for s in scan.slots:
         m = by_id.get(s.slot_id)
         if m is None or not m.is_written:
+            if m is not None and m.suggested_value:
+                reason = m.errors[0] if m.errors else "validation failed"
+                prompt = (f"「{s.label}」は自動検証で確定できなかったため未記入です（{reason}）。候補を確認し、正しい値を"
+                          f"入力してください / Could not be verified automatically — review the suggestion and enter "
+                          f"the value yourself.")
+            else:
+                prompt = (f"「{s.label}」はメモに根拠が無いため未記入です。正しい値を入力してください / "
+                          f"No evidence in the memo — please enter this value yourself.")
+            flags = ["needs_input"] + (["has_suggestion"] if m is not None and m.suggested_value else [])
+            if m is not None and "unsafe_condensation" in m.normalizations:
+                flags.append("unsafe_condensation")
             items.append(HITLItem(
                 item_id=f"slot:{s.slot_id}", kind="pending_input", slot_id=s.slot_id, label=s.label,
-                prompt=f"「{s.label}」はメモに根拠が無いため未記入です。正しい値を入力してください / "
-                       f"No evidence in the memo — please enter this value yourself.",
-                value=(m.suggested_value if m else ""), importance=s.importance,
-                flags=["needs_input"] + (["has_suggestion"] if m and m.suggested_value else []), required=True,
+                prompt=prompt + (removed_text_note(m) if m is not None else ""),
+                value=(m.suggested_value if m else ""), importance=s.importance, flags=flags, required=True,
             ))
             continue
         flags = list(dict.fromkeys(m.normalizations))
@@ -633,9 +752,15 @@ def build_hitl_checklist(scan: ScanResult, mappings: list[FieldMapping], report:
             flags.append("low_conf")
         lr = m.source_line_range
         where = f"L{lr[0]}" + (f"–L{lr[1]}" if lr and lr[1] != lr[0] else "") if lr else ""
-        prompt = (f"「{s.label}」＝「{m.filled_value}」が原文{(' ' + where) if where else ''}の記載と一致することを確認 / "
-                  f"Confirm this value against the quoted source.") if m.status == "filled" else (
-                  f"「{s.label}」＝「{m.filled_value}」（担当者が入力）を確認 / Confirm the value you entered.")
+        if m.status == "filled":
+            prompt = (f"「{s.label}」＝「{m.filled_value}」が原文{(' ' + where) if where else ''}の記載と一致することを確認 / "
+                      f"Confirm this value against the quoted source.")
+        elif m.status == "recovered":
+            prompt = (f"「{s.label}」＝「{m.filled_value}」（ファイルから読み取った値。根拠は未検証）を確認 / "
+                      f"Value read back from the file — its source was not verified.")
+        else:
+            prompt = f"「{s.label}」＝「{m.filled_value}」（担当者が入力）を確認 / Confirm the value you entered."
+        prompt += removed_text_note(m)
         items.append(HITLItem(
             item_id=f"slot:{s.slot_id}", kind="field", slot_id=s.slot_id, label=s.label, value=m.filled_value,
             source_quote=m.source_quote, source_line_range=m.source_line_range, importance=s.importance,
@@ -729,6 +854,12 @@ def compare_naive(scan: ScanResult, naive_path: Union[str, Path], memo_text: str
         orig_texts = [scan.parts[p].container_text(c) for p in scan.parts for c in scan.parts[p].containers]
         naive_texts = [t for t in _docx_texts(nb)]
     else:
+        try:
+            with zipfile.ZipFile(io.BytesIO(nb)) as z:
+                check_xlsx_limits(z)
+        except (UnsupportedXMLError, KeyError, etree.XMLSyntaxError) as exc:
+            checks.append(_check("LAYOUT-01", "layout", "Merged ranges identical", False, f"not compared: {exc}", "critical"))
+            return _finish_naive(scan, checks, stats)
         so, sn = xlsx_structure(ob), xlsx_structure(nb)
         mo, mn = sum(len(s["merged"]) for s in so["sheets"]), sum(len(s["merged"]) for s in sn["sheets"])
         bo, bn = sum(s["borders"] for s in so["sheets"]), sum(s["borders"] for s in sn["sheets"])
@@ -807,10 +938,14 @@ def _xlsx_texts(blob: bytes) -> list[str]:
     wb = openpyxl.load_workbook(io.BytesIO(blob))
     out = []
     for ws in wb.worksheets:
-        for row in ws.iter_rows(values_only=True):
-            vals = ["" if v is None else str(v) for v in row]
-            if any(vals):
-                out.append("\t".join(vals))
+        rows: dict[int, dict[int, str]] = {}
+        for c in ws._cells.values():  # sparse, like xlsx_structure
+            if c.value is not None:
+                rows.setdefault(c.row, {})[c.column] = str(c.value)
+        lo = ws.min_column
+        for r in sorted(rows):
+            cols = rows[r]
+            out.append("\t".join(cols.get(k, "") for k in range(lo, ws.max_column + 1)))
     return out
 
 

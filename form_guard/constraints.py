@@ -13,12 +13,12 @@ import unicodedata
 from typing import Any, Iterable, Optional
 
 from .models import FormSlot, ValidationIssue
-from .textnorm import parse_compound, parse_wareki_exact, parse_yen_exact
+from .textnorm import check_full_date, check_wareki, find_invalid_dates, parse_compound, parse_yen_exact
 
 FORMAT_GUIDE = {
-    "wareki_date": "和暦の年月日 — e.g. 令和8年11月2日 (2026 = 令和8年, 2019-05-01 = 令和元年)",
-    "wareki_period": "和暦の期間 — e.g. 令和8年12月1日～令和9年2月26日",
-    "date": "日付 — e.g. 2026年11月2日",
+    "wareki_date": "和暦の年月日（曜日つき）— e.g. 令和8年11月2日（月） (2026 = 令和8年, 2019-05-01 = 令和元年)",
+    "wareki_period": "和暦の期間（曜日つき）— e.g. 令和8年12月1日（火）～令和9年2月26日（金）",
+    "date": "日付（曜日つき）— e.g. 2026年11月2日（月）",
     "yen": "円金額 — digits with comma grouping + 円, e.g. 4,836,000円",
     "pattern": "must match the regular expression in constraints.pattern",
     "digits": "digits only (half-width), exact length in constraints.digits",
@@ -139,6 +139,30 @@ def split_choice(value: str, slot: FormSlot) -> list[str]:
     return [value.strip()]
 
 
+_PERIOD_SEP = re.compile(r"\s*[～〜~]\s*")
+DATE_CODES = ("format", "date_invalid", "weekday_mismatch", "period_order")
+
+
+def _date_issues(parts: list[str], check, kind: str) -> list[ValidationIssue]:
+    """Validate the endpoint(s) of a date / period: real calendar date, inside its era, matching （曜）, in order."""
+    issues: list[ValidationIssue] = []
+    dates = []
+    for p in parts:
+        d, problem = check(p)
+        if problem:
+            issues.append(_issue(problem[0], f"«{p}»: {problem[1]}"))
+        elif d is None:
+            # wrong syntax (e.g. a Western date in a 和暦 field): say what is wrong with the date itself first
+            # (2026年2月30日, wrong （曜）), then "format" so the repair step can still convert it
+            issues += [_issue(code, f"«{p}»: {msg}") for _, code, msg in find_invalid_dates(p)]
+            if not any(i.code == "format" for i in issues):  # one format complaint per value, not per endpoint
+                issues.append(_issue("format", kind))
+        dates.append(d)
+    if not issues and len(dates) == 2 and dates[0] > dates[1]:  # type: ignore[operator]
+        issues.append(_issue("period_order", "period ends before it starts / 期間の終了が開始より前です"))
+    return issues
+
+
 def validate_value(slot: FormSlot, value: str) -> list[ValidationIssue]:
     """Check a candidate value against the slot's discovered constraints."""
     v = value.strip()
@@ -150,15 +174,20 @@ def validate_value(slot: FormSlot, value: str) -> list[ValidationIssue]:
     fmt = slot.required_format
     c = slot.constraints
     if fmt == "wareki_date":
-        if parse_wareki_exact(v) is None:
-            issues.append(_issue("format", "not a 和暦 date such as 令和8年11月2日 / 和暦の年月日ではありません"))
+        issues += _date_issues([v], check_wareki, "not a 和暦 date such as 令和8年11月2日（月） / 和暦の年月日ではありません")
     elif fmt == "wareki_period":
-        parts = re.split(r"\s*[～〜~]\s*", v)
-        ds = [parse_wareki_exact(p) for p in parts]
-        if len(parts) != 2 or None in ds:
-            issues.append(_issue("format", "not a 和暦 period such as 令和8年12月1日～令和9年2月26日 / 和暦の期間ではありません"))
-        elif ds[0] > ds[1]:  # type: ignore[operator]
-            issues.append(_issue("format", "period ends before it starts / 期間の終了が開始より前です"))
+        parts = _PERIOD_SEP.split(v)
+        if len(parts) != 2:
+            issues.append(_issue("format", "not a 和暦 period such as 令和8年12月1日（火）～令和9年2月26日（金） / 和暦の期間ではありません"))
+        else:
+            issues += _date_issues(parts, check_wareki, "not a 和暦 period such as 令和8年12月1日（火）～令和9年2月26日（金） "
+                                                        "/ 和暦の期間ではありません")
+    elif fmt == "date":
+        parts = _PERIOD_SEP.split(v)
+        if len(parts) > 2:
+            issues.append(_issue("format", "not a date such as 2026年11月2日（月） / 日付ではありません"))
+        else:
+            issues += _date_issues(parts, check_full_date, "not a full date such as 2026年11月2日（月） / 年月日がそろった日付ではありません")
     elif fmt == "yen":
         n = parse_yen_exact(v)
         if n is None:
@@ -186,4 +215,7 @@ def validate_value(slot: FormSlot, value: str) -> list[ValidationIssue]:
     elif fmt == "person_name":
         if re.search(r"[（()）]", v):
             issues.append(_issue("format", "a name should not contain annotations in brackets", "warning"))
+    if fmt not in ("wareki_date", "wareki_period", "date"):
+        # free text copied from the memo may carry an impossible date — surface it to the reviewer
+        issues += [_issue(code, msg, "warning") for _, code, msg in find_invalid_dates(v)]
     return issues

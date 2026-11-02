@@ -3,7 +3,7 @@
     python -m form_guard.cli --all-demos                 # run all 3 fictional demos -> output/
     python -m form_guard.cli --form F --memo M --out-dir D [--mode demo|live|auto] [--set 法人番号=...]
     python -m form_guard.cli --scan FORM                 # list the slots a form exposes
-    python -m form_guard.cli --verify ORIGINAL FILLED    # audit any filled copy against its blank original
+    python -m form_guard.cli --verify ORIGINAL FILLED [--memo M]  # audit any filled copy against its blank original
     python -m form_guard.cli --generate-samples          # (re)write samples/ deterministically
     python -m form_guard.cli --serve [--port 8000]       # web UI at http://127.0.0.1:8000
 """
@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -79,6 +80,28 @@ def _print_result(result, out_root: Optional[Path] = None) -> None:
         print(f"   → {rel}")
 
 
+AUDIT_LOG_NAMES = ("audit_log.json", "audit_report.json")
+
+
+def matching_audit_log(filled: Path) -> tuple[Optional[dict], str]:
+    """The audit log written next to ``filled`` for exactly this file (same SHA-256), if any."""
+    sha = hashlib.sha256(Path(filled).read_bytes()).hexdigest()
+    note = ""
+    for name in AUDIT_LOG_NAMES:
+        p = Path(filled).parent / name
+        if not p.is_file():
+            continue
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            note = f"{name} is unreadable — ignored"
+            continue
+        if isinstance(data, dict) and (data.get("filled") or {}).get("sha256") == sha:
+            return data, f"{name} (SHA-256 matches the filled file)"
+        note = f"{name} belongs to a different file (SHA-256 mismatch) — ignored"
+    return None, note
+
+
 def run_all_demos(out_dir: Path, mode: str, model: Optional[str], samples_dir: Optional[Path], regenerate: bool,
                   png: bool, client=None) -> tuple[list, int]:
     from .pipeline import run_pipeline
@@ -120,7 +143,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--model", default=None, help=f"Claude model for live mode (default {DEFAULT_MODEL})")
     ap.add_argument("--slot-spec", type=Path, help="optional <form>.slots.json (aliases, coordinate targets)")
     ap.add_argument("--naive", type=Path, help="optional naive-regeneration file to audit for comparison")
-    ap.add_argument("--set", action="append", default=[], metavar="SLOT=VALUE", help="reviewer-entered value")
+    ap.add_argument("--set", action="append", default=[], metavar="SLOT=VALUE",
+                    help="reviewer-entered value (with --verify: a value the reviewer attests to)")
     ap.add_argument("--samples-dir", type=Path, default=None)
     ap.add_argument("--regenerate-samples", action="store_true")
     ap.add_argument("--png", action="store_true", help="also write PNG previews (needs Pillow + a CJK font)")
@@ -158,7 +182,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
 
     if a.verify:
-        from .mapper import human_mapping
+        from .models import FieldMapping
+        from .pipeline import reconstruct_mappings
         from .samples import read_memo
         from .scanner import scan
         from .verifier import infer_values_from_filled, verify
@@ -166,12 +191,20 @@ def main(argv: Optional[list[str]] = None) -> int:
         original, filled = a.verify
         sc = scan(original, a.slot_spec)
         values = infer_values_from_filled(sc, filled)
-        maps = [human_mapping(sc.slot(k), v) for k, v in values.items()]
-        memo = read_memo(a.memo) if a.memo else ""
+        audit, audit_note = matching_audit_log(filled)
+        memo = read_memo(a.memo) if a.memo else ((audit.get("memo") or {}).get("text", "") if audit else "")
+        recorded = [FieldMapping.model_validate(m) for m in audit.get("mappings", [])] if audit else []
+        maps = reconstruct_mappings(sc, values, memo, recorded, _parse_sets(a.set))
         rep = verify(sc, filled, maps, memo)
-        print(f"{filled.name} vs {original.name}: {rep.overall_status} ({rep.passed_count} passed, {rep.failed_count} failed)")
+        unverified = any(c.evidence.get("not_verified") for c in rep.checks)
+        basis = ("memo " + str(a.memo) if a.memo else "memo recorded in the audit log") if memo else "none"
+        print(f"{filled.name} vs {original.name}: {rep.overall_status} ({rep.passed_count} passed, {rep.failed_count} failed)"
+              + (" — grounding NOT verified (structure only)" if unverified else ""))
+        print(f"  grounding basis: {basis}" + (f"; audit log: {audit_note}" if audit_note else "")
+              + ("" if memo else " — pass --memo MEMO (or keep audit_log.json next to the filled file) to check sources"))
         for c in rep.checks:
-            print(f"  {'✓' if c.passed else '✗'} {c.check_id:<10} {c.description} — {c.details[:150]}")
+            mark = "–" if c.evidence.get("not_verified") else ("✓" if c.passed else "✗")
+            print(f"  {mark} {c.check_id:<10} {c.description} — {c.details[:150]}")
         return 1 if rep.overall_status == "FAIL" else 0
 
     if a.all_demos:

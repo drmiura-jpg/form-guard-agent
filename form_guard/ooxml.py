@@ -129,6 +129,10 @@ class PartIndex:
             out.append(self.nodes[ref].text if kind == "n" else ref)  # type: ignore[index]
         return "".join(out)
 
+    def container_nodes(self, c: Container) -> list[TextNode]:
+        """The text nodes of a container, in document order (one per <w:t> / <t>)."""
+        return [self.nodes[ref] for kind, ref in c.segments if kind == "n"]  # type: ignore[index]
+
     def node_layout(self, c: Container) -> list[tuple[int, int, int]]:
         """Return (node_idx, start, end) offsets of each text node inside the container text."""
         pos = 0
@@ -221,7 +225,13 @@ def needs_preserve(s: str) -> bool:
 
 
 def add_preserve_attr(start_tag: bytes) -> bytes:
-    """Insert xml:space="preserve" into a start tag (works for '>' and '/>' endings)."""
+    """Set xml:space="preserve" on a start tag (works for '>' and '/>' endings).
+
+    An existing ``xml:space="default"`` / ``xml:space='default'`` is replaced in place —
+    appending a second attribute would make the part malformed (``Attribute xml:space redefined``).
+    """
+    if _XMLSPACE_RE.search(start_tag):
+        return _XMLSPACE_RE.sub(b' xml:space="preserve"', start_tag, count=1)
     if start_tag.endswith(b"/>"):
         return start_tag[:-2] + b' xml:space="preserve"/>'
     return start_tag[:-1] + b' xml:space="preserve">'
@@ -470,6 +480,61 @@ def xlsx_sheet_parts(zf: zipfile.ZipFile) -> list[tuple[int, str, str]]:
         if rid in targets:
             out.append((i, sh.get("name", f"Sheet{i + 1}"), targets[rid]))
     return out
+
+
+# ------------------------------------------------------------ xlsx size guard
+
+# A real form fits easily inside these bounds; a 10 KB workbook with one cell at XFD1048576 or a
+# merge over a whole column would otherwise make openpyxl-style rectangle loops run for hours.
+MAX_XLSX_ROW = 2000
+MAX_XLSX_COL = 200
+MAX_XLSX_CELLS = 100_000
+
+_PFX = rb"(?:[A-Za-z_][\w.\-]*:)?"
+_CELL_TAG_RE = re.compile(rb"<" + _PFX + rb"c[\s/>]")
+_CELL_REF_RE = re.compile(rb"<" + _PFX + rb"c\s(?:[^>]*?\s)?r\s*=\s*[\"']\$?([A-Za-z]{1,3})\$?([0-9]{1,7})[\"']")
+_MERGE_REF_RE = re.compile(rb"<" + _PFX + rb"mergeCell\s(?:[^>]*?\s)?ref\s*=\s*[\"']([^\"']*)[\"']")
+_RANGE_RE = re.compile(r"^\$?([A-Za-z]{1,3})\$?([0-9]{1,7})(?::\$?([A-Za-z]{1,3})\$?([0-9]{1,7}))?$")
+
+
+def column_number(letters: str) -> int:
+    n = 0
+    for ch in letters.upper():
+        n = n * 26 + (ord(ch) - 64)
+    return n
+
+
+def check_xlsx_limits(zf: zipfile.ZipFile, sheets: Optional[list[tuple[int, str, str]]] = None) -> None:
+    """Refuse worksheets whose cells or merged ranges exceed safe form limits (read from the raw XML,
+    before any library expands a range). Raises UnsupportedXMLError."""
+    names = set(zf.namelist())
+    for _, sname, part in sheets if sheets is not None else xlsx_sheet_parts(zf):
+        if part not in names:
+            continue
+        data = zf.read(part)
+        if len(_CELL_TAG_RE.findall(data)) > MAX_XLSX_CELLS:
+            raise UnsupportedXMLError(f"Worksheet dimensions exceed safe form limits: sheet '{sname}' has more than "
+                                      f"{MAX_XLSX_CELLS:,} cells")
+        for m in _CELL_REF_RE.finditer(data):
+            col, row = column_number(m.group(1).decode()), int(m.group(2))
+            if row > MAX_XLSX_ROW or col > MAX_XLSX_COL:
+                raise UnsupportedXMLError(f"Worksheet dimensions exceed safe form limits: sheet '{sname}' has a cell at "
+                                          f"{m.group(1).decode()}{row} (limit: {MAX_XLSX_ROW} rows × {MAX_XLSX_COL} columns)")
+        area = 0
+        for m in _MERGE_REF_RE.finditer(data):
+            r = _RANGE_RE.match(m.group(1).decode("ascii", "replace").strip())
+            if not r:
+                raise UnsupportedXMLError(f"Worksheet dimensions exceed safe form limits: unreadable merged range "
+                                          f"{m.group(1)[:40]!r} in sheet '{sname}'")
+            c0, r0 = column_number(r.group(1)), int(r.group(2))
+            c1, r1 = (column_number(r.group(3)), int(r.group(4))) if r.group(3) else (c0, r0)
+            if max(r0, r1) > MAX_XLSX_ROW or max(c0, c1) > MAX_XLSX_COL:
+                raise UnsupportedXMLError(f"Worksheet dimensions exceed safe form limits: merged range {r.group(0)} in "
+                                          f"sheet '{sname}' (limit: {MAX_XLSX_ROW} rows × {MAX_XLSX_COL} columns)")
+            area += (abs(r1 - r0) + 1) * (abs(c1 - c0) + 1)
+        if area > MAX_XLSX_CELLS:
+            raise UnsupportedXMLError(f"Worksheet dimensions exceed safe form limits: merged ranges in sheet '{sname}' "
+                                      f"cover {area:,} cells")
 
 
 def _normpath(p: str) -> str:

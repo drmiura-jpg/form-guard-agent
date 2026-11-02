@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Optional, Union
 
 from . import __version__
+from .grounding import locate_quote, make_span
 from .mapper import (
     DemoEngine,
     LiveEngineError,
@@ -56,6 +57,7 @@ class PipelineResult:
     demo_id: Optional[str] = None
     out_dir: Optional[Path] = None
     naive_path: Optional[Path] = None
+    builtin_demo: bool = False  # an unmodified built-in demo: sample form + sample memo, no reviewer edits
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds"))
 
     def to_dict(self, include_previews: bool = True) -> dict[str, Any]:
@@ -65,10 +67,13 @@ class PipelineResult:
             "tool": f"Form-Guard Agent {__version__}",
             "created_at": self.created_at,
             "demo_id": self.demo_id,
+            "is_builtin_demo": self.builtin_demo,
             "form": {"name": self.form_path.name, "title": self.scan.title,
                      "title_en": self.scan.spec.get("form_title_en", ""), "file_type": self.scan.file_type,
                      "sha256": _sha_file(self.form_path)},
-            "filled": {"name": self.filled_path.name, "sha256": _sha_file(self.filled_path)},
+            # the SHA-256 of the exact bytes the verifier checked (not whatever is on disk later)
+            "filled": {"name": self.filled_path.name,
+                       "sha256": self.report.stats.get("filled_sha256") or _sha_file(self.filled_path)},
             "engine": self.engine,
             "memo": {"text": self.memo_text, "lines": len(memo_lines), "sha256": hashlib.sha256(self.memo_text.encode()).hexdigest()},
             "slots": [s.model_dump() for s in self.scan.slots],
@@ -114,6 +119,78 @@ def _map(scan_r: ScanResult, memo: str, mode: str, model: Optional[str], client:
     info["usage"] = run.usage
     info["rounds"] = run.rounds
     return run, info
+
+
+def is_builtin_demo(demo_id: Optional[str], form_path: Path, memo_text: str, mappings: list[FieldMapping]) -> bool:
+    """True only for an unmodified built-in demo: its sample form, its sample memo, no reviewer-entered values."""
+    from .samples import MEMOS, demo_by_id
+
+    if not demo_id:
+        return False
+    try:
+        demo = demo_by_id(demo_id)
+    except KeyError:
+        return False
+    return (Path(form_path).name == demo["form"] and memo_text == MEMOS.get(demo["memo"])
+            and not any(m.status == "human_entered" for m in mappings))
+
+
+def reconstruct_mappings(scan_r: ScanResult, values: dict[str, str], memo: str,
+                         recorded: Optional[list[FieldMapping]] = None,
+                         attested: Optional[dict[str, str]] = None) -> list[FieldMapping]:
+    """Mappings for verifying a filled copy whose values were read back from the file (CLI ``--verify``).
+
+    * A value recorded in a matching audit log keeps its recorded mapping (quotes, or reviewer entry).
+    * A value declared by the reviewer (``--set SLOT=VALUE``) counts as reviewer-entered.
+    * With a memo, every other value must be supported by the memo: the offline engine locates the
+      evidence for that field and the verifier re-checks the file's value against it — a value the
+      memo contradicts (JR-2099-999 vs ＪＲ－２０２６－０４７) fails GRD-01 / GRD-02.
+    * Without a memo the values are only ``recovered``: structure is verified, grounding is not.
+    """
+    from .writer import prepare_value
+
+    ft = scan_r.file_type
+    recorded_by = {m.slot_id: m for m in (recorded or [])}
+    attested = attested or {}
+    engine: dict[str, FieldMapping] = {}
+    if memo.strip():
+        engine = {m.slot_id: m for m in map_fields(scan_r.slots, memo, DemoEngine(), scan_r.title).mappings}
+    out: list[FieldMapping] = []
+    for slot in scan_r.slots:
+        sid = slot.slot_id
+        if sid not in values:
+            continue  # the marker is still in the file: the field is pending
+        v = values[sid]
+        rec = recorded_by.get(sid)
+        if rec is not None and rec.is_written and prepare_value(rec.filled_value, ft) == v:
+            out.append(rec)
+            continue
+        if sid in attested and prepare_value(attested[sid], ft) == v:
+            out.append(human_mapping(slot, attested[sid]))
+            continue
+        if not memo.strip():
+            out.append(FieldMapping(slot_id=sid, filled_value=v, status="recovered", char_count=len(v), engine="verify",
+                                    normalizations=["recovered_unverified"],
+                                    reasoning="Read back from the filled file; no memo or audit log to check it against."))
+            continue
+        e = engine.get(sid)
+        if e is not None and e.is_written and prepare_value(e.filled_value, ft) == v:
+            out.append(e)
+            continue
+        # The file holds something other than what the memo supports for this field: check the file's
+        # value against that field's evidence (or, if the engine found none, a verbatim occurrence).
+        spans = list(e.source_spans) if e is not None and e.source_spans else []
+        if not spans:
+            loc = locate_quote(memo, v)
+            spans = [make_span(memo, loc.start, loc.end)] if loc else []
+        out.append(FieldMapping(
+            slot_id=sid, filled_value=v, status="filled", source_spans=spans, char_count=len(v), engine="verify",
+            source_quote=" … ".join(sp.text for sp in spans),
+            source_line_range=(min(sp.line_start for sp in spans), max(sp.line_end for sp in spans)) if spans else None,
+            reasoning=(f"File value differs from what the memo supports for this field («{e.filled_value or e.suggested_value}»)"
+                       if e is not None and (e.filled_value or e.suggested_value) else "No evidence found for this field in the memo."),
+        ))
+    return out
 
 
 def apply_overrides(scan_r: ScanResult, mappings: list[FieldMapping], overrides: dict[str, str]) -> list[FieldMapping]:
@@ -363,6 +440,7 @@ def run_pipeline(
         run_id=run_id or new_run_id(), form_path=form_path, filled_path=filled_path, memo_text=memo_text,
         scan=scan_r, mappings=mappings, write=write, report=report, naive_report=naive_report, previews=previews,
         visual=visual, engine=engine_info, timings=timings, demo_id=demo_id, out_dir=out_dir, naive_path=naive_p,
+        builtin_demo=is_builtin_demo(demo_id, form_path, memo_text, mappings),
     )
     if write_outputs:
         write_run_outputs(result)
@@ -372,10 +450,21 @@ def run_pipeline(
 def _drift_check(visual: dict[str, Any]):
     from .models import AuditCheckItem
 
+    drift = visual.get("drift_outside_slots") or []
+    n_over = visual.get("overflow_count", 0)
+    n_moved = (visual.get("drift_count") or 0) - n_over
+    parts = []
+    if n_over:
+        parts.append(f"{n_over} value(s) overflow their cell ("
+                     + "; ".join(f"{d['box']}: {d['issue']}" for d in drift if "overflow" in d.get("issue", ""))[:200] + ")")
+    if n_moved:
+        parts.append(f"{n_moved} boxes moved (max {visual.get('max_shift_px')}px)")
+    if visual.get("pages_blank") != visual.get("pages_filled"):
+        parts.append(f"pages {visual.get('pages_blank')}→{visual.get('pages_filled')}")
     return AuditCheckItem(check_id="VIS-01", category="visual", passed=False, severity="major",
-                          description="Rendered layout outside the designated fields is unchanged",
-                          details=f"{visual.get('drift_count')} boxes moved (max {visual.get('max_shift_px')}px) — "
-                                  f"a value is probably too long for its cell", evidence={"drift": visual.get("drift_outside_slots")})
+                          description="Rendered layout outside the designated fields is unchanged and every value fits its cell",
+                          details=" · ".join(parts) + " — a value is probably too long for its field",
+                          evidence={"drift": drift})
 
 
 def write_run_outputs(result: PipelineResult) -> dict[str, Path]:

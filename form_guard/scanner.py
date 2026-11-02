@@ -21,9 +21,12 @@ from typing import Any, Optional, Union
 from .constraints import infer_slot_constraints
 from .models import FormSlot, SlotOccurrence
 from .ooxml import (
+    MAX_XLSX_COL,
+    MAX_XLSX_ROW,
     CellInfo,
     PartIndex,
     TableInfo,
+    check_xlsx_limits,
     docx_story_parts,
     index_part,
     xlsx_sheet_parts,
@@ -294,6 +297,7 @@ def _scan_xlsx(path: Path, spec: dict) -> ScanResult:
     warnings: list[str] = []
     with zipfile.ZipFile(path) as zf:
         sheets = xlsx_sheet_parts(zf)
+        check_xlsx_limits(zf, sheets)  # before any library expands a range: XFD1048576 / whole-column merges
         names = set(zf.namelist())
         sst_refs: dict[int, list[tuple[int, str, str, str]]] = {}
         if "xl/sharedStrings.xml" in names:
@@ -312,35 +316,40 @@ def _scan_xlsx(path: Path, spec: dict) -> ScanResult:
             for r in range(rng.min_row, rng.max_row + 1):
                 for col in range(rng.min_col, rng.max_col + 1):
                     merged[(r, col)] = (rng.min_row, rng.min_col)
-        allowed: dict[tuple[int, int], list[str]] = {}
-        maxlen: dict[tuple[int, int], int] = {}
+        # Data validations are looked up per slot cell instead of being expanded cell by cell, so a
+        # whole-column rule (D1:D1048576) costs nothing. Ranges are clamped to the form limits.
+        rules: list[tuple[str, object, list[tuple[int, int, int, int]]]] = []
         for dv in ws.data_validations.dataValidation:
-            cells = [(r, col) for rng in dv.sqref.ranges for r in range(rng.min_row, rng.max_row + 1)
-                     for col in range(rng.min_col, rng.max_col + 1)]
+            boxes = [(rng.min_row, rng.min_col, min(rng.max_row, MAX_XLSX_ROW), min(rng.max_col, MAX_XLSX_COL))
+                     for rng in dv.sqref.ranges]
             if dv.type == "list" and dv.formula1 and dv.formula1.startswith('"'):
                 opts = [o.strip() for o in dv.formula1.strip('"').split(",") if o.strip()]
-                for rc in cells:
-                    allowed[rc] = opts
+                rules.append(("list", opts, boxes))
             elif dv.type == "textLength" and dv.formula1 and dv.operator in ("lessThanOrEqual", "between"):
                 lim = dv.formula2 if dv.operator == "between" else dv.formula1
                 try:
-                    for rc in cells:
-                        maxlen[rc] = int(lim)
+                    rules.append(("len", int(lim), boxes))
                 except (TypeError, ValueError):
                     pass
-        for row in ws.iter_rows():
-            for cell in row:
-                if isinstance(cell.value, str):
-                    doc_texts.append(cell.value)
-        sheet_ctx[sname] = (ws, merged, allowed, maxlen)
+        # sparse: only cells present in the file, in reading order (iter_rows() walks the used rectangle)
+        for cell in sorted(ws._cells.values(), key=lambda c: (c.row, c.column)):
+            if isinstance(cell.value, str):
+                doc_texts.append(cell.value)
+        sheet_ctx[sname] = (ws, merged, rules)
 
     def cell_value(ws, merged, r, col) -> str:
         tr, tc = merged.get((r, col), (r, col))
-        v = ws.cell(row=tr, column=tc).value
-        return "" if v is None else str(v)
+        c = ws._cells.get((tr, tc))  # read-only lookup: ws.cell() would create empty cells while scanning
+        return "" if c is None or c.value is None else str(c.value)
+
+    def rule_for(rules, kind, rc):
+        for k, val, boxes in reversed(rules):  # the last matching rule wins, as when they were expanded
+            if k == kind and any(r0 <= rc[0] <= r1 and c0 <= rc[1] <= c1 for r0, c0, r1, c1 in boxes):
+                return val
+        return None
 
     def context(sidx, sname, ref):
-        ws, merged, allowed, maxlen = sheet_ctx[sname]
+        ws, merged, rules = sheet_ctx[sname]
         letters, r = coordinate_from_string(ref)
         col = column_index_from_string(letters)
         top = merged.get((r, col), (r, col))
@@ -365,7 +374,7 @@ def _scan_xlsx(path: Path, spec: dict) -> ScanResult:
             header = txt or None
             break
         box = f"s{sidx}!{get_column_letter(top[1])}{top[0]}"
-        return labels, header, box, allowed.get(top), maxlen.get(top)
+        return labels, header, box, rule_for(rules, "list", top), rule_for(rules, "len", top)
 
     def add(part_name, container_index, sidx, sname, ref, hit, text, via):
         acc = accs.setdefault(hit.slot_id, _Acc(hit.slot_id))

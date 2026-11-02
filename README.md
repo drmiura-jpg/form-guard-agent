@@ -3,7 +3,7 @@
 **Fill only the designated fields of a Word / Excel form, prove that nothing else changed, and keep a human in the loop.**
 **指定欄だけを記入し、様式の変更を検査する書類記入エージェント**
 
-Built for **Built with Claude: Japan 2026** (development started 2026-11-02). [日本語版はこちら ↓](#日本語)
+Built for **Built with Claude: Japan 2026** (development started Monday, 2026-11-02 / 2026-11-02（月）). [日本語版はこちら ↓](#日本語)
 
 ![Visual diff: naive regeneration vs Form-Guard](docs/screenshots/01_visual_diff.png)
 
@@ -24,15 +24,17 @@ get it rejected or make it wrong.
  1 Scan ............ find {{markers}} / [記入欄: …] / coordinate-designated empty cells,
         │            read the rules printed on the form (200字以内, 和暦, 13桁, 上限1,000,000円, drop-down lists)
  2 Map & self-correct  Claude (live) or a deterministic offline engine proposes a value + VERBATIM memo quotes;
-        │            an independent validator checks quotes, numbers, dates and printed rules; failures are
-        │            repaired (和暦 conversion, 483万6千円 → 4,836,000円, half-width IDs, deletion-only
-        │            condensation) or sent back to Claude with the validator's findings
+        │            an independent validator checks quotes, numbers, dates (real calendar date, era, weekday),
+        │            names, IDs, options and printed rules; failures are repaired (和暦 with weekday,
+        │            483万6千円 → 4,836,000円, half-width IDs, deletion-only condensation that never silently
+        │            drops a condition) or sent back to Claude with the validator's findings
  3 Surgical write .... replace ONLY the marker characters inside the XML bytes; every other ZIP entry is copied
         │            as raw compressed bytes (not even re-compressed)
- 4 Verify ............ 21 deterministic checks: ZIP/SHA-256, XML skeleton, tables/borders/merges, boilerplate text,
-        │            grounding, constraints, application load, rendered-layout drift
- 5 Human sign-off .... checklist with the source quote for every value; the download unlocks only after a named
-                     reviewer confirms every item (enforced by the server, bound to the file's SHA-256)
+ 4 Verify ............ 21 deterministic checks (plus VIS-01 if layout drift or overflow is detected): ZIP/SHA-256,
+        │            XML skeleton, tables/borders/merges, boilerplate text, grounding, constraints, application load
+ 5 Human sign-off .... checklist with the source quote for every value (and the full text of anything condensed
+                     away); any field can be corrected; the download unlocks only after a named reviewer confirms
+                     every item (enforced by the server, bound to the revision on screen and the file's SHA-256)
 ```
 
 Anything Form-Guard cannot ground in the memo is **never guessed**: it is left for the reviewer
@@ -47,7 +49,7 @@ pip install -r requirements.txt
 
 python -m form_guard.cli --all-demos     # runs the 3 fictional demos -> output/index.html
 python -m form_guard.cli --serve         # web UI on http://127.0.0.1:8000
-pytest -v                                # 43 tests
+pytest -v                                # 72 tests
 ```
 
 Requires Python 3.10+. Without `ANTHROPIC_API_KEY` everything runs on the deterministic **offline demo engine**, so the
@@ -88,9 +90,9 @@ The whole project — code, tests, sample generators and docs — was written wi
 
 | Demo | File | Shows |
 |---|---|---|
-| 共同研究計画変更届出書（様式第3号） — 架空学術大学 | `.docx` | split-run markers, Western date → 和暦, full-width ID → `JR-2026-047`, 257 → 181 chars by deletion only, merged label cells (vMerge) |
+| 共同研究計画変更届出書（様式第3号） — 架空学術大学 | `.docx` | split-run markers, `2026年11月2日（月）` → `令和8年11月2日（月）`, full-width ID → `JR-2026-047`, 257 → 181 chars by deletion only (deleted text listed for the reviewer), merged label cells (vMerge) |
 | 地域中小企業省エネ設備導入補助金 交付申請書（様式第1号） — 架空市 | `.docx` | `483万6千円` → `4,836,000円`, printed cap `上限1,000,000円` forces re-extraction (1,612,000円 → 1,000,000円), **missing 法人番号 left for the human**, empty cell filled by table coordinates |
-| 月次設備安全点検および改善報告書（様式A-4） — 架空施設 | `.xlsx` | drop-down list values, `COUNTIF` formulas and 40 merged ranges preserved, 173 → 115 chars, year of 「12月8日（火）」 inferred and flagged |
+| 月次設備安全点検および改善報告書（様式A-4） — 架空施設 | `.xlsx` | drop-down list values, `COUNTIF` formulas and 40 merged ranges preserved, 179 → 116 chars keeping the interim measure 「交換完了までは…」, year of 「12月8日（火）」 inferred and flagged |
 
 Each demo also ships a scripted **naive regeneration** (`samples/broken_before/`) that reproduces the usual failure
 modes — US-Letter page, borders and merged cells lost, legal clauses paraphrased, invented numbers such as
@@ -104,38 +106,56 @@ E-mail addresses use the reserved `example.jp` domain.
 | ID | Check |
 |---|---|
 | ZIP-01…05 | archive integrity (CRC), same entries/order, identical ZipInfo metadata, every non-target entry byte-identical (raw compressed stream + SHA-256), only slot-bearing parts modified |
-| XML-01…03 | well-formed (DTD/entities rejected), namespace declarations identical, **markup skeleton byte-identical** — every tag and attribute, with text-node contents blanked |
+| XML-01…03 | well-formed (DTD/entities rejected), namespace declarations identical, **markup skeleton byte-identical** — every tag, attribute (incl. `xml:space`) and non-slot text, with only the slot text nodes blanked |
 | LAYOUT-01…04 | tables/rows/cells, gridSpan/vMerge, tblGrid · borders & shading · pPr/rPr · page setup (for .xlsx: merged ranges, cell styles, widths/heights, formulas, data validation, print area) |
 | TEXT-01…03 | all boilerplate text unchanged · each slot holds exactly its approved value · no marker left except fields awaiting human input |
-| GRD-01…02 | every AI value backed by verbatim memo quotes · every number/date in a value appears in the quoted evidence |
-| CON-01…03 | printed character limits · formats (和暦, yen, ID patterns) · options, caps and rounding |
+| GRD-01…02 | every AI value backed by verbatim memo quotes, with names, IDs and selected options matching those quotes · every number/date in a value appears in the quoted evidence (no sub-amounts of 483万6千円, matching weekday) |
+| CON-01…03 | printed character limits · formats (real calendar dates inside their era, matching （曜）, periods in order, yen, ID patterns) · options, caps and rounding |
 | APP-01 | the file opens in an independent OOXML library |
-| VIS-01 | rendered layout outside the designated fields has zero drift (added only if drift is found) |
+| VIS-01 | rendered layout outside the designated fields has zero drift and no Excel value overflows its cell, on every sheet (added only if drift or overflow is found) |
 
-`python -m form_guard.cli --verify ORIGINAL FILLED` audits *any* filled copy — including one filled by hand or by another tool.
+XML-03 keeps the exact start tag (including `xml:space`) and text of every non-slot text node, and TEXT-01 compares
+boilerplate run by run, so moving one character between a bold and a normal run is caught.
+
+`python -m form_guard.cli --verify ORIGINAL FILLED` audits *any* filled copy — including one filled by hand or by another
+tool. It always checks structure and printed constraints; memo grounding is checked when `--memo MEMO` is given or a
+matching `audit_log.json` (same SHA-256) sits next to the filled file. Without either, the report says
+"structural verification only (no memo provided — grounding not verified)". Reviewer-entered values can be declared
+with `--set SLOT=VALUE`.
 
 ## Designating fields in your own forms
 
 * Type `{{項目名}}` or `[記入欄: 項目名]` where a value belongs (markers split across Word runs are handled).
 * For official forms you must not edit, designate **empty table cells by coordinates** in `<form>.slots.json`:
   `{"targets": [{"slot_id": "担当者連絡先", "table": 1, "row": 8, "col": 1}]}`.
+* Excel workbooks may have several sheets; every sheet is scanned, rendered and checked. Worksheets larger than
+  2,000 rows × 200 columns (or 100,000 cells) are refused rather than processed.
 * Rules printed on the form are discovered automatically (`（200字以内）`, `（13桁）`, `例：JR-2026-001`, `上限1,000,000円`,
   `千円未満切捨て`, `A／B／Cのうち`, Excel drop-down lists). `.slots.json` can add aliases and descriptions.
 
 ## Human-in-the-loop by design
 
 The web UI shows every value next to its verbatim source (click a value in the preview to jump to the memo line),
-the self-correction history, and the full structural audit. The **download stays locked on the server** until
-there are no pending fields, verification passed, and a named reviewer has confirmed every checklist item. The
-approval record (reviewer, time, checked items, SHA-256 of the exact file) is written next to the audit log.
+the self-correction history, and the full structural audit. The reviewer can **correct any field**, including
+AI-filled ones; each edit is written surgically, re-verified and clears any earlier approval. When a value had to be
+shortened, the checklist shows the **full text that was deleted**; if shortening would delete a condition
+(ただし, 場合に限り, 禁止, 除く, 不可, 条件 …) the value is not written at all and is offered only as a suggestion.
+The **download stays locked on the server** until there are no pending fields, verification passed, and a named
+reviewer has confirmed every checklist item. The approval is bound to the revision on screen and to the SHA-256 of
+the exact bytes the verifier checked; the download re-checks the file and serves those bytes. The approval record
+(reviewer, time, checked items, revision, SHA-256) is written next to the audit log.
 
 ## Scope and safety
 
-* Form-Guard checks that each value is **supported by the memo** and that **the form itself was not altered**.
-  It does not establish whether the memo is true; that, and the decision to submit, stays with the human reviewer.
+* Form-Guard checks that each value is **traceable to verbatim memo quotes** (numbers, dates, names, IDs and choices must match them) and that **the form itself was not altered**. The wording of free-text values is condensed/checked mechanically, and the human reviewer confirms the final meaning and decides whether to submit.
+* It does not establish whether the memo is true; that, and the decision to submit, stays with the human reviewer.
 * Intended for general administrative, research-administration and municipal paperwork. No medical use.
-* Do not upload real personal data. The server binds to `127.0.0.1`, rejects DTDs and entity declarations,
-  limits upload and decompressed sizes (zip-bomb guard), and serves the UI with a strict Content-Security-Policy.
+* Do not upload real personal data. The server binds to `127.0.0.1`, refuses requests whose `Host` is not local
+  (DNS rebinding) and state-changing requests from another `Origin` (cross-site forms), rejects DTDs and entity
+  declarations, limits upload and decompressed sizes (zip-bomb guard), sanitises every colour taken from a form
+  before it reaches an SVG preview, and serves the UI with a strict Content-Security-Policy.
+* Reports only call the data fictional for an unmodified built-in demo; for your own forms the footer says the
+  report is based on the supplied form and memo.
 
 ## Project layout
 
@@ -176,8 +196,8 @@ License: to be decided by the author before publication.
 1. **スキャン** — `{{項目名}}`・`[記入欄: 項目名]`・座標指定の空欄を見つけ、様式に印刷された記入ルール（字数・和暦・桁数・上限額・選択肢）も読み取ります。
 2. **対応付けと自己修正** — Claude（ライブ）またはオフラインの決定論エンジンが、値と**メモ原文そのままの引用**を返します。独立した検証器が引用・数値・日付・記入ルールを確認し、和暦変換・金額表記の統一・半角化・削除のみの要約で直すか、指摘内容を添えて Claude に再依頼します。
 3. **外科的な書き込み** — XML 内のマーカー文字だけを置き換えます。それ以外の ZIP 内パーツは圧縮済みバイト列のまま複製します。
-4. **構造検査** — ZIP・SHA-256、XML骨格、表構造・罫線・結合セル、定型文、根拠、記入ルール、描画位置のずれを含む 21 項目を決定論的に検査します。
-5. **人による最終確認** — 各値をその根拠と並べて確認します。確認者名の入力と全項目のチェックが済むまで、ダウンロードはサーバー側でロックされます。承認はファイルの SHA-256 に結び付けて記録します。
+4. **構造検査** — ZIP・SHA-256、XML骨格、表構造・罫線・結合セル、定型文、根拠、記入ルールなど21項目を決定論的に検査します（描画位置のずれやセルはみ出しが検出された場合は VIS-01 を追加）。
+5. **人による最終確認** — 各値をその根拠と並べて確認し、AIが記入した欄も含めてどの欄でも修正できます（修正すると再検査され、承認は取り消されます）。字数制限のために削除した文は全文を表示し、条件（ただし・場合に限り・禁止など）が欠ける要約は記入せず候補として人に回します。確認者名の入力と全項目のチェックが済むまで、ダウンロードはサーバー側でロックされます。承認は画面上の版（revision）と、検査したファイルの SHA-256 に結び付けて記録します。
 
 メモに根拠がない項目は**推測で埋めません**（デモ2の法人番号）。人が入力します。
 
@@ -197,15 +217,16 @@ pytest -v
 
 ### デモ（すべて架空・医療以外）
 
-- **共同研究計画変更届出書（様式第3号）**：分割された run 上のマーカー、西暦→和暦、全角ID→半角、200字への削除のみ要約
+- **共同研究計画変更届出書（様式第3号）**：分割された run 上のマーカー、西暦→和暦（曜日つき：令和8年11月2日（月））、全角ID→半角、200字への削除のみ要約
 - **省エネ設備導入補助金 交付申請書（様式第1号）**：483万6千円→4,836,000円、印刷された上限額による再抽出、法人番号は人が入力、座標指定の空欄への記入
-- **月次設備安全点検および改善報告書（様式A-4, .xlsx）**：プルダウン・COUNTIF式・結合セルを保持、120字への要約、年を推定した日付には確認フラグ
+- **月次設備安全点検および改善報告書（様式A-4, .xlsx）**：プルダウン・COUNTIF式・結合セルを保持、120字への要約（暫定措置「交換完了までは…」を残す）、年を推定した日付には確認フラグ
 
 各デモには「生成AIで作り直した場合」を再現した比較用ファイル（`samples/broken_before/`）も付いています。
 すべてのサンプル様式とテストデータは、本ハッカソン期間中にゼロから自作した架空のものです。
 
 ### 位置付けと注意
 
-- 本ツールが確認するのは「各値がメモに裏付けられていること」と「様式そのものが改変されていないこと」です。メモの内容が事実かどうかの確認と、提出の最終判断は人が行います。
+- 本ツールが機械的に確認するのは「各値がメモの原文引用に紐づき、数値・日付・氏名・ID・選択肢が一致すること」と「様式そのものが改変されていないこと」です。自由記述の文意やメモの内容が事実かどうかの確認と、提出の最終判断は人が行います。
+- `python -m form_guard.cli --verify 原本 記入済み` は構造と記入ルールを常に検査し、`--memo` か同じ SHA-256 の `audit_log.json` がある場合だけ根拠も検査します（無い場合は「根拠は未検証」と表示します）。
 - 一般事務・研究事務・自治体手続き向けです。医療用途には使いません。
 - 実在の個人情報はアップロードしないでください。

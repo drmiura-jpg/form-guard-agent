@@ -24,10 +24,17 @@ const FLAG = {
   wareki: "和暦に変換 · to 和暦", halfwidth: "半角に統一 · half-width", yen: "金額表記を統一 · amount format",
   condensed: "抽出要約 · condensed by deletion", re_extracted: "制約違反→再抽出 · re-extracted", order: "様式の順に整列 · reordered",
   name: "敬称・注記を除去 · name cleaned", note: "注記を除去 · note removed", year_inferred: "年は推定 · year inferred",
-  weekday_ok: "曜日一致 · weekday checked", human: "人が入力 · reviewer entry", re_anchored: "引用を再特定 · re-anchored",
+  weekday_ok: "曜日一致 · weekday checked", human: "人が入力 · reviewer entry",
+  re_anchored: "引用を付け替え · quote re-anchored — check the wording",
   low_conf: "低信頼度 · low confidence", needs_input: "要入力 · needs input", has_suggestion: "候補あり · has suggestion",
+  unsafe_condensation: "要約で条件が欠ける · condition would be lost", weekday: "曜日を付記 · weekday added",
+  recovered_unverified: "根拠未検証 · not verified",
 };
-const ATTENTION = new Set(["year_inferred", "low_conf", "needs_input", "re_extracted"]);
+const ATTENTION = new Set(["year_inferred", "low_conf", "needs_input", "re_extracted", "condensed", "unsafe_condensation", "re_anchored"]);
+
+// Python counts characters as Unicode code points; JS .length counts UTF-16 units (𠮷 or 🧪 = 2).
+// Every offset / length that comes from the server is therefore applied to Array.from(text).
+const cpLength = (s) => Array.from(s || "").length;
 const GROUPS = [
   ["zip", "ZIP package", "パッケージ"], ["xml", "XML", "XML構造"], ["layout", "Layout", "罫線・結合・書式"],
   ["text", "Text", "定型文"], ["grounding", "Grounding", "根拠"], ["constraints", "Constraints", "記入ルール"],
@@ -231,13 +238,16 @@ function renderKpis() {
   const filled = r.mappings.filter((m) => m.status === "filled" || m.status === "human_entered").length;
   const pending = rep.pending_slots.length;
   const total = rep.passed_count + rep.failed_count;
+  const untouchedAll = rep.entry_hashes.filter((e) => e.role === "untouched").length;
   const untouched = rep.entry_hashes.filter((e) => e.role === "untouched" && e.identical && e.raw_identical).length;
   const vis = r.visual || {};
   $("#kpis").replaceChildren(
     tile("Fields filled", `${filled}/${r.mappings.length}`, "記入済み（根拠付き）"),
     tile("Awaiting human input", String(pending), pending ? "not in the memo — never guessed" : "none", pending ? "⚠" : "✓", pending ? "icon-warn" : "icon-good"),
     tile("Checks passed", `${rep.passed_count}/${total}`, "structural + grounding", rep.failed_count ? "✗" : "✓", rep.failed_count ? "icon-bad" : "icon-good"),
-    tile("Parts byte-identical", String(untouched), "ZIP entries copied verbatim"),
+    tile("Parts byte-identical", untouched === untouchedAll ? String(untouched) : `${untouched}/${untouchedAll}`,
+      untouched === untouchedAll ? "ZIP entries copied verbatim" : `${untouchedAll - untouched} non-target part(s) changed`,
+      untouched === untouchedAll ? null : "✗", "icon-bad"),
     tile("Layout drift outside fields", `${vis.max_shift_px ?? 0} px`, `${vis.boxes_compared ?? 0} boxes compared`, vis.identical_outside_slots ? "✓" : "✗", vis.identical_outside_slots ? "icon-good" : "icon-bad"),
     tile("Ungrounded claims", String(rep.ungrounded_claims_count), "根拠のない記入", rep.ungrounded_claims_count ? "✗" : "✓", rep.ungrounded_claims_count ? "icon-bad" : "icon-good"),
   );
@@ -335,6 +345,7 @@ function highlightSvg(id) {
 function statusChip(m) {
   if (m.status === "filled") return h("span", { class: "st st-filled" }, "✓ filled");
   if (m.status === "human_entered") return h("span", { class: "st st-human" }, "✎ reviewer");
+  if (m.status === "recovered") return h("span", { class: "st st-pending" }, "? not verified");
   return h("span", { class: "st st-pending" }, "⚠ needs input");
 }
 
@@ -350,7 +361,7 @@ function renderFields() {
   $("#fieldRows").replaceChildren(...r.slots.map((s) => {
     const m = maps[s.slot_id];
     const val = m.filled_value || (m.suggested_value ? `suggestion: ${m.suggested_value}` : "（未記入 — awaiting input）");
-    const n = (m.filled_value || "").length;
+    const n = cpLength(m.filled_value);
     const over = s.max_chars && n > s.max_chars;
     return h("tr", { dataset: { slot: s.slot_id }, onclick: () => selectSlot(s.slot_id, true) },
       h("td", {}, h("div", { class: "f-label" }, s.label), h("div", { class: "f-ctx" }, s.context_label || "")),
@@ -364,10 +375,11 @@ function renderFields() {
 }
 
 function renderMemo() {
-  const memo = S.run.memo.text;
+  // start_char / end_char are code-point offsets (Python str); slice code points, not UTF-16 units
+  const chars = Array.from(S.run.memo.text);
   const spans = [];
   S.run.mappings.forEach((m) => (m.source_spans || []).forEach((sp) => spans.push([sp.start_char, sp.end_char, m.slot_id])));
-  const cuts = new Set([0, memo.length]);
+  const cuts = new Set([0, chars.length]);
   spans.forEach(([a, b]) => { cuts.add(a); cuts.add(b); });
   const bounds = [...cuts].sort((x, y) => x - y);
   const out = [];
@@ -377,7 +389,7 @@ function renderMemo() {
     const a = bounds[i];
     const b = bounds[i + 1];
     const ids = [...new Set(spans.filter(([s, e]) => s <= a && b <= e).map((x) => x[2]))];
-    memo.slice(a, b).split("\n").forEach((piece, k) => {
+    chars.slice(a, b).join("").split("\n").forEach((piece, k) => {
       if (k > 0) { line += 1; out.push("\n", h("span", { class: "ln" }, `L${String(line).padStart(3, "0")}`)); }
       if (!piece) return;
       out.push(ids.length ? h("mark", { dataset: { slots: ids.join("|") }, title: ids.join(", "), onclick: () => selectSlot(ids[0], true) }, piece) : piece);
@@ -426,8 +438,33 @@ function renderDetail(id) {
     quotes.length ? h("div", { style: "margin-top:8px" }, h("b", {}, "Verbatim source · 根拠（原文そのまま）"), ...quotes) : null,
     m.reasoning ? h("div", { class: "f-ctx" }, `Engine note: ${m.reasoning}`) : null,
     attempts.length ? h("div", { style: "margin-top:8px" }, h("b", {}, "Self-correction history · 自己修正の履歴"), h("ol", { class: "timeline" }, attempts)) : null,
-    m.status === "needs_human_input" ? h("button", { class: "btn btn-ghost", style: "margin-top:8px", onclick: () => showTab("hitl") }, "Enter this value in Human approval →") : null,
+    editControl(s, m),
   );
+}
+
+// Inline editor for ANY field — AI-filled, reviewer-entered or pending. Saving re-writes the file
+// surgically, re-runs every check and clears any earlier approval (the server enforces this).
+function editControl(s, m) {
+  const current = m.filled_value || m.suggested_value || "";
+  const inp = h("input", { type: "text", value: current, "aria-label": `Edit ${s.label}` });
+  const count = h("span", { class: "f-ctx" });
+  const update = () => {
+    const n = cpLength(inp.value.trim());
+    count.textContent = s.max_chars ? `${n}/${s.max_chars}` : `${n} chars`;
+    count.classList.toggle("over", Boolean(s.max_chars && n > s.max_chars));
+  };
+  inp.addEventListener("input", update);
+  update();
+  const save = () => {
+    const v = inp.value.trim();
+    if (!v) { toast("Type a value first."); return; }
+    if (v === m.filled_value) { toast("Unchanged."); return; }
+    submitValues({ [s.slot_id]: v }, `Saved «${s.label}» — re-verified. Approval (if any) was cleared.`);
+  };
+  inp.addEventListener("keydown", (e) => { if (e.key === "Enter") save(); });
+  return h("div", { class: "edit-row" },
+    h("label", { class: "f-ctx" }, m.status === "needs_human_input" ? "Enter value · 値を入力" : "Correct this value · 値を修正"),
+    inp, count, h("button", { class: "btn btn-ghost", type: "button", onclick: save }, "Save edit / 値を修正"));
 }
 
 /* ---------------------------------------------------------------- audit */
@@ -488,13 +525,15 @@ function renderHitl() {
     cb.checked = S.checked.has(it.item_id);
     cb.addEventListener("change", () => { if (cb.checked) S.checked.add(it.item_id); else S.checked.delete(it.item_id); updateApprove(); });
     const flags = (it.flags || []).map((f) => h("span", { class: "chip", style: ATTENTION.has(f) ? "border-color:var(--warn);color:var(--warn-ink)" : "" }, FLAG[f] || f));
+    const slot = it.slot_id ? r.slots.find((x) => x.slot_id === it.slot_id) : null;
     return h("li", { class: `${it.kind === "global" ? "global" : ""}${blocked ? " blocked" : ""}` }, cb,
       h("div", {},
         it.slot_id ? h("div", {}, h("b", {}, it.label), " ＝ ", h("span", { class: "f-value" }, it.value || "（未記入）")) : null,
         h("div", { class: "q" }, it.prompt),
         it.source_quote ? h("div", { class: "quote" }, `「${it.source_quote}」`) : null,
         flags.length ? h("div", { class: "chips" }, flags) : null,
-        m && it.slot_id ? h("a", { href: "#", onclick: (e) => { e.preventDefault(); selectSlot(it.slot_id, true); showTab("fields"); } }, "show source →") : null));
+        m && it.slot_id ? h("a", { href: "#", onclick: (e) => { e.preventDefault(); selectSlot(it.slot_id, true); showTab("fields"); } }, "show source →") : null,
+        slot && m && it.kind === "field" ? h("details", { class: "edit-inline" }, h("summary", {}, "✎ 値を修正 / Edit value"), editControl(slot, m)) : null));
   }));
   renderApproval();
   updateApprove();
@@ -504,6 +543,10 @@ async function applyOverrides(inputs) {
   const values = {};
   Object.entries(inputs).forEach(([k, el]) => { if (el.value.trim()) values[k] = el.value.trim(); });
   if (!Object.keys(values).length) { toast("Type a value first."); return; }
+  await submitValues(values);
+}
+
+async function submitValues(values, okMessage) {
   busy(true, "Writing your values surgically and re-verifying…");
   try {
     const run = await api(`/api/runs/${S.run.run_id}/overrides`, {
@@ -511,8 +554,7 @@ async function applyOverrides(inputs) {
     });
     setRun(run, false);
     const still = run.report.pending_slots;
-    toast(still.length ? `Still awaiting: ${still.join(", ")}` : "All fields filled — re-verified. Review the checklist.");
-    showTab("hitl");
+    toast(still.length ? `Still awaiting: ${still.join(", ")}` : (okMessage || "All fields filled — re-verified. Review the checklist."));
   } catch (e) { toast(`Re-verify failed: ${e.message}`); } finally { busy(false); }
 }
 
@@ -545,7 +587,9 @@ async function onApprove() {
   try {
     const res = await api(`/api/runs/${S.run.run_id}/approve`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ reviewer: $("#reviewerInput").value.trim(), checked: [...S.checked] }),
+      // bind the approval to exactly what is on screen: the server refuses a stale revision or file hash
+      body: JSON.stringify({ reviewer: $("#reviewerInput").value.trim(), checked: [...S.checked],
+        filled_sha256: S.run.filled.sha256, revision: S.run.revision }),
     });
     S.run.approval = res;
     renderHitl();
@@ -553,6 +597,9 @@ async function onApprove() {
   } catch (e) {
     const missing = e.body && e.body.detail && e.body.detail.missing;
     toast(missing ? `Unchecked items: ${missing.length}` : `Approval refused: ${e.message}`);
+    if (e.status === 409 && S.run) {  // stale view: reload the run so the reviewer sees the current state
+      try { setRun(await api(`/api/runs/${S.run.run_id}`), false); } catch (_) { /* keep the old view */ }
+    }
   }
 }
 

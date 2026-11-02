@@ -3,20 +3,25 @@
 The checker is deliberately independent of whichever engine proposed the value
 (Claude or the offline demo engine): it re-locates each quote in the memo itself,
 recomputes line numbers, and checks that every number / date the value asserts
-actually appears in the quoted evidence.
+actually appears in the quoted evidence. Names and IDs must appear in the quotes
+(after width / whitespace / honorific normalisation), and a selected option must be
+the one the quote affirmatively states.
 """
 
 from __future__ import annotations
 
 import bisect
+import re
 import unicodedata
 from dataclasses import dataclass, field
 from typing import Optional, Union
 
 from .models import FormSlot, SourceSpan, ValidationIssue
-from .textnorm import find_dates, quantities, value_quantities
+from .textnorm import clean_person_name, find_dates, normalize_for_match, quantities, to_halfwidth_id, value_quantities
 
 LEXICAL_WARN_THRESHOLD = 0.5
+# GRD-02 covers numbers and dates; every other error-severity grounding issue fails GRD-01.
+NUMBER_DATE_CODES = ("number_unsupported", "date_unsupported", "weekday_mismatch")
 
 
 def line_starts(memo: str) -> list[int]:
@@ -117,6 +122,56 @@ def lexical_support(value: str, quotes: list[str]) -> float:
     return len(vb & qb) / len(vb)
 
 
+def name_supported(value: str, evidence: str) -> bool:
+    """The name (honorifics / bracketed notes removed, width and spacing normalised) appears in the quotes."""
+    v = normalize_for_match(clean_person_name(value))
+    return bool(v) and v in normalize_for_match(evidence)
+
+
+def id_supported(value: str, evidence: str, digits_only: bool = False) -> bool:
+    """The ID appears in the quotes as a whole token (ＪＲ－２０２６－０４７ supports JR-2026-047)."""
+    v, ev = to_halfwidth_id(value), to_halfwidth_id(evidence)
+    if digits_only:
+        v = re.sub(r"\D", "", v)
+        return bool(v) and v in {re.sub(r"\D", "", t) for t in re.findall(r"[0-9](?:[0-9]|-(?=[0-9]))*", ev)}
+    if not v:
+        return False
+    for m in re.finditer(re.escape(v), ev):
+        before = ev[m.start() - 1] if m.start() else ""
+        after = ev[m.end()] if m.end() < len(ev) else ""
+        if not (before.isascii() and before.isalnum()) and not (after.isascii() and after.isalnum()):
+            return True
+    return False
+
+
+_NEGATED_AFTER = re.compile(r"\s*(?:以外|(?:で|では|じゃ)?(?:は)?(?:なく|ない|無く|無い|ありません|ございません))")
+_JUDGEMENT_BEFORE = re.compile(r"(?:判定|結果|評価|区分|選択|該当)\s*(?:は|を|が|[:：])?\s*$")
+
+
+def affirmed_options(allowed: list[str], evidence: str) -> tuple[set[str], set[str]]:
+    """Options the quote states affirmatively, and every option it mentions without negation.
+
+    Longest options match first (so 「不可」 is not read as 「可」). An option followed by
+    「ではなく」「以外」… is negated. If any option is introduced by 判定／結果／評価, only those
+    count as affirmed (「良好だが判定は要是正」 affirms 要是正, not 良).
+    """
+    ev = unicodedata.normalize("NFKC", evidence)
+    mentions: list[tuple[int, int, str, bool, bool]] = []
+    for opt in sorted(allowed, key=len, reverse=True):
+        o = unicodedata.normalize("NFKC", opt)
+        if not o:
+            continue
+        for m in re.finditer(re.escape(o), ev):
+            if any(s < m.end() and m.start() < e for s, e, *_ in mentions):
+                continue
+            negated = bool(_NEGATED_AFTER.match(ev, m.end()))
+            cued = bool(_JUDGEMENT_BEFORE.search(ev[max(0, m.start() - 8) : m.start()]))
+            mentions.append((m.start(), m.end(), opt, negated, cued))
+    positive = [x for x in mentions if not x[3]]
+    cued = [x for x in positive if x[4]]
+    return {x[2] for x in (cued or positive)}, {x[2] for x in positive}
+
+
 @dataclass
 class GroundingResult:
     spans: list[SourceSpan] = field(default_factory=list)
@@ -174,7 +229,14 @@ def ground_value(value: str, quotes: list[str], memo: str, slot: Optional[FormSl
     ev_dates = find_dates(evidence)
     for d in find_dates(value):
         md = [e for e in ev_dates if (e.month, e.day) == (d.month, d.day)]
-        if md and (d.year is None or any(e.year == d.year for e in md)):
+        same = [e for e in md if d.year is None or e.year == d.year]
+        if same:
+            if d.weekday and not any(e.weekday in (None, d.weekday) for e in same):
+                res.issues.append(ValidationIssue(
+                    code="weekday_mismatch",
+                    message=f"{d.month}月{d.day}日 is （{d.weekday}） in the value but （{same[0].weekday}） in the memo "
+                            f"/ 曜日が引用と一致しません",
+                ))
             continue
         if md and all(e.year is None for e in md):
             res.issues.append(ValidationIssue(
@@ -186,7 +248,37 @@ def ground_value(value: str, quotes: list[str], memo: str, slot: Optional[FormSl
                 code="date_unsupported", message=f"date {d.month}月{d.day}日 not supported by the quoted evidence / 引用に無い日付",
             ))
     fmt = slot.required_format if slot else None
-    if fmt in ("text", "person_name"):
+    if fmt == "person_name" and not name_supported(value, evidence):
+        res.issues.append(ValidationIssue(
+            code="value_unsupported",
+            message=f"name «{value}» does not appear in the quoted evidence / 氏名が引用と一致しません",
+        ))
+    elif fmt in ("pattern", "digits") and not id_supported(value, evidence, digits_only=fmt == "digits"):
+        res.issues.append(ValidationIssue(
+            code="value_unsupported",
+            message=f"«{value}» does not appear in the quoted evidence (width / dashes / spaces normalised) "
+                    f"/ 番号が引用と一致しません",
+        ))
+    elif fmt == "choice" and slot is not None:
+        from .constraints import split_choice
+
+        selected = split_choice(value, slot)
+        affirmed, mentioned = affirmed_options(slot.constraints.get("allowed_values") or [], evidence)
+        missing = [s for s in selected if s not in affirmed]
+        if missing:
+            stated = "／".join(sorted(affirmed)) or "none of the options"
+            res.issues.append(ValidationIssue(
+                code="choice_unsupported",
+                message=f"«{'、'.join(missing)}» is not what the quote states (it states {stated}) "
+                        f"/ 選択肢が引用の記載と一致しません",
+            ))
+        elif not slot.constraints.get("multi_select") and len(mentioned) > 1:
+            res.issues.append(ValidationIssue(
+                code="choice_ambiguous", severity="warning",
+                message=f"the quote also mentions {'／'.join(sorted(mentioned - set(selected)))} — confirm the option "
+                        f"/ 引用に他の選択肢も含まれます",
+            ))
+    if fmt == "text":
         ratio = lexical_support(value, located)
         if ratio < LEXICAL_WARN_THRESHOLD:
             res.issues.append(ValidationIssue(
