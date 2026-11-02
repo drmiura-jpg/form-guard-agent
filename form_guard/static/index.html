@@ -83,6 +83,14 @@
   </aside>
 
   <main class="workspace">
+    <details id="whyBanner" class="why-banner" open>
+      <summary><span data-bi="なぜ Form-Guard か？（解決する現場課題）|Why Form-Guard? (the problem it solves)"></span></summary>
+      <ol class="why-points">
+        <li><b>①</b><span data-l="ja">行政・大学・施設の指定様式は、罫線1本・結合セル1個の崩れで差し戻される。</span><span data-l="en">Official forms of municipalities, universities and facilities are sent back for a single broken border or split merged cell.</span></li>
+        <li><b>②</b><span data-l="ja">従来の AI 生成は文書を作り直すため、罫線・結合セル・定型文・用紙サイズごと様式が壊れる。</span><span data-l="en">Conventional AI generation re-creates the document, so borders, merged cells, legal text and the page size break with it.</span></li>
+        <li><b>③</b><span data-l="ja">Form-Guard は XML のテキストノードだけを外科手術的に差し替え、21項目の決定論的検査＋視覚 Diff＋原文ハイライト＋人間承認ゲートで「様式不変」（指定欄以外は1バイトも変わらないこと）を数学的に証明する。記入内容の事実確認と提出判断は人が行います。</span><span data-l="en">Form-Guard surgically replaces only XML text nodes and proves "form invariance" — not one byte outside the designated fields changes — with 21 deterministic checks, a visual diff, source highlighting and a human approval gate. Checking the facts and deciding to submit stay with a person.</span></li>
+      </ol>
+    </details>
     <nav id="tourBar" class="tour" aria-label="Judge quick walkthrough">
       <div class="tour-row">
         <span class="tour-h" data-bi="🎬 審査員向け 90秒ガイドツアー|🎬 Judge Quick Walkthrough"></span>
@@ -141,10 +149,11 @@
             <div id="discSub" class="muted"></div>
           </div>
         </div>
-        <div class="run-links"><span class="pill pill-neutral" data-bi="4段階 空欄発見インスペクター|4-Stage Blank-Cell Discovery Inspector"></span></div>
+        <div class="run-links"><span class="pill pill-neutral" data-bi="4段階・白紙空欄の自動検出結果（申請者記入欄 vs 事務局専用欄の自動仕分け）|4-stage blank-cell discovery — applicant fields vs office-only cells, sorted automatically"></span></div>
       </div>
       <ol id="discStages" class="stages"></ol>
       <div id="discKpis" class="kpis kpis-4"></div>
+      <div id="discPreview" class="card disc-preview" hidden></div>
       <div class="fields-grid">
         <div class="card table-card">
           <table class="cands">
@@ -168,7 +177,7 @@
           </div>
           <div class="card confirm-card">
             <div id="discCount" class="msg"></div>
-            <button id="fillConfirmed" class="btn btn-primary btn-wide" type="button"><span data-bi="確定した空欄だけに外科的記入＆21項目検査を実行|Fill confirmed cells &amp; run 21 checks"></span></button>
+            <button id="fillConfirmed" class="btn btn-primary btn-wide" type="button"><span data-bi="✅ 検出した空欄を承認して外科的差込を実行|✅ Approve the detected cells &amp; run the surgical fill"></span></button>
             <p class="hint" data-t="記入前に、白紙様式の SHA-256 が発見時と同じか、0件でないか、事務局欄を含まないかをサーバーが再確認します。|Before anything is written, the server re-checks the blank form's SHA-256 and refuses 0 cells or any office-only cell.">Before anything is written, the server re-checks the blank form's SHA-256 and refuses 0 cells or any office-only cell.</p>
           </div>
         </div>

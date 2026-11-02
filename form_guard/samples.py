@@ -69,8 +69,8 @@ DEMOS = [
 UNMARKED_FORMS = [
     {
         "id": "form4",
-        "title": "研究設備共用利用申請書（マーカーなし白紙様式）",
-        "title_en": "Shared Research Equipment Use Application (unmarked blank form)",
+        "title": "施設・備品一時使用許可申請書（マーカーなし白紙様式）",
+        "title_en": "Temporary Facility & Equipment Use Permit Application (unmarked blank form)",
         "org": "架空学術機関（fictional research institute）",
         "file_type": "docx",
         "form": "form4_unmarked_blank.docx",
@@ -80,14 +80,14 @@ UNMARKED_FORMS = [
     },
     {
         "id": "form5",
-        "title": "地域防災備蓄品貸出申請書（マーカーなし白紙様式 .xlsx）",
-        "title_en": "Disaster Stockpile Loan Application (unmarked blank workbook)",
+        "title": "防災備蓄品 貸出・返却管理票（マーカーなし白紙様式）",
+        "title_en": "Disaster Stockpile Loan & Return Record (unmarked blank workbook)",
         "org": "架空市（fictional city）",
         "file_type": "xlsx",
         "form": "form5_unmarked_blank.xlsx",
         "memo": "memo5_stockpile_loan.txt",
-        "highlights": ["5 applicant cells in merged ranges", "SUM formula cell rejected", "事務局使用欄（決裁印・受付番号） locked",
-                       "cell style ids kept"],
+        "highlights": ["5 applicant cells in merged ranges", "SUM formula cell rejected",
+                       "事務局使用欄（決裁印・受付番号・返却確認） locked", "cell style ids kept"],
     },
 ]
 
@@ -200,7 +200,7 @@ MEMO3 = """11/2（月）定例点検メモ（記録者：点検責任者 模擬 
 次回点検は12月8日（火）に実施予定。
 """
 
-MEMO4 = """件名：研究設備共用利用申請の準備メモ（架空学術機関 研究基盤共用センター宛て）
+MEMO4 = """件名：施設・備品一時使用許可申請の準備メモ（架空学術機関 施設管理課宛て）
 作成：2026年11月2日（月）　作成者：模擬 花子（研究支援課）
 
 ■ 申請内容
@@ -218,7 +218,7 @@ MEMO4 = """件名：研究設備共用利用申請の準備メモ（架空学術
 ・受付番号・受付日・審査欄は事務局が記入するので、申請者側では空欄のままにする。
 """
 
-MEMO5 = """架空市 防災課への備蓄品貸出申請メモ（架空町内会 防災部）
+MEMO5 = """架空市 防災課への防災備蓄品 貸出・返却管理票 記入メモ（架空町内会 防災部）
 記録日：2026年11月2日（月）
 
 【申請内容】
@@ -230,7 +230,7 @@ MEMO5 = """架空市 防災課への備蓄品貸出申請メモ（架空町内�
 使用目的：2026年11月29日（日）の地域防災訓練で使用する。
 
 【メモ】
-・決裁印と受付番号の欄は事務局が記入するため、空欄のままにしておく。
+・決裁印・受付番号・返却確認の欄は事務局が記入するため、空欄のままにしておく。
 """
 
 MEMOS = {"memo1_research_change.txt": MEMO1, "memo2_subsidy_application.txt": MEMO2,
@@ -850,12 +850,12 @@ def _finalise_xlsx(blob: bytes) -> bytes:
 
 def build_form4() -> bytes:
     """Unmarked .docx: empty value cells next to printed labels, a duplicated 「氏名」 label, an office-only area."""
-    doc = _new_document("研究設備共用利用申請書（マーカーなし白紙様式）")
-    _header_footer(doc, "架空学術機関 研究基盤共用センター")
+    doc = _new_document("施設・備品一時使用許可申請書（マーカーなし白紙様式）")
+    _header_footer(doc, "架空学術機関 施設管理課")
     _para(doc, "様式第2号（第6条関係）", size=9, first=True)
-    _para(doc, "研究設備共用利用申請書", align="center", size=16, bold=True, gothic=True, before=4, after=6)
+    _para(doc, "施設・備品一時使用許可申請書", align="center", size=16, bold=True, gothic=True, before=4, after=6)
     _para(doc, "架空学術機関長　殿", after=4)
-    _para(doc, "　架空学術機関研究設備共用規程第6条の規定により、下記のとおり研究設備の共用利用を申請します。",
+    _para(doc, "　架空学術機関施設・備品使用規程第6条の規定により、下記のとおり施設・備品の一時使用の許可を申請します。",
           align="both", after=2)
     _para(doc, "記", align="center", after=2)
 
@@ -866,10 +866,10 @@ def build_form4() -> bytes:
         _label(t.cell(r, 0).merge(t.cell(r, 1)), label)
         _vcenter(t.cell(r, 2).merge(t.cell(r, 4)))
         _row_height(t.rows[r], 9)
-    _banner(t, 4, "2．利用内容")
-    _label(t.cell(5, 0).merge(t.cell(5, 1)), "利用設備")
+    _banner(t, 4, "2．使用内容")
+    _label(t.cell(5, 0).merge(t.cell(5, 1)), "使用施設・備品")
     c = t.cell(5, 2).merge(t.cell(5, 4))
-    _para(c, "共用走査型電子顕微鏡（架空機種 FG-100）", first=True, size=9.5)
+    _para(c, "共用実験室B・走査型電子顕微鏡（架空機種 FG-100）", first=True, size=9.5)
     _vcenter(c)
     _row_height(t.rows[5], 9)
     _label(t.cell(6, 0).merge(t.cell(6, 1)), "利用目的", "（100字以内）")
@@ -918,7 +918,7 @@ def build_form5() -> bytes:
 
     wb = Workbook()
     ws = wb.active
-    ws.title = "貸出申請書"
+    ws.title = "貸出・返却管理票"
     for col, w in {"A": 6, "B": 12, "C": 12, "D": 12, "E": 10, "F": 12, "G": 12, "H": 12}.items():
         ws.column_dimensions[col].width = w
     base = Font(name="游ゴシック", size=10.5)
@@ -953,9 +953,9 @@ def build_form5() -> bytes:
                 c.border = Border(left=outline if j == 0 else thin, right=outline if j == n_c - 1 else thin,
                                   top=outline if i == 0 else thin, bottom=outline if i == n_r - 1 else thin)
 
-    put("A1:H1", "地域防災備蓄品貸出申請書", Font(name="游ゴシック", size=16, bold=True), h="center")
+    put("A1:H1", "防災備蓄品 貸出・返却管理票", Font(name="游ゴシック", size=16, bold=True), h="center")
     put("A2:H2", "様式B-2（架空市防災備蓄品貸出要領第4条関係）", small, h="right")
-    put("A3:H3", "架空市長　様　架空市防災備蓄品貸出要領第4条の規定により、下記のとおり申請します。", small, h="left")
+    put("A3:H3", "架空市長　様　架空市防災備蓄品貸出要領第4条の規定により、下記のとおり備蓄品の貸出を申請します。", small, h="left")
     ws.row_dimensions[1].height = 30
     put("A4:H4", "1　申請者記入欄", bold, h="left", fill=head_fill)
     for r, label, rng in ((5, "申請日", "C5:H5"), (6, "申請団体名", "C6:H6"), (7, "代表者氏名", "C7:H7")):
@@ -985,7 +985,7 @@ def build_form5() -> bytes:
     put("F16:H16", "（自動計算）", small, h="left")
     grid("A12:H16")
     put("A17:H17", "3　事務局記入欄（申請者は記入しないこと）", bold, h="left", fill=head_fill)
-    put("A18:B19", "※事務局使用欄（決裁印・受付番号）", bold, h="center", wrap=True, fill=label_fill)
+    put("A18:B19", "※事務局使用欄（決裁印・受付番号・返却確認）", bold, h="center", wrap=True, fill=label_fill)
     put("C18:H19", None)
     for r in (18, 19):
         ws.row_dimensions[r].height = 24
@@ -1007,7 +1007,7 @@ def build_form5() -> bytes:
     ws.print_area = "A1:H26"
     ws.oddFooter.center.text = "架空サンプル様式（Fictional sample form）"
     wb.properties.creator = "Form-Guard Agent sample generator"
-    wb.properties.title = "地域防災備蓄品貸出申請書（マーカーなし白紙様式 .xlsx）"
+    wb.properties.title = "防災備蓄品 貸出・返却管理票（マーカーなし白紙様式 .xlsx）"
     wb.properties.created = SAMPLE_TIMESTAMP
     wb.properties.modified = SAMPLE_TIMESTAMP
     buf = io.BytesIO()

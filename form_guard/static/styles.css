@@ -350,3 +350,24 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-sp
   .stages, .kpis-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } .pitch { grid-template-columns: 1fr; }
 }
 @media (forced-colors: active) { .st, .status, .lg, .mb, .role, .tour-step.on { border: 1px solid CanvasText; } }
+
+/* 「なぜ Form-Guard か？」 banner, デモN labels, 空欄自動検出 badge, discovery auto-preview, Offline Rule chip */
+.why-banner { background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: var(--radius);
+  padding: 8px 14px; margin-bottom: 14px; box-shadow: var(--shadow); }
+.why-banner summary { cursor: pointer; font-weight: 750; font-size: 14px; }
+.why-points { list-style: none; margin: 8px 0 2px; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.why-points li { display: grid; grid-template-columns: 22px 1fr; gap: 4px; font-size: 13px; color: var(--ink-2); line-height: 1.5; }
+.why-points b { color: var(--accent); font-size: 15px; }
+.demo-no { flex: none; font: 750 11px/1 var(--sans); padding: 4px 7px; border-radius: 5px; background: var(--accent); color: var(--accent-ink); }
+.badge-auto { flex: none; margin-left: auto; font: 700 10.5px/1 var(--sans); padding: 4px 7px; border-radius: 999px;
+  color: var(--warn-ink); background: var(--warn-soft); border: 1px solid var(--warn); white-space: nowrap; }
+.disc-preview { border-color: var(--accent); }
+.preview-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(260px, 1fr); gap: 14px; align-items: start; }
+.preview-svg { max-height: 520px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+.preview-side { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.preview-facts { margin: 0; padding-left: 0; list-style: none; font-size: 12.5px; }
+.preview-facts li { padding: 2px 0; }
+.preview-fields { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; width: 100%; }
+.preview-fields .pf { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 3px 0; border-bottom: 1px dashed var(--line); }
+.mb-offline { color: var(--ink-2); background: var(--surface-2); }
+@media (max-width: 1180px) { .why-points, .preview-grid { grid-template-columns: 1fr; } }

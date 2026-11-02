@@ -223,7 +223,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     renderEngineBadge();
   } catch (e) { toast(L(`ヘルスチェックに失敗: ${e.message}`, `Health check failed: ${e.message}`)); }
   try {
-    [S.demos, S.unmarked] = await Promise.all([api("/api/demos"), api("/api/unmarked-demos")]);
+    const all = await api("/api/demos");  // デモ1–5: marked forms and unmarked blank forms (blank-cell discovery)
+    S.demos = all.filter((d) => !d.unmarked);
+    S.unmarked = all.filter((d) => d.unmarked);
     renderDemos();
   } catch (e) { toast(L(`デモを読み込めません: ${e.message}`, `Could not load demos: ${e.message}`)); }
   await handleDeepLink();
@@ -242,8 +244,9 @@ async function handleDeepLink() {
     await runDemo(params.get("demo"));
     if (params.get("slot")) selectSlot(params.get("slot"), true);
     if (params.get("tab")) showTab(params.get("tab"));
-  } else if (params.get("unmarked") && S.unmarked.some((d) => d.id === params.get("unmarked"))) {
-    await discoverDemo(params.get("unmarked"));
+  } else if ((params.get("unmarked") || params.get("demo")) &&
+             S.unmarked.some((d) => d.id === (params.get("unmarked") || params.get("demo")))) {
+    await discoverDemo(params.get("unmarked") || params.get("demo"));
   } else if (params.get("view") === "claude") {
     await openSuite();
   }
@@ -255,6 +258,7 @@ function showView(name) {
   S.view = name;
   const ids = { empty: "emptyState", discovery: "discoveryView", suite: "suiteView", run: "runView" };
   Object.entries(ids).forEach(([k, id]) => { $(`#${id}`).hidden = k !== name; });
+  if (name === "run" && $("#whyBanner")) $("#whyBanner").open = false;  // keep the review desk compact
   renderEngineBadge();
 }
 
@@ -379,7 +383,10 @@ function renderTourBar() {
 
 function demoButton(d, onclick, unmarked) {
   return h("button", { class: `demo${unmarked ? " demo-unmarked" : ""}${S.activeDemo === d.id ? " active" : ""}`, type: "button", onclick },
-    h("div", { class: "demo-top" }, h("span", { class: "ftype" }, `.${d.file_type}`), h("span", { class: "demo-title" }, d.title)),
+    h("div", { class: "demo-top" }, d.label ? h("span", { class: "demo-no" }, d.label) : null,
+      h("span", { class: "ftype" }, `.${d.file_type}`), h("span", { class: "demo-title" }, d.title),
+      unmarked ? h("span", { class: "badge-auto", title: L("マーカーの無い白紙様式。空欄を自動検出し、人が確定した欄だけに記入します",
+        "No markers: blank cells are discovered, and only the cells you confirm are filled") }, "空欄自動検出") : null),
     h("div", { class: "demo-org" }, `${d.org} · ${d.title_en}`),
     unmarked ? h("div", { class: "demo-cta" }, "🔍 ", B("空欄を自動発見 → 人が確定 → 記入", "discover → you confirm → fill")) : null,
     h("div", { class: "chips" }, (d.highlights || []).map((x) => h("span", { class: "chip" }, x))));
@@ -423,7 +430,14 @@ async function onUpload(ev) {
   renderDemos();
   busy(true, L("アップロードして実行中…", "Uploading and running the pipeline…"));
   try {
-    setRun(await api("/api/runs/upload", { method: "POST", body: fd }), true);
+    const run = await api("/api/runs/upload", { method: "POST", body: fd });
+    if (!run.slots.length) {  // an unmarked blank form: discover its empty cells instead of showing a failed run
+      busy(false);
+      toast(L("マーカーの無い白紙様式です — 空欄を自動検出します。", "No markers in this form — discovering its blank cells."));
+      await onDiscoverUpload();
+      return;
+    }
+    setRun(run, true);
   } catch (e) { toast(L(`アップロードに失敗: ${e.message}`, `Upload failed: ${e.message}`)); } finally { busy(false); }
 }
 
@@ -439,9 +453,12 @@ async function discoverDemo(id) {
   renderDemos();
   busy(true, DISCOVERY_STEPS());
   try {
-    setDiscovery(await api("/api/discover/demo", {
+    // one click: stages 1–3 and an auto-preview fill of the recommended applicant cells (never approvable);
+    // stage 4 stays with the reviewer, who confirms the cells to get a run that can be signed off
+    const res = await api("/api/run-demo", {
       method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ demo_id: id, mode: mode(), model_tier: tier() }),
-    }));
+    });
+    setDiscovery(res.discovery, res.run);
   } catch (e) { toast(L(`空欄の発見に失敗: ${e.message}`, `Discovery failed: ${e.message}`)); } finally { busy(false); }
 }
 
@@ -461,9 +478,9 @@ async function onDiscoverUpload() {
   } catch (e) { toast(L(`空欄の発見に失敗: ${e.message}`, `Discovery failed: ${e.message}`)); } finally { busy(false); }
 }
 
-function setDiscovery(d) {
+function setDiscovery(d, preview) {
   const eligible = d.candidates.filter((c) => c.recommended && !c.office_only).map((c) => c.candidate_id);
-  S.disc = { d, checked: new Set(eligible), memo: d.memo_text || "", memo0: d.memo_text || "" };
+  S.disc = { d, checked: new Set(eligible), memo: d.memo_text || "", memo0: d.memo_text || "", preview: preview || null };
   $("#discMemo").value = S.disc.memo;
   showView("discovery");
   renderDiscovery();
@@ -559,7 +576,38 @@ function renderDiscovery() {
       ` ${String(r.evidence_label || "").split("\n")[0]}`, h("div", { class: "f-ctx", title: r.reason }, reasonText(r.reason)))))
       : h("p", { class: "muted" }, L("なし", "none")));
   if ($("#discMemo").value !== D.memo) $("#discMemo").value = D.memo;
+  renderDiscPreview();
   updateDiscConfirm();
+}
+
+// The auto-preview: the recommended applicant cells filled by the server, shown next to the discovery table so the
+// result can be inspected in one click. It can never be approved; confirming the cells creates the run to sign off.
+function renderDiscPreview() {
+  const box = $("#discPreview");
+  const r = S.disc && S.disc.preview;
+  box.hidden = !r;
+  if (!r) return;
+  const rep = r.report;
+  const office = S.disc.d.candidates.filter((c) => c.office_only).map((c) => c.slot_id);
+  const written = r.mappings.filter((m) => m.status === "filled");
+  const si = statusInfo(rep.overall_status);
+  fill(box,
+    h("div", { class: "card-h" }, B("⚡ 自動プレビュー：推奨の申請者欄に仮記入した結果", "⚡ Auto-preview: the recommended applicant cells, filled"),
+      h("span", {}, L("このプレビューは承認できません — 下のボタンで空欄を確定してください", "this preview cannot be approved — confirm the cells below"))),
+    h("div", { class: "preview-grid" },
+      h("div", { class: "svg-box preview-svg" }),
+      h("div", { class: "preview-side" },
+        h("div", { class: `status ${si.cls}` }, si.node),
+        h("ul", { class: "preview-facts" },
+          h("li", {}, `✓ ${rep.passed_count}/${rep.passed_count + rep.failed_count} ${L("項目の決定論的検査に合格", "deterministic checks passed")}`),
+          h("li", {}, `✓ ${written.length} ${L("欄に原文引用つきで記入", "fields written, each with a verbatim quote")}`),
+          h("li", {}, `🔒 ${L("事務局専用欄は空欄のまま", "office-only cells left empty")}: ${office.join("・") || "—"}`),
+          h("li", {}, `↔ ${L("指定欄以外の描画のずれ", "layout drift outside the fields")}: ${(r.visual || {}).max_shift_px ?? 0} px`)),
+        h("div", { class: "preview-fields" }, written.map((m) => h("div", { class: "pf" },
+          h("b", {}, m.slot_id), h("span", { class: "f-value" }, m.filled_value), modelBadge(m)))),
+        h("button", { class: "btn btn-ghost btn-sm", type: "button", onclick: () => setRun(r, true) },
+          B("プレビューを詳しく見る（見た目の比較・根拠）", "Inspect the preview (visual diff, sources)")))));
+  $(".preview-svg", box).innerHTML = r.previews.filled;  // server-generated SVG, all text escaped server-side
 }
 
 function updateDiscConfirm() {
@@ -641,7 +689,8 @@ function renderHeader() {
   const eng = r.engine || {};
   $("#runSub").textContent = `${r.form.title_en ? r.form.title_en + " · " : ""}${r.display_name} → ${r.filled.name} · ${L("エンジン", "engine")}: ${eng.label || "?"}`
     + (eng.fallback_reason ? ` (fallback: ${eng.fallback_reason})` : "")
-    + (r.confirmed_candidates && r.confirmed_candidates.length ? ` · ${L("確定した空欄", "confirmed cells")}: ${r.confirmed_candidates.join(", ")}` : "");
+    + (r.confirmed_candidates && r.confirmed_candidates.length ? ` · ${L("確定した空欄", "confirmed cells")}: ${r.confirmed_candidates.join(", ")}` : "")
+    + (r.auto_preview ? ` · ⚠ ${L("自動プレビュー（推奨の空欄で仮記入）— 承認するには空欄を確定してください", "auto-preview of the recommended cells — confirm the cells to sign off")}` : "");
   $("#reportLink").href = r.links.report;
   $("#auditLink").href = r.links.audit;
   $("#backToDisc").hidden = !(S.disc && r.confirmed_candidates && r.confirmed_candidates.length);
@@ -809,7 +858,8 @@ function modelBadge(m) {
     if (i) parts.push(h("span", { class: "mb-arrow" }, "→"));
     parts.push(modelChip(id, info.kind === "plan"));
   });
-  return h("span", { class: "mbs", title: tip }, ...parts,
+  return h("span", { class: "mbs", title: tip },
+    info.kind === "plan" ? h("span", { class: "mb mb-offline" }, "Offline Rule") : null, ...parts,
     info.revised ? h("span", { class: "mb-note" }, L("修正", "revision")) : null,
     info.kind === "plan" ? h("span", { class: "mb-note" }, L("計画", "plan")) : null);
 }
@@ -1075,7 +1125,11 @@ function updateApprove() {
   btn.disabled = Boolean(r.approval) || !r.can_approve || !allChecked || !reviewer;
   const msg = $("#approveMsg");
   if (r.approval) return;
-  if (!r.can_approve) {
+  if (r.auto_preview) {
+    msg.className = "msg err";
+    msg.textContent = L("自動プレビューは承認できません。「↩ 空欄の選択に戻る」で空欄を確定してから承認してください。",
+      "An auto-preview cannot be approved: go back to the cell selection, confirm the cells, then sign off that run.");
+  } else if (!r.can_approve) {
     msg.className = "msg err";
     msg.textContent = r.report.pending_slots.length
       ? L(`ダウンロードはロック中: ${r.report.pending_slots.length} 欄がまだ入力待ちです。`, `Download locked: ${r.report.pending_slots.length} field(s) still need your input.`)

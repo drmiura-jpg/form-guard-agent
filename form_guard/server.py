@@ -17,8 +17,19 @@ cells (applicant vs office-only) and a ``discovery_id``. ``POST /api/runs/from-d
 byte-identical to the one discovery looked at. The discovery stays on the server; the
 client only names candidate ids.
 
-``GET /api/claude-suite`` describes the repository's Claude Code skills, subagents, hook and
-MCP server (read from the files), the model routing policy and the measured workflow numbers.
+``GET /api/demos`` lists all five fictional demos (``unmarked: true`` for form4 / form5).
+``POST /api/run-demo`` runs one: a marked demo fills its designated fields; an unmarked demo
+runs blank-cell discovery and fills the recommended applicant cells as an auto-preview — that
+draft can never be approved; the reviewer confirms the cells (``confirmed_targets``) to get a
+run that can be signed off. ``POST /api/discover`` accepts an upload or a ``demo_id``.
+
+Uploads are limited to 15 MB and pass the archive gate (``ziputil.check_archive``): path
+traversal in entry names, more than 2,000 entries, more than 100 MB uncompressed (ZIP bomb)
+and DTD / entity declarations (XXE) are refused before anything parses the file.
+
+``GET /api/claude-suite`` describes the repository's Claude Code skills, subagents, two-stage
+hook guard and MCP server (read from the files), the model routing policy and the measured
+workflow numbers.
 """
 
 from __future__ import annotations
@@ -30,7 +41,6 @@ import re
 import secrets
 import tempfile
 import threading
-import zipfile
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -60,10 +70,10 @@ from .samples import (
     unmarked_paths,
 )
 from .scanner import build_confirmed_slot_spec, detect_file_type, discover_blank_cells, recommended_ids
+from .ziputil import MAX_UNCOMPRESSED_BYTES, ZipSurgeryError, check_archive
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-MAX_UPLOAD_BYTES = 10 * 1024 * 1024
-MAX_UNCOMPRESSED_BYTES = 80 * 1024 * 1024
+MAX_UPLOAD_BYTES = 15 * 1024 * 1024  # 15 MB; the archive gate also caps the uncompressed size at 100 MB
 MAX_MEMO_CHARS = 60_000
 MAX_VALUE_CHARS = 1_000
 _RUN_ID = re.compile(r"^[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$")
@@ -92,6 +102,19 @@ class ApproveRequest(BaseModel):
     # What the reviewer was looking at: approval is refused if the run changed since (stale view).
     filled_sha256: Optional[str] = Field(default=None, max_length=64)
     revision: Optional[int] = None
+
+
+class RunDemoRequest(BaseModel):
+    """POST /api/run-demo: any of the five demos. For form4 / form5 without ``confirmed_targets`` the server runs
+    discovery and fills the recommended applicant cells as an auto-preview that can never be approved."""
+
+    model_config = ConfigDict(extra="forbid")
+    demo_id: str = Field(max_length=32)
+    mode: str = "auto"
+    memo_text: Optional[str] = Field(default=None, max_length=MAX_MEMO_CHARS)
+    model_tier: Optional[ModelTier] = None
+    discovery_id: Optional[str] = Field(default=None, max_length=64)
+    confirmed_targets: Optional[list[Annotated[str, Field(max_length=32)]]] = Field(default=None, max_length=500)
 
 
 class DiscoverDemoRequest(BaseModel):
@@ -129,6 +152,7 @@ class RunState:
     verified_bytes: bytes = b""     # the exact filled file the verifier checked (read once, right after the run)
     verified_sha256: str = ""       # SHA-256 of those bytes; approve() and download() refuse any other file
     revision: int = 0               # +1 on every reviewer edit; approval must name the revision it saw
+    auto_preview: bool = False      # cells picked by the server (recommended), not confirmed by a reviewer
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def stale(self, filled_sha256: Optional[str], revision: Optional[int]) -> bool:
@@ -269,26 +293,24 @@ def _payload(run_id: str, st: RunState) -> dict[str, Any]:
     d["can_approve"] = rep.overall_status == "PASS"
     confirmed = st.spec.get("confirmed_candidates") if isinstance(st.spec, dict) else None
     d["confirmed_candidates"] = [str(c) for c in confirmed] if isinstance(confirmed, list) else []  # unmarked forms
+    d["auto_preview"] = st.auto_preview
+    if st.auto_preview:
+        d["can_approve"] = False
+        d["cell_selection"] = ("auto-preview: the recommended applicant cells were filled by the server — confirm the "
+                               "detected cells to get a run a reviewer can sign off")
     d["links"] = {"report": f"/api/runs/{run_id}/report", "audit": f"/api/runs/{run_id}/audit",
                   "download": f"/api/runs/{run_id}/download"}
     return d
 
 
 def _check_package(path: Path) -> str:
-    if not zipfile.is_zipfile(path):
-        raise HTTPException(400, "not a .docx / .xlsx file (ZIP container expected)")
-    with zipfile.ZipFile(path) as zf:
-        infos = zf.infolist()
-        if len(infos) > 3000:
-            raise HTTPException(400, "too many entries in the package")
-        total = sum(i.file_size for i in infos)
-        if total > MAX_UNCOMPRESSED_BYTES:
-            raise HTTPException(400, "package expands to more than 80 MB — refused")
-        for i in infos:
-            if i.compress_size and i.file_size / max(1, i.compress_size) > 200:
-                raise HTTPException(400, "suspicious compression ratio — refused")
+    """The archive gate (path traversal, entry count, ZIP bomb, DTD / entities), then the OOXML type."""
     try:
+        check_archive(path, max_uncompressed=MAX_UNCOMPRESSED_BYTES)
         return detect_file_type(path)
+    except ZipSurgeryError as exc:
+        raise HTTPException(400, str(exc) if "refused" in str(exc) else
+                            "not a .docx / .xlsx file (ZIP container expected)") from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -345,7 +367,7 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
             raise HTTPException(400, "upload a .docx or .xlsx form")
         data = file.file.read(MAX_UPLOAD_BYTES + 1)
         if len(data) > MAX_UPLOAD_BYTES:
-            raise HTTPException(413, "file larger than 10 MB")
+            raise HTTPException(413, "file larger than 15 MB")
         staging = store.root / "_uploads" / new_run_id()
         staging.mkdir(parents=True, exist_ok=True)
         form_path = staging / f"{_safe_stem(file.filename or 'form')}{suffix}"
@@ -356,7 +378,8 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
         return form_path
 
     def _run(form_path: Path, memo: str, mode: str, *, naive: Optional[Path], spec: Optional[dict],
-             demo_id: Optional[str], display: str, model_tier: Optional[str] = None) -> tuple[str, RunState]:
+             demo_id: Optional[str], display: str, model_tier: Optional[str] = None,
+             auto_preview: bool = False) -> tuple[str, RunState]:
         run_id = new_run_id()
         run_dir = store.root / run_id
         try:
@@ -367,7 +390,7 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
         blob, sha = _verified_copy(result)  # recorded once, at pipeline completion
         st = RunState(result=result, ai_mappings=[m.model_copy(deep=True) for m in result.mappings],
                       form_path=form_path, memo_text=memo, naive_path=naive, spec=spec, display_name=display,
-                      verified_bytes=blob, verified_sha256=sha)
+                      verified_bytes=blob, verified_sha256=sha, auto_preview=auto_preview)
         store.put(run_id, st)
         return run_id, st
 
@@ -388,11 +411,15 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
 
     @app.get("/api/demos")
     def demos():
+        """All five fictional demos: デモ1–3 with designated fields, デモ4–5 unmarked (blank-cell discovery)."""
         base = samples()
         out = []
-        for d in DEMOS:
-            p = demo_paths(d, base)
+        for n, d in enumerate([*DEMOS, *UNMARKED_FORMS], start=1):
+            unmarked = d["id"] in {u["id"] for u in UNMARKED_FORMS}
+            p = unmarked_paths(d, base) if unmarked else demo_paths(d, base)
             out.append({**{k: d[k] for k in ("id", "title", "title_en", "org", "file_type", "highlights")},
+                        "number": n, "label": f"デモ{n}", "unmarked": unmarked, "marked": not unmarked,
+                        "badge": "空欄自動検出" if unmarked else "", "has_naive": not unmarked,
                         "form": p["form"].name, "memo_name": p["memo"].name, "memo_text": read_memo(p["memo"])})
         return out
 
@@ -425,9 +452,15 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
         return out
 
     @app.post("/api/discover")
-    def discover(file: UploadFile = File(...), mode: str = Form("auto"), model_tier: Optional[str] = Form(None)):
-        """Stages 1-3 of blank-cell discovery for an unmarked form; nothing is filled until a reviewer confirms."""
+    def discover(file: Optional[UploadFile] = File(None), mode: str = Form("auto"), model_tier: Optional[str] = Form(None),
+                 demo_id: Optional[str] = Form(None)):
+        """Stages 1-3 of blank-cell discovery for an unmarked form (an upload, or demo_id form4 / form5); nothing is
+        filled until a reviewer confirms."""
         tier = _check_tier(model_tier)
+        if file is None or not file.filename:
+            if not demo_id:
+                raise HTTPException(400, "upload a .docx / .xlsx form or name a demo_id (form4 / form5)")
+            return discover_demo(DiscoverDemoRequest(demo_id=demo_id, mode=mode, model_tier=tier))
         form_path = _stage_upload(file)
         d = _discover(form_path, mode, tier)
         d["form"] = file.filename or form_path.name
@@ -462,6 +495,52 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
         run_id, st = _run(entry["path"], memo, req.mode, naive=None, spec=spec, demo_id=entry.get("demo_id"),
                           display=entry.get("display_name") or entry["path"].name, model_tier=req.model_tier)
         return _payload(run_id, st)
+
+    @app.post("/api/run-demo")
+    def run_any_demo(req: RunDemoRequest):
+        """One click for any of the five demos. Marked (form1–3): fill the designated fields. Unmarked (form4 / form5):
+        discovery, then either the reviewer's ``confirmed_targets`` or — without them — an auto-preview of the
+        recommended applicant cells that can never be approved."""
+        tier = _check_tier(req.model_tier)
+        try:
+            d = demo_by_id(req.demo_id)
+        except KeyError:
+            d = None
+        if d is not None:
+            if req.discovery_id or req.confirmed_targets is not None:
+                raise HTTPException(400, "a marked demo has designated fields — discovery_id / confirmed_targets do not apply")
+            p = demo_paths(d, samples())
+            memo = req.memo_text if req.memo_text is not None else read_memo(p["memo"])
+            run_id, st = _run(p["form"], memo, req.mode, naive=p["naive"], spec=None, demo_id=d["id"],
+                              display=p["form"].name, model_tier=tier)
+            return {"demo_id": d["id"], "unmarked": False, "auto_preview": False, "run": _payload(run_id, st)}
+        try:
+            u = unmarked_by_id(req.demo_id)
+        except KeyError as exc:
+            raise HTTPException(404, "unknown demo") from exc
+        p = unmarked_paths(u, samples())
+        sample_memo = read_memo(p["memo"])
+        if req.discovery_id:  # the stored discovery — never anything the client sends — defines the cells
+            entry = discoveries.get(req.discovery_id)
+            if entry.get("demo_id") != u["id"]:
+                raise HTTPException(400, "this discovery_id belongs to another form")
+            report, token = entry["discovery"], req.discovery_id
+        else:
+            report = _discover(p["form"], req.mode, tier)
+            token = discoveries.put(report, p["form"], memo_text=sample_memo, demo_id=u["id"], display_name=p["form"].name)
+        preview = req.confirmed_targets is None
+        ids = recommended_ids(report) if preview else [str(i) for i in req.confirmed_targets or []]
+        try:  # refuses a changed form, 0 confirmed cells, unknown ids and office-only cells
+            spec = build_confirmed_slot_spec(report, ids, p["form"])
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        memo = req.memo_text if req.memo_text is not None else sample_memo
+        run_id, st = _run(p["form"], memo, req.mode, naive=None, spec=spec, demo_id=u["id"], display=p["form"].name,
+                          model_tier=tier, auto_preview=preview)
+        discovery = {**report, "discovery_id": token, "demo_id": u["id"], "title": u["title"], "title_en": u["title_en"],
+                     "org": u["org"], "memo_text": sample_memo}
+        return {"demo_id": u["id"], "unmarked": True, "auto_preview": preview, "discovery": discovery,
+                "run": _payload(run_id, st)}
 
     @app.get("/api/claude-suite")
     def claude_suite():
@@ -550,6 +629,9 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
                                           "revision": st.revision, "filled_sha256": st.verified_sha256})
             if not st.verified_sha256 or st.on_disk_sha256() != st.verified_sha256:
                 raise HTTPException(409, {"message": "the filled file was modified after verification — run it again"})
+            if st.auto_preview:  # the cells were the server's recommendation, not the reviewer's decision
+                raise HTTPException(409, {"message": "auto-preview — confirm the detected cells first "
+                                                     "(検出した空欄を承認して外科的差込を実行), then sign off that run"})
             rep = st.result.report
             if rep.pending_slots:
                 raise HTTPException(409, {"message": "fields still awaiting human input", "pending": rep.pending_slots})

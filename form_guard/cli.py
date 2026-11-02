@@ -1,15 +1,18 @@
 """Command line interface.
 
-    python -m form_guard.cli --all-demos                 # run all 3 fictional demos -> output/
+    python -m form_guard.cli --all-demos                 # run the 3 marked fictional demos -> output/
     python -m form_guard.cli --form F --memo M --out-dir D [--mode demo|live|auto] [--set 法人番号=...]
-    python -m form_guard.cli --scan FORM                 # list the slots a form exposes
+    python -m form_guard.cli --scan FORM [--json]        # list the slots a form exposes
     python -m form_guard.cli --discover-blanks FORM      # unmarked blank form: propose empty cells to fill
     python -m form_guard.cli --form F --memo M --discovery F.discovery.json --confirm c01,c02   # fill confirmed cells
     python -m form_guard.cli --verify ORIGINAL FILLED [--memo M]  # audit any filled copy against its blank original
     python -m form_guard.cli --generate-samples          # (re)write samples/ deterministically
     python -m form_guard.cli --serve [--port 8000]       # web UI at http://127.0.0.1:8000
+    python -m form_guard.cli --mcp                       # MCP server on stdio (registered in .mcp.json)
 
-Live mode: --model-tier auto (default; Haiku / Sonnet / Opus routed per field) | opus | sonnet | haiku.
+Live mode: --model-tier auto (default; Haiku / Sonnet / Opus routed per field) | opus | sonnet | haiku, or
+--model-tiering auto | off (off = one model for every call). A 404 not_found_error for a model id falls back
+along the engine's MODEL_FALLBACK_CHAIN; the audit log records the requested tier and the served model id.
 """
 
 from __future__ import annotations
@@ -76,7 +79,12 @@ def _print_result(result, out_root: Optional[Path] = None) -> None:
     for c in result.report.checks:
         if not c.passed:
             print(f"   ✗ {c.check_id} {c.description}: {c.details[:160]}")
-    for step in (result.engine.get("usage") or {}).get("routing", []):
+    usage = result.engine.get("usage") or {}
+    for fb in usage.get("model_fallbacks", []):
+        print(f"   ↺ 404 not_found_error: {', '.join(fb['unavailable'])} unavailable — {fb['task']} served by {fb['used_model']}")
+    for esc in usage.get("escalations", []):
+        print(f"   ↑ escalated {esc['slot_id']}: {esc['from_model']} → {esc['to_model']} ({esc['reason'][:80]})")
+    for step in usage.get("routing", []):
         plan = "planned in live auto (offline: no call) · " if step.get("planned_in_live_auto") else ""
         print(f"   · {plan}{step['task']} → {step['model']}: {', '.join(step['slots'])}")
     rel = result.out_dir / "report.html" if result.out_dir else None
@@ -148,6 +156,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     act.add_argument("--verify", nargs=2, type=Path, metavar=("ORIGINAL", "FILLED"), help="audit a filled copy")
     act.add_argument("--generate-samples", action="store_true", help="(re)generate samples/ deterministically")
     act.add_argument("--serve", action="store_true", help="start the web UI")
+    act.add_argument("--mcp", action="store_true", help="run the Model Context Protocol server on stdio "
+                     "(Claude Code / Claude Desktop; registered in .mcp.json)")
     ap.add_argument("--memo", type=Path, help="source memo (UTF-8 text)")
     ap.add_argument("--out-dir", type=Path, default=Path("output"))
     ap.add_argument("--mode", choices=["auto", "demo", "live"], default="auto",
@@ -157,6 +167,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--model-tier", choices=MODEL_TIER_CHOICES, default=None,
                     help="auto (default, or FORM_GUARD_MODEL_TIER) = Haiku for structured fields, Sonnet for standard "
                          "text, Opus for long text and self-correction; or one tier for every call")
+    ap.add_argument("--model-tiering", nargs="?", const="auto", choices=["off", "auto"], default=None,
+                    help="auto (same as --model-tier auto) = per-field model routing with escalation to Opus; off = "
+                         "one model for every call (Opus unless --model-tier names another); default: "
+                         "FORM_GUARD_MODEL_TIERING, else auto")
     ap.add_argument("--slot-spec", type=Path, help="optional <form>.slots.json (aliases, coordinate targets)")
     ap.add_argument("--discovery", type=Path, help="discovery report written by --discover-blanks (use with --confirm)")
     ap.add_argument("--confirm", metavar="IDS", help="candidate ids the reviewer confirmed (c01,c02,…) or 'recommended'")
@@ -170,6 +184,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
     a = ap.parse_args(argv)
+    from .mapper import resolve_model_tier
+
+    try:
+        a.model_tier = resolve_model_tier(a.model_tier, a.model_tiering)
+    except ValueError as exc:
+        ap.error(str(exc))
+
+    if a.mcp:
+        from .mcp_server import main as mcp_main
+
+        return mcp_main([])
 
     if a.serve:
         import uvicorn
@@ -190,6 +215,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         from .scanner import scan
 
         r = scan(a.scan, a.slot_spec)
+        if a.json:  # the same JSON as the MCP tool form_guard_scan (for agents and scripts)
+            from .mcp_server import scan_summary
+
+            print(json.dumps(scan_summary(r), ensure_ascii=False, indent=1))
+            return 0
         print(f"{r.path.name} ({r.file_type}) — {len(r.slots)} slots in {r.target_parts}")
         for s in r.slots:
             cons = {k: v for k, v in s.constraints.items()}

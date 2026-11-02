@@ -1,20 +1,30 @@
-"""Raw ZIP surgery for OOXML packages.
+"""Raw ZIP surgery for OOXML packages, behind an archive safety gate.
 
 ``rewrite_zip`` copies every untouched entry *as raw bytes* — local header,
 compressed stream and data descriptor exactly as they were — and rebuilds only
 the replaced parts, keeping their ZipInfo metadata (name, timestamps, flags,
 compression method, attributes, extra fields). Central-directory offsets are
 patched accordingly. Nothing is re-compressed unless it was actually edited.
+
+``check_archive`` is the gate every package passes before anything reads it
+(scanner, writer, verifier, web upload): it refuses path traversal in entry
+names (``..`` segments, a leading ``/`` or ``\\``, drive letters), duplicate
+names, more than 2,000 entries, more than 100 MB declared uncompressed size or
+an extreme compression ratio (ZIP bombs), and XML parts that carry a DTD or
+an entity declaration (XXE / "billion laughs").
 """
 
 from __future__ import annotations
 
 import hashlib
 import io
+import re
 import struct
 import zipfile
 import zlib
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Union
 
 LFH_SIG = b"PK\x03\x04"
 CDH_SIG = b"PK\x01\x02"
@@ -22,9 +32,96 @@ EOCD_SIG = b"PK\x05\x06"
 DD_SIG = b"PK\x07\x08"
 ZIP64_LOC_SIG = b"PK\x06\x07"
 
+MAX_ARCHIVE_ENTRIES = 2_000
+MAX_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
+MAX_COMPRESSION_RATIO = 200          # per entry, for entries that expand beyond 1 MiB
+_RATIO_FLOOR = 1024 * 1024
+XML_PART_SUFFIXES = (".xml", ".rels", ".vml")
+_DTD_RE = re.compile(rb"<!\s*(?:DOCTYPE|ENTITY)", re.I)
+
 
 class ZipSurgeryError(ValueError):
     pass
+
+
+class UnsafeArchiveError(ZipSurgeryError):
+    """A package Form-Guard refuses to open: path traversal, ZIP bomb, too many entries, DTD / entity declarations."""
+
+
+def unsafe_entry_name(name: str) -> str:
+    """Why an entry name is unsafe (path traversal, absolute path, drive letter, control characters), or ""."""
+    if not name:
+        return "empty entry name"
+    if "\x00" in name or any(ord(ch) < 0x20 for ch in name):
+        return "control character in entry name"
+    if name[0] in "/\\":
+        return "absolute entry name (leading / or \\)"
+    if re.match(r"^[A-Za-z]:", name):
+        return "entry name with a drive letter"
+    if any(seg == ".." for seg in re.split(r"[\\/]", name)):
+        return "path traversal (.. segment) in entry name"
+    return ""
+
+
+def xml_has_dtd(data: bytes) -> bool:
+    """True if an XML part declares a DTD or an entity (also for UTF-16 encoded parts)."""
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        data = data.decode("utf-16", "replace").encode("utf-8")
+    return _DTD_RE.search(data) is not None
+
+
+def check_archive(source: Union[bytes, str, Path, zipfile.ZipFile], *, scan_xml: bool = True,
+                  max_entries: int = MAX_ARCHIVE_ENTRIES,
+                  max_uncompressed: int = MAX_UNCOMPRESSED_BYTES) -> list[zipfile.ZipInfo]:
+    """Refuse an unsafe package before anything else reads it; returns its entries.
+
+    Raises ``UnsafeArchiveError`` (a ``ValueError``) with the reason. With ``scan_xml`` every XML part is read —
+    bounded by the size limit just checked — and refused if it declares a DTD or an entity.
+    """
+    if isinstance(source, zipfile.ZipFile):
+        zf, own = source, False
+    else:
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(source) if isinstance(source, (bytes, bytearray)) else Path(source))
+        except zipfile.BadZipFile as exc:
+            raise ZipSurgeryError(f"not a ZIP archive: {exc}") from exc
+        own = True
+    try:
+        infos = zf.infolist()
+        if len(infos) > max_entries:
+            raise UnsafeArchiveError(f"{len(infos):,} entries in the package (limit {max_entries:,}) — refused")
+        seen: set[str] = set()
+        total = 0
+        for info in infos:
+            why = unsafe_entry_name(info.filename)
+            if why:
+                raise UnsafeArchiveError(f"{why}: {info.filename[:80]!r} — refused")
+            key = info.filename.replace("\\", "/").lower()
+            if key in seen:
+                raise UnsafeArchiveError(f"duplicate entry name {info.filename[:80]!r} — refused")
+            seen.add(key)
+            total += info.file_size
+            if total > max_uncompressed:
+                limit = (f"{max_uncompressed // (1024 * 1024)} MB" if max_uncompressed >= 1024 * 1024
+                         else f"{max_uncompressed:,} bytes")
+                raise UnsafeArchiveError(f"package expands to more than {limit} (ZIP bomb guard) — refused")
+            if info.file_size > _RATIO_FLOOR and info.file_size > MAX_COMPRESSION_RATIO * max(1, info.compress_size):
+                raise UnsafeArchiveError(f"{info.filename[:80]}: compression ratio above {MAX_COMPRESSION_RATIO}:1 "
+                                         "(ZIP bomb guard) — refused")
+        if scan_xml:
+            for info in infos:
+                if info.filename.lower().endswith(XML_PART_SUFFIXES):
+                    try:
+                        data = zf.read(info.filename)
+                    except (zipfile.BadZipFile, NotImplementedError, RuntimeError, zlib.error) as exc:
+                        raise ZipSurgeryError(f"{info.filename}: unreadable entry ({exc})") from exc
+                    if xml_has_dtd(data):
+                        raise UnsafeArchiveError(f"{info.filename}: DTD / entity declaration in an XML part "
+                                                 "(XXE / entity-expansion guard) — refused")
+        return infos
+    finally:
+        if own:
+            zf.close()
 
 
 @dataclass
@@ -62,7 +159,7 @@ def read_raw_zip(blob: bytes) -> RawZip:
         zf = zipfile.ZipFile(io.BytesIO(blob))
     except zipfile.BadZipFile as exc:
         raise ZipSurgeryError(f"not a ZIP archive: {exc}") from exc
-    infos = zf.infolist()
+    infos = check_archive(zf, scan_xml=False)  # names, entry count and sizes; XML parts are checked at the gate
     eocd_pos = blob.rfind(EOCD_SIG)
     if eocd_pos < 0 or len(blob) - eocd_pos < 22:
         raise ZipSurgeryError("end-of-central-directory record not found")

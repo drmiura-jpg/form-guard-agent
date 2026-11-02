@@ -22,6 +22,9 @@ htmlcov/
 # Generated pipeline outputs (re-create with: python -m form_guard.cli --all-demos)
 output/
 
+# Personal Claude Code settings (the shared project settings are .claude/settings.json)
+.claude/settings.local.json
+
 # OS / editor noise
 .DS_Store
 Thumbs.db

@@ -59,6 +59,7 @@ from .ooxml import (
 )
 from .scanner import ScanResult, find_markers, has_marker
 from .textnorm import quantities, value_quantities
+from .ziputil import ZipSurgeryError, check_archive
 
 _PARSER = etree.XMLParser(resolve_entities=False, no_network=True, huge_tree=False)
 W = f"{{{W_NS}}}"
@@ -478,11 +479,12 @@ def verify(
     try:
         zo = zipfile.ZipFile(io.BytesIO(orig_blob))
         zf = zipfile.ZipFile(io.BytesIO(filled_blob))
+        check_archive(zf)  # path traversal / ZIP bomb / DTD gate before testzip() decompresses anything
         bad = zf.testzip()
         zip_ok = bad is None
         checks.append(_check("ZIP-01", "zip", "Archive opens and every entry passes its CRC-32 check", zip_ok,
                              "all CRCs valid" if zip_ok else f"corrupt entry: {bad}", "critical"))
-    except zipfile.BadZipFile as exc:
+    except (zipfile.BadZipFile, ZipSurgeryError) as exc:
         checks.append(_check("ZIP-01", "zip", "Archive opens and every entry passes its CRC-32 check", False,
                              str(exc), "critical"))
         return _finish(scan, checks, entry_hashes, mappings, pending, stats, subject)

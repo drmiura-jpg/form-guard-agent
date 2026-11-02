@@ -465,7 +465,18 @@ CLASSIFY_SCHEMA: dict[str, Any] = {
 # ------------------------------------------------------------------ model routing
 
 MODEL_TIERS = ("auto", "opus", "sonnet", "haiku")
+MODEL_TIERING_CHOICES = ("off", "auto")
 TIER_MODELS = {"opus": MODEL_OPUS, "sonnet": MODEL_SONNET, "haiku": MODEL_HAIKU}
+TIER_OF_MODEL = {model: tier for tier, model in TIER_MODELS.items()}
+# Where a tier's model id goes when an API organisation answers 404 not_found_error for it (a model that does not
+# exist and one the organisation cannot use look the same). The current-generation id of the same family is tried
+# first, then the long-available one; the first id that answers serves the rest of the run, and the audit log keeps
+# both the requested tier model and the id that actually served each call.
+MODEL_FALLBACK_CHAIN: dict[str, tuple[str, ...]] = {
+    MODEL_OPUS: ("claude-opus-5", "claude-opus-4-6"),
+    MODEL_SONNET: ("claude-sonnet-5", "claude-sonnet-4-5"),
+    MODEL_HAIKU: ("claude-haiku-4-5-20251001", "claude-haiku-4-5"),
+}
 STRUCTURED_FORMATS = ("wareki_date", "date", "wareki_period", "digits", "pattern", "choice")
 LONG_TEXT_CHARS = 150  # a printed limit this long means long free text even when the memo passage cannot be located
 REVISE_REASON = "self-correction after validator rejection"
@@ -552,6 +563,45 @@ def _effort_for(caps: dict[str, Any], wanted: str) -> Optional[str]:
     return "medium" if "medium" in levels else levels[0]
 
 
+def _tiering_value(value: str) -> str:
+    v = str(value).strip().lower()
+    if v in ("auto", "on", "1", "true", "yes"):
+        return "auto"
+    if v in ("off", "0", "false", "no"):
+        return "off"
+    raise ValueError(f"model tiering must be 'auto' or 'off', got {value!r}")
+
+
+def resolve_model_tier(model_tier: Optional[str] = None, model_tiering: Optional[str] = None) -> Optional[str]:
+    """One tier from ``--model-tier`` (auto | opus | sonnet | haiku) and ``--model-tiering`` (auto | off).
+
+    ``--model-tiering auto`` = per-field routing (``auto``); ``off`` = one model for every call (Opus, unless
+    ``--model-tier`` names another). Contradictory pairs (``auto`` routing with a fixed tier, or ``off`` with ``auto``)
+    are refused. ``None`` means "not given": the engine then reads FORM_GUARD_MODEL_TIER / FORM_GUARD_MODEL_TIERING.
+    """
+    tiering = _tiering_value(model_tiering) if model_tiering not in (None, "") else None
+    if model_tier:
+        tier = str(model_tier).lower()
+        if tier not in MODEL_TIERS:
+            raise ValueError(f"model_tier must be one of: {', '.join(MODEL_TIERS)}")
+        if tiering is not None and (tiering == "auto") != (tier == "auto"):
+            raise ValueError(f"--model-tiering {tiering} contradicts --model-tier {tier}")
+        return tier
+    if tiering is not None:
+        return "auto" if tiering == "auto" else "opus"
+    return None
+
+
+def model_not_found(exc: BaseException) -> bool:
+    """True for the API's 404 ``not_found_error`` — the model id does not exist or is not available to the org."""
+    body = getattr(exc, "body", None)
+    etype = None
+    if isinstance(body, dict):
+        err = body.get("error")
+        etype = err.get("type") if isinstance(err, dict) else body.get("type")
+    return getattr(exc, "status_code", None) == 404 or etype == "not_found_error"
+
+
 def route_slot(slot: FormSlot, all_slots: Optional[list[FormSlot]] = None, memo: str = "") -> tuple[str, str]:
     """(tier, reason) for one field when ``model_tier == "auto"``; the reason is kept in the audit log."""
     fmt = slot.required_format or "text"
@@ -595,7 +645,10 @@ class ClaudeEngine:
     ``model`` (or ``FORM_GUARD_MODEL``) pins one model for every call. Otherwise ``model_tier`` decides:
     ``opus`` / ``sonnet`` / ``haiku`` use that current-generation model throughout; ``auto`` routes each field
     (see ``route_slot``), sends blank-cell label classification to Haiku and every self-correction pass after a
-    validator rejection to Opus.
+    validator rejection to Opus — a Haiku or Sonnet draft that fails grounding or a printed rule is escalated, and
+    the escalation is recorded in ``usage["escalations"]``. When the API answers 404 ``not_found_error`` for a model
+    id, the call is retried along ``MODEL_FALLBACK_CHAIN`` and ``usage["model_fallbacks"]`` / ``usage["calls"]`` keep
+    the requested tier model next to the id that actually served it.
     """
 
     name = "claude"
@@ -604,7 +657,9 @@ class ClaudeEngine:
                  use_fallbacks: Optional[bool] = None, max_tokens: int = 32000, model_tier: Optional[str] = None):
         self.explicit_model = model or os.environ.get("FORM_GUARD_MODEL") or None
         self.model_tier = "auto"
-        self.set_model_tier(model_tier or os.environ.get("FORM_GUARD_MODEL_TIER") or "auto")
+        env_tiering = os.environ.get("FORM_GUARD_MODEL_TIERING")
+        self.set_model_tier(model_tier or os.environ.get("FORM_GUARD_MODEL_TIER")
+                            or (resolve_model_tier(None, env_tiering) if env_tiering else None) or "auto")
         self.effort = effort or os.environ.get("FORM_GUARD_EFFORT") or "medium"
         if use_fallbacks is None:
             use_fallbacks = os.environ.get("FORM_GUARD_FALLBACKS", "1") not in ("0", "false", "no")
@@ -615,9 +670,12 @@ class ClaudeEngine:
         self._thread_of: dict[str, list[dict[str, Any]]] = {}
         # slot_id -> [(served model, task, reason, fallback note)], one entry per call that handled the field
         self._route_of: dict[str, list[tuple[str, str, str, str]]] = {}
+        self._proposed_by: dict[str, str] = {}  # slot_id -> tier model that drafted it (for escalation records)
+        self._resolved: dict[str, str] = {}     # requested model -> fallback id that answered after a 404
         self.usage: dict[str, Any] = {"requests": 0, "input_tokens": 0, "output_tokens": 0,
                                       "cache_read_input_tokens": 0, "models": [], "calls": [], "routing": [],
-                                      "thinking_summaries": [], "redacted_thinking_blocks": 0}
+                                      "thinking_summaries": [], "redacted_thinking_blocks": 0,
+                                      "model_fallbacks": [], "escalations": []}
 
     def set_model_tier(self, tier: Optional[str]) -> None:
         tier = (tier or "auto").lower()
@@ -661,9 +719,9 @@ class ClaudeEngine:
             self._client = anthropic.Anthropic()
         return self._client
 
-    def _call(self, thread: list[dict[str, Any]], model: str, task: str, system: str = SYSTEM_PROMPT,
-              schema: Optional[dict[str, Any]] = None, key: str = "fields",
-              slots: Optional[list[str]] = None) -> dict[str, Any]:
+    def _request(self, model: str, thread: list[dict[str, Any]], system: str,
+                 schema: Optional[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any], Optional[str]]:
+        """Request kwargs for one model id, built from its capabilities (never a parameter that would 400)."""
         caps = model_capabilities(model)
         kwargs: dict[str, Any] = dict(model=model, max_tokens=min(self.max_tokens, caps["max_output_tokens"] or self.max_tokens),
                                       system=system, messages=thread)
@@ -681,27 +739,56 @@ class ClaudeEngine:
             kwargs["cache_control"] = {"type": "ephemeral"}
         if self.use_fallbacks and caps["server_side_fallback"]:
             kwargs.update(betas=[FALLBACK_BETA], fallbacks="default")
+        return kwargs, caps, effort
+
+    def _chain(self, model: str) -> list[str]:
+        """Model ids to try for a requested model: the one that already answered after a 404 first, then the rest."""
+        chain = [model, *MODEL_FALLBACK_CHAIN.get(model, ())]
+        start = self._resolved.get(model, model)
+        return chain[chain.index(start):] if start in chain else [start]
+
+    def _call(self, thread: list[dict[str, Any]], model: str, task: str, system: str = SYSTEM_PROMPT,
+              schema: Optional[dict[str, Any]] = None, key: str = "fields",
+              slots: Optional[list[str]] = None) -> dict[str, Any]:
         try:
             import anthropic
 
             api_errors: tuple = (anthropic.APIStatusError, anthropic.APIConnectionError)
         except ImportError:  # pragma: no cover
             api_errors = ()
-        try:
-            with self.client.beta.messages.stream(**kwargs) as stream:
-                msg = stream.get_final_message()
-        except api_errors as exc:  # type: ignore[misc]
-            status = getattr(exc, "status_code", None)
-            raise LiveEngineError(f"Claude API error{f' {status}' if status else ''}: {getattr(exc, 'message', exc)}") from exc
+        chain = self._chain(model)
+        unavailable: list[str] = []
+        for candidate in chain:
+            kwargs, caps, effort = self._request(candidate, thread, system, schema)
+            try:
+                with self.client.beta.messages.stream(**kwargs) as stream:
+                    msg = stream.get_final_message()
+                break
+            except api_errors as exc:  # type: ignore[misc]
+                if model_not_found(exc):  # 404 not_found_error: this id is not available to the organisation
+                    unavailable.append(candidate)
+                    if candidate != chain[-1]:
+                        continue
+                    raise LiveEngineError(f"Claude API error 404 not_found_error: none of {', '.join(unavailable)} is "
+                                          "available to this API organisation") from exc
+                status = getattr(exc, "status_code", None)
+                raise LiveEngineError(f"Claude API error{f' {status}' if status else ''}: {getattr(exc, 'message', exc)}") from exc
+        if unavailable:  # remember the id that answered, so later calls of this run skip the unavailable ones
+            self._resolved[model] = candidate
+            self.usage["model_fallbacks"].append({
+                "task": task, "tier": TIER_OF_MODEL.get(model, "pinned"), "requested_model": model,
+                "unavailable": unavailable, "used_model": candidate,
+                "reason": "404 not_found_error — model id not available to this API organisation"})
         self.usage["requests"] += 1
         u = getattr(msg, "usage", None)
         for k in ("input_tokens", "output_tokens", "cache_read_input_tokens"):
             self.usage[k] += int(getattr(u, k, 0) or 0)
-        served = getattr(msg, "model", None) or model
+        served = getattr(msg, "model", None) or candidate
         if served not in self.usage["models"]:
             self.usage["models"].append(served)
         self.usage["calls"].append({
-            "task": task, "slots": list(slots or []), "requested_model": model, "served_model": served,
+            "task": task, "slots": list(slots or []), "tier": TIER_OF_MODEL.get(model, "pinned"),
+            "requested_model": model, "attempted_models": [*unavailable, candidate], "served_model": served,
             "effort": effort,
             "thinking": "adaptive, summarized" if caps["adaptive_thinking"] else "omitted (not supported by this model)",
             "stop_reason": msg.stop_reason, "input_tokens": int(getattr(u, "input_tokens", 0) or 0),
@@ -737,8 +824,12 @@ class ClaudeEngine:
 
     def _note_route(self, slot_ids: list[str], requested: str, task: str, reasons: dict[str, str]) -> None:
         """Remember which model actually served each field (the served id can differ after a server-side fallback)."""
-        served = self.usage["calls"][-1]["served_model"]
-        note = "" if served.startswith(requested) else f" (served by {served}; requested {requested})"
+        call = self.usage["calls"][-1]
+        served = call["served_model"]
+        if len(call.get("attempted_models") or []) > 1:  # MODEL_FALLBACK_CHAIN after a 404 not_found_error
+            note = f" (404 fallback: {requested} is not available to this API organisation; served by {served})"
+        else:
+            note = "" if served.startswith(requested) else f" (served by {served}; requested {requested})"
         for sid in slot_ids:
             self._route_of.setdefault(sid, []).append((served, task, reasons.get(sid, ""), note))
 
@@ -805,7 +896,7 @@ class ClaudeEngine:
 
     def propose(self, slots: list[FormSlot], memo: str, form_title: str = "") -> dict[str, Draft]:
         drafts: dict[str, Draft] = {}
-        self._thread_of, self._route_of = {}, {}
+        self._thread_of, self._route_of, self._proposed_by = {}, {}, {}
         for model, group, reasons in self.route(slots, memo):
             thread: list[dict[str, Any]] = [{"role": "user", "content": self._mapping_prompt(group, memo, form_title)}]
             ids = [s.slot_id for s in group]
@@ -814,6 +905,7 @@ class ClaudeEngine:
             self._note_route(ids, model, "propose", reasons)
             for s in group:
                 self._thread_of[s.slot_id] = thread
+                self._proposed_by[s.slot_id] = model
             drafts.update(self._to_drafts(data, {s.slot_id for s in group}, memo))
             self.messages = thread
         for s in slots:
@@ -845,6 +937,14 @@ class ClaudeEngine:
                 "exactly from a single memo line. If the memo does not support a value, return status \"not_found\".")})
             ids = [slot.slot_id for slot, _, _ in items]
             reasons = {sid: why for sid in ids}
+            escalated = {e["slot_id"] for e in self.usage["escalations"]}
+            for slot, _draft, issues in items:  # a fast-tier draft the verifier rejected is re-done by Opus
+                first = self._proposed_by.get(slot.slot_id)
+                if not self.fixed and first and first != model and slot.slot_id not in escalated:
+                    self.usage["escalations"].append({
+                        "slot_id": slot.slot_id, "from_tier": TIER_OF_MODEL.get(first, first), "from_model": first,
+                        "to_tier": TIER_OF_MODEL.get(model, model), "to_model": model,
+                        "reason": "; ".join(i.message for i in issues)[:240] or "rejected by the verifier"})
             self.usage["routing"].append({"task": "revise", "model": model, "slots": ids, "reasons": reasons})
             data = self._call(thread, model, task="revise", slots=ids)
             self._note_route(ids, model, "revise", reasons)

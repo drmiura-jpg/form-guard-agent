@@ -18,7 +18,8 @@ from form_guard.samples import DEMOS, demo_paths, generate_samples, read_memo  #
 @pytest.fixture(autouse=True)
 def _hermetic_model_settings(monkeypatch):
     """Model routing must not depend on the developer's shell (FORM_GUARD_MODEL etc.)."""
-    for var in ("FORM_GUARD_MODEL", "FORM_GUARD_MODEL_TIER", "FORM_GUARD_EFFORT", "FORM_GUARD_FALLBACKS"):
+    for var in ("FORM_GUARD_MODEL", "FORM_GUARD_MODEL_TIER", "FORM_GUARD_MODEL_TIERING", "FORM_GUARD_EFFORT",
+                "FORM_GUARD_FALLBACKS", "FORM_GUARD_ALLOW_TEMPLATE_WRITE"):
         monkeypatch.delenv(var, raising=False)
 
 

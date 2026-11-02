@@ -1,32 +1,50 @@
 ---
 name: form-scan
-description: Scan a blank Word (.docx) or Excel (.xlsx) form with Form-Guard to list its fillable slots and the rules printed on the form, and — for an unmarked blank form without {{markers}} — propose the empty cells to fill (applicant fields vs office-only cells) for human confirmation. Use before filling any form, or when the user asks what a form requires.
+description: "Read-only inspection of a blank Word (.docx) or Excel (.xlsx) form with Form-Guard before any mapping or editing: lists every fillable slot ({{markers}}, [記入欄: …] markers, empty cells designated by coordinates in <form>.slots.json) with its location and the rules printed on the form (character limits, 和暦 dates, digit counts and ID patterns, yen caps and rounding, drop-down options), and — for an unmarked blank form without markers — runs the 4-stage blank-cell discovery (applicant fields vs office-only cells) for human confirmation. Use when asked what a form contains or requires, before filling a new form, or when a fill reports a missing or unexpected slot."
+argument-hint: "<form.docx|form.xlsx> [slot-spec.json]"
 ---
 
-# Form scan — find what a form asks for
+# Form scan — look before you write
 
-Form-Guard never edits the blank form while scanning. Run every command from the repository root with the
-project's virtual environment active.
+Scanning never modifies anything. Run every command from the repository root with the project's virtual
+environment active. Mapping, writing and verification all depend on what the scan finds.
 
 ## 1. Forms with designated slots
 
 ```bash
-python -m form_guard.cli --scan samples/blank_forms/form2_municipal_equipment_subsidy.docx
+python -m form_guard.cli --scan <form>                                # human-readable list
+python -m form_guard.cli --scan <form> --json                         # structured JSON (for agents and scripts)
+python -m form_guard.cli --scan <form> --slot-spec <form>.slots.json  # explicit spec (auto-detected next to the form)
 ```
 
-A slot is designated by `{{項目名}}`, `[記入欄: 項目名]`, or by the coordinates of an empty cell in a sidecar
-`<form>.slots.json` (Word: `table` / `row` / `col`; Excel: `sheet` / `cell`, e.g. `{"sheet": 0, "cell": "C5"}`).
-For each slot, report to the user:
+No form at hand? The five fictional, non-medical demos are listed by the MCP tool `form_guard_list_demos`:
+`samples/blank_forms/form1_research_plan_change.docx`, `form2_municipal_equipment_subsidy.docx`,
+`form3_facility_safety_inspection.xlsx` (marked) and `form4_unmarked_blank.docx`, `form5_unmarked_blank.xlsx`
+(unmarked). Through MCP: `form_guard_scan {form_path, slot_spec_path?}` returns the same JSON as `--json`.
 
-- `slot_id`, `format` (`wareki_date`, `wareki_period`, `yen`, `digits`, `pattern`, `choice`, `person_name`, `text`)
-  and `max_chars` — these come from text printed on the form (`（200字以内）`, `（13桁）`, `例：JR-2026-001`,
-  `上限1,000,000円`, `千円未満切捨て`, drop-down lists), not from guesses;
-- the location path (part › table › row › cell, or sheet › cell) and every `!` warning (a refused target,
-  for example a formula cell or a merged continuation).
+| Kind | On the form | Notes |
+|---|---|---|
+| braces | `{{研究課題番号}}` | may be split across Word runs (spell-check, bookmarks) — handled |
+| kinyuran | `[記入欄: 法人番号]` | |
+| empty cell | nothing printed; `<form>.slots.json` → Word `{"targets": [{"slot_id": "担当者連絡先", "table": 1, "row": 8, "col": 1}]}`, Excel `{"slot_id": "申請日", "sheet": 0, "cell": "C5"}` | for official forms that must not be edited; the cell must really be empty |
 
-## 2. Unmarked blank forms (0 slots)
+| Printed on the form | Becomes |
+|---|---|
+| `（200字以内）` | `max_chars: 200` |
+| `和暦` / `令和　年　月　日` | `required_format: wareki_date` (`wareki_period` for a from–to range) |
+| `（13桁）` | `digits: 13`, pattern `^\d{13}$` |
+| `例：JR-2026-001` | a pattern derived from the example, half-width |
+| `上限1,000,000円` · `千円未満切捨て` | `max_value: 1000000` · `multiple_of: 1000` |
+| `A／B／Cのうち該当するもの` or an Excel drop-down | `required_format: choice`, `allowed_values`, `multi_select` |
 
-If the scan reports `0 slots`, run the 4-stage discovery instead:
+Each slot also reports `model_tier`: the Claude model live `--model-tier auto` mode routes it to —
+`claude-haiku-5-5` for structured fields (dates, IDs, choices), `claude-sonnet-5-5` for standard text, amounts and
+names, `claude-opus-5-5` for long-text condensation (and every self-correction). Lines starting with `!` are
+warnings ("cell is not empty — refusing to overwrite printed text", "part not found", a refused formula cell or
+merged continuation …). Resolve them with the human before filling. Excel: every sheet is scanned; worksheets
+larger than 2,000 rows × 200 columns (or 100,000 cells) are refused rather than processed.
+
+## 2. Unmarked blank forms (0 slots) — 4-stage discovery
 
 ```bash
 python -m form_guard.cli --discover-blanks samples/blank_forms/form5_unmarked_blank.xlsx --mode demo --out-dir output
@@ -34,22 +52,27 @@ python -m form_guard.cli --discover-blanks samples/blank_forms/form5_unmarked_bl
 
 1. Stage 1 finds empty cells with a printed label immediately to the left (or above, in a column-header table).
 2. Stage 2 marks each cell `applicant_fillable` or `office_only` (事務局・受付印・受付番号・審査欄・決裁・検印 …),
-   gives duplicate labels unique ids (`研究代表者_氏名` / `事務担当者_氏名`) and infers the printed rules.
-   With `--mode live`, Claude (Haiku under `--model-tier auto`) also classifies the labels; it can only make a
-   cell *less* fillable, never turn an office cell into an applicant field.
+   gives duplicate labels unique ids (`研究代表者_氏名` / `事務担当者_氏名`) and infers the printed rules. With
+   `--mode live`, Claude (Haiku under `--model-tier auto`) also classifies the labels; it can only make a cell
+   *less* fillable, never turn an office cell into an applicant field.
 3. Stage 3 rejects formula cells, merged continuations and cells that already hold content.
 4. Stage 4 is the human gate: show the user the candidate table (`c01 ✓ …`, `c06 ✗ … office/administrative use
    only`) and the rejected cells, and **let the user choose**. Never confirm cells on the user's behalf.
 
 The discovery report (`output/<form>.discovery.json`) records the blank form's SHA-256; confirmation is refused if
-the form changes afterwards. Continue with the `surgical-fill` skill once the user has picked the cells.
+the form changes afterwards. MCP: `form_guard_discover_blank_cells {form_path, mode?}`. In the web UI
+(`python -m form_guard.cli --serve`) demos 4 and 5 run discovery automatically and show the same table with a
+one-click confirm button.
 
-## MCP alternative
+## Report back
 
-The `form-guard` MCP server (`.mcp.json`) exposes the same steps as `form_guard_scan` and
-`form_guard_discover_blank_cells`.
+Summarise the file type and slot count, then a table `slot_id | format | limit / options | location`, any
+warnings, and which facts the memo must contain for every slot to be filled. Continue with the `surgical-fill` or
+`form-fill-verify` skill once the slots (or the user's confirmed cells) are known.
 
-## Rules
+## Guardrails
 
+- Never edit a blank form to "fix" a marker. Templates under `samples/blank_forms/` are protected by the project's
+  PreToolUse hook; change markers only in their generator (`form_guard/samples.py`) and rebuild with
+  `python -m form_guard.cli --generate-samples`, or ask the human.
 - Use only the fictional sample forms or forms the user is entitled to use. No real personal data.
-- Do not modify the blank form (not even to add markers) unless the user asks for that explicitly.

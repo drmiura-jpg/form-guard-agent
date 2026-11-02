@@ -3,7 +3,7 @@
 **Fill only the designated fields of a Word / Excel form, prove that nothing else changed, and keep a human in the loop.**
 **指定欄だけを記入し、様式の変更を検査する書類記入エージェント**
 
-Built for **Built with Claude: Japan 2026** (development started Monday, 2026-11-02 / 2026-11-02（月）). [日本語版はこちら ↓](#日本語)
+Built for **Built with Claude: Japan 2026** (development started Monday, 2026-11-02 / 2026-11-02（月）). [日本語版はこちら ↓](#日本語) · [How Claude & Claude Code are used ↓](#claude-usage)
 
 ![Visual diff: naive regeneration vs Form-Guard](docs/screenshots/01_visual_diff.png)
 
@@ -91,7 +91,7 @@ pip install -r requirements.txt
 
 python -m form_guard.cli --all-demos     # runs the 3 fictional demos -> output/index.html
 python -m form_guard.cli --serve         # web UI on http://127.0.0.1:8000
-pytest -v                                # 120 tests
+pytest -v                                # 169 tests
 ```
 
 Requires Python 3.10+. Without `ANTHROPIC_API_KEY` everything runs on the deterministic **offline demo engine**, so the
@@ -101,10 +101,16 @@ The web UI is Japanese first (`日本語 / EN` toggle in the top bar). The **�
 Walkthrough** bar jumps straight to the five proof points: ① visual diff against a naive regeneration, ② blank-cell
 discovery on an unmarked form, ③ verbatim grounding and no guessing (`483万6千円 → 4,836,000円`, the printed cap,
 the missing `法人番号`), ④ Claude usage — per-field model routing and the Claude Code suite, ⑤ the 21-check audit and
-the human approval lock. The left rail lists the 3 marked demos, the 2 **unmarked blank forms** (form4 `.docx`, form5
-`.xlsx`) for interactive discovery, and an upload form with **🔍 Discover blank cells** for your own unmarked forms.
-Deep links for recordings: `/#tour=1` … `/#tour=5`, `/#unmarked=form4`, `/#demo=form2&tab=hitl`, `/#view=claude`,
-`/#lang=en`.
+the human approval lock. A **なぜ Form-Guard か？（解決する現場課題）** banner at the top states the problem in three lines.
+The left rail lists all five demos, **デモ1–デモ5**: three marked forms and the two **unmarked blank forms** — デモ4
+(form4 `.docx`) and デモ5 (form5 `.xlsx`), badged **空欄自動検出**. One click on デモ4 / デモ5 runs the 4-stage blank-cell
+discovery *and* an auto-preview fill of the recommended applicant cells, so the discovery table and the filled result
+are on screen together; **✅ 検出した空欄を承認して外科的差込を実行** turns the reviewer's own selection into the run that
+can be signed off (the auto-preview itself can never be approved). An uploaded form without markers goes to discovery
+automatically, and **🔍 Discover blank cells** is there for your own unmarked forms. Each field in Fields & sources
+carries a model-tier badge (`Opus 5.5` / `Sonnet 5.5` / `Haiku 5.5`, or `Offline Rule` plus the live plan).
+Deep links for recordings: `/#tour=1` … `/#tour=5`, `/#demo=form4` (or `/#unmarked=form4`), `/#demo=form2&tab=hitl`,
+`/#view=claude`, `/#lang=en`.
 
 ## Live Claude mode
 
@@ -114,6 +120,7 @@ Set the key in your shell or in a git-ignored `.env` file in the project root:
 |---|---|---|
 | `ANTHROPIC_API_KEY` | – | enables live mode (`--mode auto` picks it up) |
 | `FORM_GUARD_MODEL_TIER` | `auto` | `auto` routes per field (below); `opus` / `sonnet` / `haiku` use one model (CLI: `--model-tier`) |
+| `FORM_GUARD_MODEL_TIERING` | – | `auto` / `off` — the same switch as `--model-tiering` (`off` = one model, Opus, for every call) |
 | `FORM_GUARD_MODEL` | – | pins one model id for every call (CLI: `--model`) |
 | `FORM_GUARD_EFFORT` | `medium` | `output_config.effort` (`low` … `max`; clamped to what the model supports) |
 | `FORM_GUARD_FALLBACKS` | `1` | server-side refusal fallback opt-in (only where the model supports it); set `0` to disable |
@@ -121,6 +128,7 @@ Set the key in your shell or in a git-ignored `.env` file in the project root:
 ```bash
 python -m form_guard.cli --all-demos --mode live
 python -m form_guard.cli --form my_form.docx --memo notes.txt --out-dir out --mode live --model-tier auto
+python -m form_guard.cli --form my_form.docx --memo notes.txt --out-dir out --mode live --model-tiering off
 ```
 
 How Claude is used at runtime (`form_guard/mapper.py`):
@@ -129,6 +137,15 @@ How Claude is used at runtime (`form_guard/mapper.py`):
   choices) and blank-cell label classification → `claude-haiku-5-5`; standard text, yen amounts and names →
   `claude-sonnet-5-5`; long-text condensation and every self-correction pass after a validator rejection →
   `claude-opus-5-5`. The audit log and the report show which model handled which field and why.
+* **Escalation**: a Haiku or Sonnet draft that fails grounding or a printed rule is re-done by `claude-opus-5-5` with
+  adaptive thinking, in the conversation that proposed it; every escalation is recorded in `usage.escalations`
+  (field, from → to, the verifier's reason). `--model-tiering off` (or a fixed `--model-tier`) uses one model instead.
+* **Model availability fallback** (`MODEL_FALLBACK_CHAIN`): if the API answers `404 not_found_error` for a tier's model
+  id on your API organisation, the call is retried along `claude-opus-5-5` → `claude-opus-5` → `claude-opus-4-6`,
+  `claude-sonnet-5-5` → `claude-sonnet-5` → `claude-sonnet-4-5`, `claude-haiku-5-5` → `claude-haiku-4-5-20251001` →
+  `claude-haiku-4-5`. The first id that answers serves the rest of the run, the request is rebuilt from that model's
+  capabilities (no thinking or effort for a legacy id, so no 400), and `audit_log.json` keeps the requested tier model
+  next to the served id (`usage.model_fallbacks`, `usage.calls[].attempted_models`, the `routed_model` note).
 * **Every field records its model**: each mapping carries `routed_model` / `route_reason` — the id the API actually
   served (`claude-haiku-5-5`, or `claude-sonnet-5-5 → claude-opus-5-5 (revision)` after a self-correction; a
   server-side fallback to another model shows up as such). Offline runs show the plan live auto mode would follow —
@@ -158,13 +175,50 @@ The repository ships its own Claude Code setup (details and rationale: [docs/BUI
 
 | | |
 |---|---|
-| `.claude/skills/` | `form-scan`, `surgical-fill`, `structural-audit` — the scan → fill → audit procedures |
-| `.claude/agents/` | `memo-extractor` (read-only verbatim evidence, no guessing) and `form-auditor` (independent re-verification) |
-| `.claude/settings.json` | `PostToolUse` hook on `Edit`/`Write`: Python syntax + secret / local-path / e-mail hygiene check, cross-platform `python -c` |
-| `.mcp.json` | registers the `form-guard` MCP server: `python -m form_guard.mcp_server` (stdio JSON-RPC 2.0, no extra dependencies) with `form_guard_scan`, `form_guard_discover_blank_cells`, `form_guard_fill` (writes only an **unapproved draft**) and `form_guard_verify` |
+| `.claude/skills/` | `form-scan`, `surgical-fill`, `structural-audit`, `form-fill-verify`, `visual-diff-audit` — scan (with blank-cell discovery) → fill → audit, a one-pass fill-and-verify, and the visual / layout audit |
+| `.claude/agents/` | `memo-extractor` (Sonnet: blind verbatim extraction *before* it sees the slots), `field-mapper` (`claude-opus-5-5`: rule-aware proposals — 和暦, caps, condensation), `structure-auditor` (Sonnet: fast deterministic audit), `form-auditor` (Opus: adversarial re-verification and the HITL list). **No file-editing tools (`Edit`/`Write`)**: `memo-extractor` uses only `Read, Grep, Glob`, and `form-auditor` (like `field-mapper` and `structure-auditor`) uses `Read, Grep, Glob, Bash` for verification commands under `PreToolUse` protection |
+| `.claude/settings.json` + `scripts/hook_guard.py` | **Two-stage hook guard.** `PreToolUse` (`Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `Bash`, `PowerShell`) prevents *before anything is written* — exit code 2 + `permissionDecision: "deny"` — any write, copy-over, move or delete of `samples/blank_forms/*.docx` / `*.xlsx`, and any write that would put an Anthropic API key, a literal `ANTHROPIC_API_KEY = "sk-…"`, a personal user-profile path or a non-example e-mail address into a project file. `PostToolUse` (`Write`, `Edit`, `MultiEdit`) verifies *after the write* that Python compiles (`py_compile`) and the edited module imports (< 1.8 s), that JSON parses, and re-scans the file. Commands: `python scripts/hook_guard.py pre-tool-use` / `post-tool-use` — no `$`, `%` or backtick, so they run identically in Git Bash, PowerShell, cmd, macOS and Linux |
+| `.mcp.json` | registers the `form-guard` MCP server: `python -m form_guard.mcp_server` (stdio JSON-RPC 2.0, no extra dependencies, UTF-8 forced) with `form_guard_list_demos` (all five fictional demos, marked vs unmarked), `form_guard_scan`, `form_guard_discover_blank_cells`, `form_guard_fill` (writes only an **unapproved draft** into `output/mcp_runs/`, `approval_status: UNAPPROVED_DRAFT_REQUIRES_HUMAN_SIGN_OFF` in the result and in `audit_log.json` — nothing is stamped into the document itself) and `form_guard_verify` (with VIS-01) |
 | Web UI tab **Claude Code 連携 · Architecture** | `GET /api/claude-suite` reads the files above (skills, subagents with their models and tools, the hook's checks, the permission denials, the MCP tools) and shows how they work together, this run's per-field model routing, the routing policy and the measured workflow numbers |
 
 ![Claude Code 連携 · Architecture tab: per-field Haiku / Sonnet / Opus routing and the routing policy](docs/screenshots/07_claude_code_architecture.png)
+
+<a id="claude-usage"></a>
+## How Claude & Claude Code Are Used / Claude と Claude Code 機能の目的別使い分け
+
+The core of Form-Guard — turning a free-text memo into field values that can be proven — is done by **Claude at
+runtime**; everything that has to be provable is **deterministic code**. Claude Code built the project, and its
+project-level setup ships in this repository. Each feature and model was chosen for one job:
+
+| Purpose | Feature / model chosen | Why | Where in repo | How it is verified |
+|---|---|---|---|---|
+| Map memo facts to form fields (the core of the app) | **Claude** with **structured outputs** (JSON schema) and **adaptive thinking** at an explicit effort level, streamed | value + verbatim quotes + line numbers, or `not_found` — every answer is machine-checkable | `form_guard/mapper.py` (`ClaudeEngine`, `MAPPING_SCHEMA`, `SYSTEM_PROMPT`) | offline: fake client + the real `anthropic` SDK on a mock HTTP transport · live: `--mode live` |
+| Spend reasoning where it is needed | **Per-field routing** — `claude-haiku-5-5` structured fields and label classification · `claude-sonnet-5-5` standard text, amounts, names · `claude-opus-5-5` long-text condensation and every self-correction; a rejected Haiku / Sonnet draft is **escalated** to Opus | a 13-digit ID needs no deep thinking; a 200-character condensation that must keep every condition does | `route_slot`, `ClaudeEngine.route` / `revise`, `usage.escalations` | offline: the model of every call and the escalation record are asserted; offline runs show the live plan per field |
+| Keep working when a model id is unavailable | **Model fallback chain** on `404 not_found_error` | a launching tier id may not be enabled on every API organisation | `MODEL_FALLBACK_CHAIN`, `ClaudeEngine._call` | offline: the real SDK raises `NotFoundError` from a mock transport; requested and served ids are audited |
+| Never trust a value without evidence | **Self-correction loop with verbatim-quote grounding** | an LLM answer is a proposal; an independent check decides | `form_guard/grounding.py`, `map_fields` / `repair` | offline: every run of the suite |
+| Prove that nothing else changed | **Deterministic verifier** — 21 checks + VIS-01, **0 LLM tokens** | a verdict that must be reproducible never comes from a model | `form_guard/verifier.py`, `form_guard/visual_diff.py` | offline: tampering tests (borders, merges, text, `xml:space`, ZIP, path traversal, XXE) |
+| Teach Claude Code this project's workflows | **Skills** (5) | exact commands and guardrails load only when a task matches | `.claude/skills/*/SKILL.md` | offline: valid front matter; every CLI flag a skill names exists |
+| Separate proposing from checking | **Subagents** (4), none with `Edit` / `Write` | the model that proposes values must not be the one that signs off | `.claude/agents/*.md` | offline: tools and models asserted |
+| Make unsafe actions impossible, not just discouraged | **Two-stage hooks** (`PreToolUse` before the write, `PostToolUse` after it) | a prompt can be ignored, a hook cannot | `.claude/settings.json`, `scripts/hook_guard.py` | offline: blocks before the write (exit 2 + deny), post-write checks, a cp932 console |
+| Use Form-Guard from any Claude client | **MCP server** (5 tools, stdio, zero dependencies) | Claude Code / Claude Desktop scan, discover, fill and verify as tools and get the human checklist back | `.mcp.json`, `form_guard/mcp_server.py` | offline: JSON-RPC over real stdio, Japanese payloads on a cp932 console, stray prints isolated at the file-descriptor level |
+
+**Offline vs live.** Every row is exercised by the pytest suite without an API key: the deterministic parts directly,
+the Claude parts through a fake client and through the real `anthropic` SDK on a mock HTTP transport (request bodies,
+streaming, the 404 fallback chain, refusals, escalation). A live run with `ANTHROPIC_API_KEY` adds only the models'
+actual answers and latency — and those answers go through exactly the same validator and verifier.
+
+| 目的 | 選んだ機能・モデル | 選んだ理由 | 検証方法 |
+|---|---|---|---|
+| メモの事実を様式の欄に対応付ける（中核） | Claude の構造化出力（JSON スキーマ）＋ effort を明示した adaptive thinking | すべての回答が「値＋原文引用＋行番号」か `not_found` で、機械的に検査できる | オフライン：偽クライアントと、実 SDK＋モック通信 ／ ライブ：`--mode live` |
+| 推論が必要な所にだけ推論を使う | 欄ごとの振り分け（Haiku：定型欄・ラベル分類／Sonnet：文章・金額・氏名／Opus：長文要約とすべての自己修正）。検証器が却下した Haiku・Sonnet の下書きは Opus に引き上げ | 13桁の番号に深い推論は不要、条件を残す200字要約には必要 | 呼び出しごとのモデルと引き上げ記録をテストで確認 |
+| モデル ID が使えない組織でも止まらない | 404 `not_found_error` 時のフォールバック連鎖（`MODEL_FALLBACK_CHAIN`） | 公開直後の ID が全組織で使えるとは限らない | 実 SDK が返す `NotFoundError` で確認。要求モデルと応答モデルを監査ログに記録 |
+| 指定欄以外が変わっていないことを証明 | 決定論的な検証器（21項目＋VIS-01、LLM トークン 0） | 再現性が必要な判定をモデルに任せない | 改ざん・パストラバーサル・XXE のテスト |
+| 作業手順と「提案役／確認役」の分離 | スキル 5 種、サブエージェント 4 種（どれも `Edit`/`Write` を持たない） | 値を提案したモデル自身に合格を出させない | フロントマターとツール・モデルをテストで確認 |
+| 危険な操作を「不可能」にする | 2 段フック：PreToolUse（書き込み前に阻止）／PostToolUse（書き込み後に検査） | プロンプトは無視され得るが、フックは無視できない | 書き込み前の阻止（終了コード 2＋deny）、書き込み後の検査、cp932 環境で確認 |
+| どの Claude クライアントからでも使う | MCP サーバー（5 ツール・stdio・依存ゼロ） | Claude Code・Claude Desktop からツールとして呼べる | 実 stdio で日本語を含む JSON-RPC を確認 |
+
+すべての行は API キー無しの pytest で検証されています（Claude 部分は偽クライアントと、実 SDK＋モック通信）。ライブ実行で
+加わるのはモデルの実際の回答と応答時間だけで、その回答も同じ検証器を通ります。
 
 ## Unmarked blank forms: discover → confirm → fill
 
@@ -184,17 +238,24 @@ python -m form_guard.cli --form samples/blank_forms/form5_unmarked_blank.xlsx --
 4. **Human gate** — `--confirm c01,c02,…` (or `recommended`) builds the slot spec only if the blank form still has the
    SHA-256 it had at discovery, at least one cell is confirmed, and no office-only cell is included.
 
-**In the web UI** pick form4 / form5 under **マーカーなし白紙様式・空欄自動発見 / Unmarked blank forms** — or upload your
-own form and press **🔍 Discover blank cells** — and the **4-stage Blank-Cell Discovery Inspector** opens: the blank
-form's SHA-256, the candidate / recommended / rejected counts, and every candidate cell with its id, location, printed
-label, inferred format and limit, role and reason. Applicant cells (`✓ 申請者記入欄 / Applicant field`) are pre-checked;
-office-only cells (`✗ 事務局専用欄（除外） / Office-only — locked`) can never be checked. The memo stays editable, and
-**確定した空欄だけに外科的記入＆21項目検査を実行 / Fill confirmed cells & run 21 checks** continues into the usual
-visual diff, fields & sources, structural audit and human approval screens.
+**In the web UI** one click on **デモ4** / **デモ5** (badge **空欄自動検出**, under **マーカーなし白紙様式・空欄自動発見 /
+Unmarked blank forms**) runs discovery and shows the panel **4段階・白紙空欄の自動検出結果（申請者記入欄 vs 事務局専用欄の
+自動仕分け）**: the blank form's SHA-256, the candidate / recommended / rejected counts, and every candidate cell with its
+id, location, printed label, inferred format and limit, role and reason. Applicant cells (`✓ 申請者記入欄 / Applicant
+field`) are pre-checked; office-only cells (`✗ 事務局専用欄（除外） / Office-only — locked`) can never be checked. Right
+under the stages, an **auto-preview** shows the recommended applicant cells already filled — the rendered page, the
+checks passed, the office-only cells left empty and each value with its model badge — so the result can be inspected in
+the same click. The auto-preview can never be approved: **✅ 検出した空欄を承認して外科的差込を実行** turns the reviewer's
+selection into the run that continues to the usual visual diff, fields & sources, structural audit and human approval
+screens. An uploaded form without markers lands here automatically (or press **🔍 Discover blank cells**).
 
-Web API: `GET /api/unmarked-demos`; `POST /api/discover/demo` (built-in form4 / form5) or `POST /api/discover` (upload);
-then `POST /api/runs/from-discovery` (JSON: `discovery_id`, `confirmed_targets` = candidate ids or `"recommended"`,
-`memo_text`, `mode`, `model_tier`) or `POST /api/runs/upload` (multipart, with `discovery_id` and `confirmed_targets`).
+Web API: `GET /api/demos` lists all five demos (`unmarked: true` for form4 / form5, labels `デモ1`–`デモ5`).
+`POST /api/run-demo` runs any of them in one call — an unmarked demo returns the stored discovery plus the
+auto-preview run (`auto_preview: true`, refused by `/approve`), and with the reviewer's `discovery_id` +
+`confirmed_targets` it fills exactly those cells. Step by step: `POST /api/discover/demo` (built-in form4 / form5) or
+`POST /api/discover` (an upload, or a `demo_id`); then `POST /api/runs/from-discovery` (JSON: `discovery_id`,
+`confirmed_targets` = candidate ids or `"recommended"`, `memo_text`, `mode`, `model_tier`) or `POST /api/runs/upload`
+(multipart, with `discovery_id` and `confirmed_targets`). `GET /api/unmarked-demos` lists only the two unmarked forms.
 The discovery stays on the server: the client only names candidate ids, and any other field is refused.
 
 ![4-stage blank-cell discovery inspector: applicant cells pre-checked, office-only cells locked](docs/screenshots/06_unmarked_discovery.png)
@@ -215,8 +276,8 @@ Two **unmarked** blank forms (no markers, no `.slots.json`) show blank-cell disc
 
 | Form | File | Shows |
 |---|---|---|
-| 研究設備共用利用申請書 — 架空学術機関 | `form4_unmarked_blank.docx` | 7 applicant cells found next to printed labels, duplicate 「氏名」 → `研究代表者_氏名` / `事務担当者_氏名`, 4 office-only cells (受付番号・受付日・審査欄・事務局受付欄) excluded, vertically merged stamp continuation rejected |
-| 地域防災備蓄品貸出申請書 — 架空市 | `form5_unmarked_blank.xlsx` | 5 applicant cells in merged ranges (style ids kept), `SUM` formula cell and merged continuation rejected, 「※事務局使用欄（決裁印・受付番号）」 excluded |
+| 施設・備品一時使用許可申請書 — 架空学術機関 | `form4_unmarked_blank.docx` | 7 applicant cells found next to printed labels, duplicate 「氏名」 → `研究代表者_氏名` / `事務担当者_氏名`, 4 office-only cells (受付番号・受付日・審査欄・事務局受付欄) excluded, vertically merged stamp continuation rejected |
+| 防災備蓄品 貸出・返却管理票 — 架空市 | `form5_unmarked_blank.xlsx` | 5 applicant cells in merged ranges (style ids kept), `SUM` formula cell and merged continuation rejected, 「※事務局使用欄（決裁印・受付番号・返却確認）」 excluded |
 
 All sample forms, memos, names and organisations were written from scratch during the hackathon and are fictional.
 E-mail addresses use the reserved `example.jp` domain.
@@ -281,9 +342,15 @@ the exact bytes the verifier checked; the download re-checks the file and serves
 * It does not establish whether the memo is true; that, and the decision to submit, stays with the human reviewer.
 * Intended for general administrative, research-administration and municipal paperwork. No medical use.
 * Do not upload real personal data. The server binds to `127.0.0.1`, refuses requests whose `Host` is not local
-  (DNS rebinding) and state-changing requests from another `Origin` (cross-site forms), rejects DTDs and entity
-  declarations, limits upload and decompressed sizes (zip-bomb guard), sanitises every colour taken from a form
-  before it reaches an SVG preview, and serves the UI with a strict Content-Security-Policy.
+  (DNS rebinding) and state-changing requests from another `Origin` (cross-site forms), sanitises every colour taken
+  from a form before it reaches an SVG preview, and serves the UI with a strict Content-Security-Policy.
+* Every package passes one **archive gate** (`form_guard/ziputil.py`, `check_archive`) before anything parses it — in the
+  scanner, the writer, the verifier and the web upload: uploads are capped at 15 MB, and path traversal in ZIP entry
+  names (`..` segments, a leading `/` or backslash, drive letters), duplicate names, more than 2,000 entries, more than
+  100 MB uncompressed or an extreme compression ratio (ZIP bombs) and any DTD or entity declaration in an XML part
+  (XXE / entity expansion) are refused. A hostile filled copy therefore fails ZIP-01 before anything is decompressed.
+* During development the `PreToolUse` hook makes it impossible for an agent to change a blank template or to write a
+  secret, a personal path or a real e-mail address into the repository (see the Claude Code section above).
 * Reports only call the data fictional for an unmodified built-in demo; for your own forms the footer says the
   report is based on the supplied form and memo.
 
@@ -297,13 +364,15 @@ form_guard/
   verifier.py     ZIP / XML / layout / text / grounding / constraint checks + HITL checklist
   visual_diff.py  deterministic SVG (and optional PNG) previews, layout-drift measurement
   pipeline.py     orchestration; report.py standalone HTML; cli.py; server.py (FastAPI)
-  mcp_server.py   MCP server (stdio JSON-RPC 2.0) with the scan / discover / fill / verify tools
+  mcp_server.py   MCP server (stdio JSON-RPC 2.0): list_demos / scan / discover / fill / verify
   claude_suite.py reads .claude/ and .mcp.json for GET /api/claude-suite; measure.py measured workflow numbers
   static/         vanilla HTML/CSS/JS web UI (Japanese first, 日本語 / EN)
-.claude/          project skills, subagents and hook (settings.json); .mcp.json registers the MCP server
+.claude/          5 skills, 4 read-only subagents, two-stage hooks (settings.json); .mcp.json registers the MCP server
+scripts/          hook_guard.py — PreToolUse template + secret guard, PostToolUse compile / import / JSON check
 docs/             BUILT_WITH_CLAUDE_CODE.md, measure_workflow.py, screenshots
 samples/          blank forms (3 marked + 2 unmarked), slot specs, memos, naive regenerations (samples.py)
-tests/            pytest suite (fake + mock-transport Claude, tampering attacks, API gate, MCP over stdio)
+tests/            pytest suite (fake + mock-transport Claude, 404 fallback, tampering, archive gate, API gate,
+                  MCP over stdio, hooks)
 ```
 
 ## Limitations
@@ -404,19 +473,31 @@ python -m form_guard.cli --form samples/blank_forms/form4_unmarked_blank.docx --
 除外します。記入する欄は人が `--confirm` で確定し、白紙様式の SHA-256 が発見時と違う場合・0 件の場合・事務局欄を含む場合は
 記入前に拒否します。
 
-Web 画面では、左の「マーカーなし白紙様式・空欄自動発見」から form4（.docx）／form5（.xlsx）を選ぶか、自分の様式を
-アップロードして「🔍 マーカーなし白紙から空欄を自動発見」を押すと、4段階の空欄発見インスペクターが開きます（白紙様式の
-SHA-256、候補・推奨・除外の件数、候補ごとの ID・位置・印字ラベル・推定ルール・役割・理由）。申請者欄は最初からチェック済みで、
-事務局専用欄はロックされて選べません。メモを確認・編集して「確定した空欄だけに外科的記入＆21項目検査を実行」を押すと、
-通常の確認画面（見た目の比較・記入値と根拠・構造検査・人による最終確認）へ進みます。API：`GET /api/unmarked-demos`、
-`POST /api/discover/demo`（付属様式）・`POST /api/discover`（アップロード）、`POST /api/runs/from-discovery`。
+Web 画面では、左の「デモ4」「デモ5」（「空欄自動検出」バッジ）を1回押すだけで、空欄の発見と、推奨の申請者欄への
+仮記入（自動プレビュー）が同時に行われ、「4段階・白紙空欄の自動検出結果（申請者記入欄 vs 事務局専用欄の自動仕分け）」の
+パネルに、白紙様式の SHA-256、候補・推奨・除外の件数、候補ごとの ID・位置・印字ラベル・推定ルール・役割・理由と、
+記入結果のプレビュー（描画・検査結果・空欄のままの事務局欄・欄ごとのモデル）が並びます。申請者欄は最初からチェック済みで、
+事務局専用欄はロックされて選べません。自動プレビューは承認できず、「✅ 検出した空欄を承認して外科的差込を実行」を押すと、
+人が確定した欄だけの実行が作られ、通常の確認画面（見た目の比較・記入値と根拠・構造検査・人による最終確認）へ進みます。
+マーカーの無い様式をアップロードした場合も自動でこの画面になります。API：`GET /api/demos`（5件）、`POST /api/run-demo`、
+`POST /api/discover/demo`（付属様式）・`POST /api/discover`（アップロードまたは demo_id）、`POST /api/runs/from-discovery`。
 
 ### Claude Code との連携
 
-リポジトリには Claude Code 用の Skills（`.claude/skills/`：スキャン・外科的記入・構造検査）、サブエージェント
-（`.claude/agents/`：原文引用だけを抽出する `memo-extractor`、独立に検査し直す `form-auditor`）、編集後に構文と秘密情報・
-ローカルパス・メールアドレスを点検するフック（`.claude/settings.json`）、MCP サーバー（`.mcp.json` →
-`python -m form_guard.mcp_server`、記入は**未承認の下書き**のみ）を同梱しています。Web 画面の
+リポジトリには Claude Code 用の Skills 5 種（`.claude/skills/`：スキャン・外科的記入・構造検査・記入と検証・見た目の監査）、
+サブエージェント 4 種（`.claude/agents/`：様式を見る前にメモから原文引用だけを抜き出す `memo-extractor`（Sonnet）、
+ルールを踏まえて値を提案する `field-mapper`（Opus 5.5）、高速に構造を監査する `structure-auditor`（Sonnet）、
+敵対的に検査し直す `form-auditor`（Opus））を同梱しています。どのサブエージェントもファイル編集ツール（`Edit`/`Write`）を
+持たず、`memo-extractor` は `Read, Grep, Glob` のみ、`form-auditor` は検証コマンドのために `Read, Grep, Glob, Bash` を使い、
+その Bash も PreToolUse フックの保護下にあります。フックは 2 段構成です（`.claude/settings.json` → `scripts/hook_guard.py`）：
+**PreToolUse** は書き込む前に、白紙様式（`samples/blank_forms/*.docx・*.xlsx`）の書き込み・上書きコピー・移動・削除と、
+API キー・`ANTHROPIC_API_KEY = "sk-…"` の直書き・個人のユーザーフォルダのパス・例示用以外のメールアドレスの書き込みを
+終了コード 2（`permissionDecision: "deny"`）で阻止し、**PostToolUse** は書き込んだ後に Python の構文（`py_compile`）と
+import（1.8 秒以内）、JSON の妥当性を検査して、問題を Claude に返します。コマンドは `$`・`%`・バッククォートを含まないので、
+Git Bash・PowerShell・cmd・macOS・Linux で同じように動きます。MCP サーバー（`.mcp.json` → `python -m form_guard.mcp_server`）は
+`form_guard_list_demos`（架空デモ5件）・`form_guard_scan`・`form_guard_discover_blank_cells`・`form_guard_fill`
+（**未承認の下書き**のみ。承認状態は結果と `audit_log.json` に記録し、文書本体には書き込みません）・`form_guard_verify` の
+5 ツールを提供し、Windows の cp932 環境でも日本語を UTF-8 のまま扱います。Web 画面の
 「Claude Code 連携 · Architecture」タブ（`GET /api/claude-suite`）は、これらのファイルを読み込んで連携の流れ、この実行の
 欄ごとのモデル割り当て、ルーティング方針、計測した作業量を表示します。詳しくは
 [docs/BUILT_WITH_CLAUDE_CODE.md](docs/BUILT_WITH_CLAUDE_CODE.md) を参照してください。
@@ -426,8 +507,8 @@ SHA-256、候補・推奨・除外の件数、候補ごとの ID・位置・印�
 - **共同研究計画変更届出書（様式第3号）**：分割された run 上のマーカー、西暦→和暦（曜日つき：令和8年11月2日（月））、全角ID→半角、200字への削除のみ要約
 - **省エネ設備導入補助金 交付申請書（様式第1号）**：483万6千円→4,836,000円、印刷された上限額による再抽出、法人番号は人が入力、座標指定の空欄への記入
 - **月次設備安全点検および改善報告書（様式A-4, .xlsx）**：プルダウン・COUNTIF式・結合セルを保持、120字への要約（暫定措置「交換完了までは…」を残す）、年を推定した日付には確認フラグ
-- **研究設備共用利用申請書（マーカーなし, .docx）**：空欄を発見して申請者欄7か所を推奨、事務局欄4か所を除外、「氏名」の重複を区別
-- **地域防災備蓄品貸出申請書（マーカーなし, .xlsx）**：結合セルの空欄5か所に書式番号を保ったまま記入、SUM式と結合セルの続き、事務局使用欄を除外
+- **施設・備品一時使用許可申請書（マーカーなし, .docx）**：空欄を発見して申請者欄7か所を推奨、事務局欄4か所を除外、「氏名」の重複を区別
+- **防災備蓄品 貸出・返却管理票（マーカーなし, .xlsx）**：結合セルの空欄5か所に書式番号を保ったまま記入、SUM式と結合セルの続き、事務局使用欄（決裁印・受付番号・返却確認）を除外
 
 各デモには「生成AIで作り直した場合」を再現した比較用ファイル（`samples/broken_before/`）も付いています。
 すべてのサンプル様式とテストデータは、本ハッカソン期間中にゼロから自作した架空のものです。
@@ -437,6 +518,7 @@ SHA-256、候補・推奨・除外の件数、候補ごとの ID・位置・印�
 - 本ツールが機械的に確認するのは「各値がメモの原文引用に紐づき、数値・日付・氏名・ID・選択肢が一致すること」と「様式そのものが改変されていないこと」です。自由記述の文意やメモの内容が事実かどうかの確認と、提出の最終判断は人が行います。
 - `python -m form_guard.cli --verify 原本 記入済み` は構造と記入ルールを常に検査し、`--memo` か同じ SHA-256 の `audit_log.json` がある場合だけ根拠も検査します（無い場合は「根拠は未検証」と表示します）。
 - 一般事務・研究事務・自治体手続き向けです。医療用途には使いません。
-- 実在の個人情報はアップロードしないでください。
+- 実在の個人情報はアップロードしないでください。アップロードは 15 MB までで、ZIP のパストラバーサル、2,000 を超えるエントリ、
+  展開後 100 MB 超や極端な圧縮率（ZIP 爆弾）、XML の DTD・実体宣言（XXE）は、ファイルを解析する前に拒否します。
 
 ライセンス：MIT（[LICENSE](LICENSE) を参照）。

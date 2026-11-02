@@ -663,7 +663,10 @@ def test_api_upload_validation_and_static_ui(api, samples_dir):
     assert up.status_code == 200 and up.json()["report"]["overall_status"] == "PASS"
     assert "naive" not in up.json()["previews"]
     demos = api.get("/api/demos").json()
-    assert [d["id"] for d in demos] == ["form1", "form2", "form3"] and "memo_text" in demos[0]
+    assert [d["id"] for d in demos] == ["form1", "form2", "form3", "form4", "form5"] and "memo_text" in demos[0]
+    assert [d["label"] for d in demos] == ["デモ1", "デモ2", "デモ3", "デモ4", "デモ5"]
+    assert [d["unmarked"] for d in demos] == [False, False, False, True, True]
+    assert [d["badge"] for d in demos] == ["", "", "", "空欄自動検出", "空欄自動検出"]
 
 
 def test_live_engine_through_the_real_anthropic_sdk_with_a_mock_transport(samples_dir):
@@ -1843,9 +1846,14 @@ def test_p01_mcp_server_speaks_json_rpc_over_stdio_in_both_framings(samples_dir,
         send({"jsonrpc": "2.0", "method": "notifications/initialized"})  # a notification gets no answer
         send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, framed=True)
         tools = recv(framed=True)["result"]["tools"]
-        assert [t["name"] for t in tools] == ["form_guard_scan", "form_guard_discover_blank_cells", "form_guard_fill",
-                                              "form_guard_verify"]
-        assert all(t["inputSchema"]["type"] == "object" and t["inputSchema"]["required"] for t in tools)
+        assert [t["name"] for t in tools] == ["form_guard_list_demos", "form_guard_scan", "form_guard_discover_blank_cells",
+                                              "form_guard_fill", "form_guard_verify"]
+        assert all(t["inputSchema"]["type"] == "object" and t["inputSchema"]["additionalProperties"] is False for t in tools)
+        assert all(t["inputSchema"]["required"] for t in tools if t["name"] != "form_guard_list_demos")
+        demos = call(21, "form_guard_list_demos", {})["structuredContent"]
+        assert [(d["id"], d["unmarked"]) for d in demos["demos"]] == [
+            ("form1", False), ("form2", False), ("form3", False), ("form4", True), ("form5", True)]
+        assert all(d["files_present"] and (root / d["form_path"]).is_file() for d in demos["demos"])
         scanned = call(3, "form_guard_scan", {"form_path": "samples/blank_forms/form2_municipal_equipment_subsidy.docx"})
         assert not scanned["isError"] and scanned["structuredContent"]["slot_count"] == 11
         assert json.loads(scanned["content"][0]["text"])["file_type"] == "docx"
@@ -1960,7 +1968,7 @@ def test_p02_discover_blank_cells_on_the_unmarked_docx(samples_dir):
     assert by["申請日"]["required_format"] == "wareki_date" and by["利用希望期間"]["required_format"] == "wareki_period"
     assert by["利用目的"]["max_chars"] == 100 and by["申請者氏名"]["required_format"] == "person_name"
     assert by["事務局受付欄"]["label_direction"] == "above"  # the stamp cell sits under its printed header
-    assert "利用設備" not in by  # pre-printed value: not empty, never a candidate
+    assert "使用施設・備品" not in by  # pre-printed value: not empty, never a candidate
     (rej,) = d["rejected"]
     assert "vertically merged continuation" in rej["reason"] and (rej["row"], rej["col"]) == (14, 3)
 
@@ -2024,7 +2032,7 @@ def test_p02_human_gate_refuses_changed_forms_and_zero_or_office_only_confirmati
     with pytest.raises(ValueError, match="unknown candidate id"):
         build_confirmed_slot_spec(d, ["c99"], p["form"])
     changed = tmp_path / "form4_changed.docx"
-    surgical_rewrite(p["form"], changed, "word/document.xml", lambda b: b.replace("利用設備".encode(), "使用設備".encode()))
+    surgical_rewrite(p["form"], changed, "word/document.xml", lambda b: b.replace("使用施設・備品".encode(), "使用施設・設備".encode()))
     with pytest.raises(ValueError, match="blank form changed after discovery — re-run discovery"):
         build_confirmed_slot_spec(d, rec, changed)
     spec = build_confirmed_slot_spec(d, rec, p["form"])
@@ -2105,7 +2113,7 @@ def test_p02_api_discover_then_upload_confirmed_targets(api, samples_dir, tmp_pa
     office_res = upload(json.dumps(rec + office[:1]))
     assert office_res.status_code == 422 and "office/administrative use only" in office_res.json()["detail"]
     changed = tmp_path / "changed.docx"
-    surgical_rewrite(p["form"], changed, "word/document.xml", lambda b: b.replace("利用設備".encode(), "使用設備".encode()))
+    surgical_rewrite(p["form"], changed, "word/document.xml", lambda b: b.replace("使用施設・備品".encode(), "使用施設・設備".encode()))
     stale = upload(json.dumps(rec), data=changed.read_bytes())
     assert stale.status_code == 422 and "blank form changed after discovery" in stale.json()["detail"]
     assert upload(json.dumps(rec), discovery_id="0" * 24).status_code == 404
@@ -2163,67 +2171,6 @@ def test_p01_measured_workflow_script_reproduces_the_table(samples_dir, tmp_path
     doc = (ROOT / "docs" / "BUILT_WITH_CLAUDE_CODE.md").read_text(encoding="utf-8")
     for line in table.splitlines()[2:]:  # the counted columns in the doc match a fresh run (timings may vary)
         assert re.sub(r"\| [\d,]+ ms \|", "| ms |", line) in re.sub(r"\| [\d,]+ ms \|", "| ms |", doc), line
-
-
-def _frontmatter(path: Path) -> dict[str, str]:
-    text = path.read_text(encoding="utf-8")
-    assert text.startswith("---\n"), path
-    head = text.split("---\n", 2)[1]
-    return dict(line.split(": ", 1) for line in head.strip().splitlines())
-
-
-def test_p01_project_skills_subagents_hook_and_mcp_registration():
-    claude = ROOT / ".claude"
-    commands = {"form-scan": ["--scan", "--discover-blanks"], "surgical-fill": ["--form", "--memo", "--confirm"],
-                "structural-audit": ["--verify", "VIS-01", "HITL"]}
-    for name, needles in commands.items():
-        path = claude / "skills" / name / "SKILL.md"
-        fm = _frontmatter(path)
-        assert fm["name"] == name and len(fm["description"]) > 80, name
-        body = path.read_text(encoding="utf-8")
-        assert all(n in body for n in needles), name
-    agents = {p.stem: _frontmatter(p) for p in (claude / "agents").glob("*.md")}
-    assert agents["memo-extractor"]["name"] == "memo-extractor" and agents["memo-extractor"]["tools"] == "Read, Grep, Glob"
-    assert agents["form-auditor"]["name"] == "form-auditor" and agents["form-auditor"]["tools"] == "Read, Grep, Glob, Bash"
-    assert "never guesses" in agents["memo-extractor"]["description"].lower()
-    assert "form_guard.verifier" in agents["form-auditor"]["description"]
-    settings = json.loads((claude / "settings.json").read_text(encoding="utf-8"))
-    (entry,) = settings["hooks"]["PostToolUse"]
-    assert entry["matcher"] == "Edit|Write" and entry["hooks"][0]["type"] == "command"
-    assert entry["hooks"][0]["command"].startswith('python -c "') and entry["hooks"][0]["command"].endswith('"')
-    blob = json.dumps(settings)
-    assert "bypassPermissions" not in blob and "dangerously" not in blob
-    server = json.loads((ROOT / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]["form-guard"]
-    assert server["type"] == "stdio" and server["command"] == "python" and server["args"] == ["-m", "form_guard.mcp_server"]
-
-
-def test_p01_post_edit_hook_checks_syntax_and_hygiene_in_the_platform_shell(tmp_path):
-    settings = json.loads((ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
-    command = settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
-    for bad in ("$", "%", "`"):
-        assert bad not in command  # no shell expansion in bash/sh or cmd.exe
-    command = command.replace("python", f'"{sys.executable}"', 1)
-    bs = chr(92)
-    files = {
-        "bad.py": ("def f(:\n    pass\n", 2, "syntax"),
-        "good.py": ("x = 1\n", 0, ""),
-        "bad.json": ("{not json", 2, "syntax"),
-        "secret.md": ("token " + "sk-" + "ant-" + "A" * 24 + "\n", 2, "Anthropic API key"),
-        "assign.py": ("api" + "_key = " + '"' + "x" * 12 + '"' + "\n", 2, "literal API key assignment"),
-        "path.md": ("C:" + bs + "Users" + bs + "someone" + bs + "x\n", 2, "local user-profile path"),
-        "mail.md": ("contact: someone@mail.invalid\n", 2, "e-mail address"),  # reserved TLD, never a real address
-        "example.md": ("contact: info@example.jp\n", 0, ""),
-    }
-    for name, (text, _, _) in files.items():
-        (tmp_path / name).write_text(text, encoding="utf-8")
-    for name, (_, code, needle) in {**files, "missing.py": ("", 0, "")}.items():
-        payload = json.dumps({"tool_name": "Write", "tool_input": {"file_path": str(tmp_path / name)}}).encode()
-        r = subprocess.run(command, shell=True, input=payload, capture_output=True, timeout=60)
-        assert r.returncode == code, (name, r.stderr)
-        assert needle in r.stderr.decode("utf-8", "replace"), name
-        assert str(tmp_path) not in r.stderr.decode("utf-8", "replace")  # only the file name is reported
-    r = subprocess.run(command, shell=True, input=b"not json", capture_output=True, timeout=60)
-    assert r.returncode not in (0, 2)  # a broken payload is a non-blocking error, never a block
 
 
 # ===================================================================== Phase 3
@@ -2438,20 +2385,25 @@ def test_p3_3_claude_suite_endpoint_reads_the_repository_assets(api, tmp_path):
     from form_guard.mcp_server import TOOL_NAMES
 
     s = api.get("/api/claude-suite").json()
-    assert [x["name"] for x in s["skills"]] == ["form-scan", "structural-audit", "surgical-fill"]
+    assert [x["name"] for x in s["skills"]] == list(sorted(SKILLS))
     for x in s["skills"] + s["agents"]:
-        assert x["description"] == _frontmatter(ROOT / x["path"])["description"], x["path"]  # read from the files
+        assert x["description"] == frontmatter(ROOT / x["path"])[0]["description"], x["path"]  # read from the files
     agents = {a["name"]: a for a in s["agents"]}
-    assert (agents["memo-extractor"]["model"], agents["memo-extractor"]["tools"]) == ("sonnet", ["Read", "Grep", "Glob"])
-    assert (agents["form-auditor"]["model"], agents["form-auditor"]["tools"]) == ("opus", ["Read", "Grep", "Glob", "Bash"])
-    (hook,) = s["settings"]["hooks"]
-    assert (hook["event"], hook["matcher"], hook["type"], hook["runner"], hook["timeout"]) == (
-        "PostToolUse", "Edit|Write", "command", "python", 30)
-    assert [c["en"] for c in hook["checks"]] == [
-        "Python syntax (.py)", "JSON validity (.json)", "Anthropic API key pattern", "literal API key assignment",
-        "local user-profile paths", "e-mail addresses outside the reserved example domains"]
-    assert hook["feeds_back_to_claude"] and not s["settings"]["bypass_permissions"]
+    assert {name: (a["model"], a["tools"]) for name, a in agents.items()} == {k: (m, t) for k, (m, t) in AGENTS.items()}
+    pre, post = s["settings"]["hooks"]
+    assert (pre["event"], pre["stage"], pre["runner"], pre["script"], pre["timeout"]) == (
+        "PreToolUse", "pre-tool-use", "python", "scripts/hook_guard.py", 10)
+    assert set(pre["matcher"].split("|")) == {"Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "PowerShell"}
+    assert [c["en"].split(" (")[0].split(":")[0] for c in pre["checks"]] == [
+        "blank-template guard", "Anthropic API key pattern", "literal API key assignment", "local user-profile paths",
+        "e-mail addresses outside the reserved example domains"]
+    assert (post["event"], post["stage"], post["matcher"]) == ("PostToolUse", "post-tool-use", "Write|Edit|MultiEdit")
+    assert [c["en"].split(" (")[0] for c in post["checks"]] == [
+        "Python syntax", "JSON validity", "hygiene re-scan of the written file"]
+    assert pre["feeds_back_to_claude"] and post["feeds_back_to_claude"] and not s["settings"]["bypass_permissions"]
+    assert "exit code 2" in pre["when"]["en"] and "decision block" in post["when"]["en"]
     assert s["settings"]["deny"] == ["Read(./.env)", "Read(./.env.*)"]
+    assert s["settings"]["env"] == {"CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR": "1"}
     assert s["mcp"]["servers"] == [{"name": "form-guard", "type": "stdio", "command": "python",
                                     "args": ["-m", "form_guard.mcp_server"]}]
     assert [t["name"] for t in s["mcp"]["tools"]] == TOOL_NAMES
@@ -2479,7 +2431,9 @@ def test_p3_4_web_ui_ships_the_inspector_tier_selector_claude_tab_walkthrough_an
                    'data-tab="claude"', 'data-bi="Claude Code 連携|Claude Code · Architecture"', 'id="tab-claude"',
                    'id="unmarkedList"', "マーカーなし白紙様式・空欄自動発見|Unmarked blank forms", 'id="discoverBtn"',
                    "🔍 マーカーなし白紙から空欄を自動発見|🔍 Discover blank cells", 'id="discoveryView"', 'id="candRows"',
-                   'id="discMemo"', "確定した空欄だけに外科的記入＆21項目検査を実行|Fill confirmed cells &amp; run 21 checks",
+                   'id="discMemo"', "✅ 検出した空欄を承認して外科的差込を実行|✅ Approve the detected cells &amp; run the surgical fill",
+                   'id="whyBanner"', "なぜ Form-Guard か？（解決する現場課題）|Why Form-Guard?", 'id="discPreview"',
+                   "4段階・白紙空欄の自動検出結果（申請者記入欄 vs 事務局専用欄の自動仕分け）",
                    "🎬 審査員向け 90秒ガイドツアー|🎬 Judge Quick Walkthrough", "誰の課題か|Whose problem",
                    "どんな課題か|What problem", "どう解決するか|How Form-Guard solves it"):
         assert needle in html, needle
@@ -2487,7 +2441,7 @@ def test_p3_4_web_ui_ships_the_inspector_tier_selector_claude_tab_walkthrough_an
     for label in ("課題と視覚比較（Visual Diff）", "マーカーなし白紙からの空欄発見", "原文根拠ハイライトと推測拒否",
                   "Claude 活用・モデル使い分け", "21項目構造証明＆人間承認ロック"):
         assert label in html, label
-    for endpoint in ('"/api/unmarked-demos"', '"/api/discover/demo"', '"/api/runs/from-discovery"', '"/api/claude-suite"',
+    for endpoint in ('"/api/demos"', '"/api/run-demo"', '"/api/runs/from-discovery"', '"/api/claude-suite"',
                      '"/api/discover"', '"/api/runs/upload"', '"/api/runs"'):
         assert endpoint in js, endpoint
     assert js.count("model_tier: tier()") == 3 and js.count('fd.append("model_tier", tier())') == 2  # every run/discovery
@@ -2522,3 +2476,671 @@ def test_p3_5_readme_and_docs_answer_impact_continued_use_and_match_the_measured
                                 str(ROOT / "tests")], capture_output=True, text=True, cwd=ROOT, timeout=300)
     n = int(re.search(r"(\d+) tests? collected", collected.stdout).group(1))
     assert f"pytest -v                                # {n} tests" in readme, n  # the README states the real count
+
+
+# ============================================ Claude Code assets: skills, subagents, two-stage hooks, MCP
+
+HOOK = ROOT / "scripts" / "hook_guard.py"
+TEMPLATE = "samples/blank_forms/form1_research_plan_change.docx"
+SKILLS = ("form-scan", "surgical-fill", "structural-audit", "form-fill-verify", "visual-diff-audit")
+AGENTS = {"memo-extractor": ("sonnet", ["Read", "Grep", "Glob"]),
+          "form-auditor": ("opus", ["Read", "Grep", "Glob", "Bash"]),
+          "field-mapper": (MODEL_OPUS, ["Read", "Glob", "Grep", "Bash"]),
+          "structure-auditor": ("sonnet", ["Read", "Glob", "Grep", "Bash"])}
+_BS = chr(92)
+_KEY = "sk-" + "ant-api03-" + "A" * 24  # key-shaped, assembled at run time: never a literal anywhere in the repo
+
+
+def frontmatter(path: Path) -> tuple[dict, str]:
+    """Parse YAML front matter strictly enough to catch what YAML itself would reject."""
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith("---\n"), path
+    head, body = text[4:].split("\n---\n", 1)
+    meta = {}
+    for line in head.splitlines():
+        key, sep, value = line.partition(": ")
+        assert sep and re.fullmatch(r"[a-z][a-z-]*", key), f"{path.name}: bad front-matter line {line!r}"
+        value = value.strip()
+        if value.startswith('"'):
+            assert value.endswith('"') and '"' not in value[1:-1].replace('\\"', ""), f"{path.name}: {key}"
+            value = value[1:-1].replace('\\"', '"')
+        else:  # a plain scalar may not contain ": " / " #" or start with a YAML indicator
+            assert ": " not in value and " #" not in value and value[:1] not in set("[]{}&*!|>'%@`#,?-"), key
+        meta[key] = value
+    try:
+        import yaml
+    except ImportError:
+        pass
+    else:
+        assert yaml.safe_load(head) == meta
+    return meta, body
+
+
+def test_project_skills_have_valid_frontmatter_and_only_real_cli_flags(capsys):
+    from form_guard.cli import main
+
+    with pytest.raises(SystemExit):
+        main(["--help"])
+    cli_help = capsys.readouterr().out
+    bodies = {}
+    for name in SKILLS:
+        meta, body = frontmatter(ROOT / ".claude" / "skills" / name / "SKILL.md")
+        assert meta["name"] == name and len(meta["description"]) >= 150 and "Use when" in meta["description"], name
+        bodies[name] = body
+        for line in re.findall(r"python -m form_guard\.cli[^\n`]*", body):  # docs and CLI must not drift apart
+            for flag in re.findall(r"(?<![\w-])--[a-z][a-z-]*", line):
+                assert flag in cli_help, f"{name}: {flag} is not a CLI flag"
+    for word in ("--scan", "--json", "--slot-spec", "--discover-blanks", "form_guard_list_demos", "office_only"):
+        assert word in bodies["form-scan"], word
+    for word in ("--form", "--memo", "--confirm", "memo-extractor", "field-mapper", "UNAPPROVED_DRAFT_REQUIRES_HUMAN_SIGN_OFF"):
+        assert word in bodies["surgical-fill"], word
+    for word in ("--verify", "VIS-01", "HITL", "structure-auditor", "form-auditor", "ZIP bomb"):
+        assert word in bodies["structural-audit"], word
+    for word in ("--form", "--verify", "PASS", "NEEDS_HUMAN_INPUT", "FAIL", "never", "--model-tiering", "MODEL_FALLBACK_CHAIN"):
+        assert word in bodies["form-fill-verify"], word
+    for word in ("VIS-01", "--png", "--naive", "hitl_checklist", "overflow_count", "broken_naive_ai_form1.docx"):
+        assert word in bodies["visual-diff-audit"], word
+    for path in re.findall(r"samples/[\w/]+\.(?:docx|xlsx|txt)", "".join(bodies.values())):
+        assert (ROOT / path).is_file(), path  # every sample a skill names exists
+
+
+def test_subagents_are_read_only_and_assign_models_on_purpose():
+    found = {p.stem for p in (ROOT / ".claude" / "agents").glob("*.md")}
+    assert found == set(AGENTS)
+    metas = {}
+    for name, (model, tools) in AGENTS.items():
+        meta, body = frontmatter(ROOT / ".claude" / "agents" / f"{name}.md")
+        assert meta["name"] == name and meta["model"] == model and len(meta["description"]) >= 150, name
+        assert [t.strip() for t in meta["tools"].split(",")] == tools, name
+        assert not {"Edit", "Write", "MultiEdit", "NotebookEdit"} & set(tools), name  # no file-editing tool anywhere
+        metas[name] = (meta, body)
+    assert "never guesses" in metas["memo-extractor"][0]["description"].lower()
+    assert "BEFORE" in metas["memo-extractor"][0]["description"] and "Bash" not in AGENTS["memo-extractor"][1]
+    assert "form_guard.verifier" in metas["form-auditor"][0]["description"]
+    assert "no file-editing tools" in metas["form-auditor"][0]["description"].lower()
+    for word in ("--verify", "zipfile", "PreToolUse", "READY FOR HUMAN SIGN-OFF", "not verified"):
+        assert word in metas["form-auditor"][1], word
+    for word in ("needs_human_input", "verbatim", "和暦", "上限1,000,000円", "ただし", "--scan <form> --json"):
+        assert word in metas["field-mapper"][1], word
+    for word in ("--verify", "entry_hashes", "patches", "xml:space", "hitl_checklist", "not verified", "Read-only"):
+        assert word in metas["structure-auditor"][1], word
+
+
+def test_settings_register_two_stage_hooks_without_shell_expansion():
+    cfg = json.loads((ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    (pre,), (post,) = cfg["hooks"]["PreToolUse"], cfg["hooks"]["PostToolUse"]
+    assert set(pre["matcher"].split("|")) == {"Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "PowerShell"}
+    assert set(post["matcher"].split("|")) == {"Write", "Edit", "MultiEdit"}
+    for entry, event in ((pre, "pre-tool-use"), (post, "post-tool-use")):
+        (h,) = entry["hooks"]
+        assert h["type"] == "command" and h["command"] == f"python scripts/hook_guard.py {event}" and h["timeout"] <= 15
+        assert not set(h["command"]) & set("$%`")  # identical in Git Bash, sh, PowerShell and cmd.exe
+    # hooks run in Claude's current directory: keep it at the project root so the relative script path resolves
+    assert cfg["env"] == {"CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR": "1"}
+    assert cfg["permissions"] == {"deny": ["Read(./.env)", "Read(./.env.*)"]}  # never widened
+    blob = json.dumps(cfg)
+    assert "bypassPermissions" not in blob and "dangerously" not in blob and "allow" not in cfg["permissions"]
+    server = json.loads((ROOT / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]["form-guard"]
+    assert server["type"] == "stdio" and server["command"] == "python" and server["args"] == ["-m", "form_guard.mcp_server"]
+    assert server["env"] == {"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
+
+
+def _hook(event, tool, tool_input, env=None, cwd=None, raw=None):
+    base = {k: v for k, v in os.environ.items() if k not in ("FORM_GUARD_ALLOW_TEMPLATE_WRITE", "CLAUDE_PROJECT_DIR")}
+    payload = {"hook_event_name": event, "tool_name": tool, "tool_input": tool_input, "cwd": str(cwd or ROOT)}
+    data = raw if raw is not None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    return subprocess.run([sys.executable, str(HOOK), "pre-tool-use" if event == "PreToolUse" else "post-tool-use"],
+                          input=data, capture_output=True, timeout=60, env={**base, **(env or {})})
+
+
+def _denied(proc) -> str:
+    """Refused before the tool ran: exit code 2 and a PreToolUse deny decision (stdout) plus the reason (stderr)."""
+    assert proc.returncode == 2, proc.stderr.decode("utf-8", "replace")
+    out = json.loads(proc.stdout)
+    hso = out["hookSpecificOutput"]
+    assert hso["hookEventName"] == "PreToolUse" and hso["permissionDecision"] == "deny"
+    assert out["decision"] == "block" and out["reason"] == hso["permissionDecisionReason"]
+    return hso["permissionDecisionReason"] + "\n" + proc.stderr.decode("utf-8")
+
+
+@pytest.mark.parametrize("tool,tool_input", [
+    ("Write", {"file_path": TEMPLATE}),
+    ("Edit", {"file_path": str(ROOT / "samples" / "blank_forms" / "form3_facility_safety_inspection.xlsx")}),
+    ("MultiEdit", {"file_path": "samples\\blank_forms\\form2_municipal_equipment_subsidy.docx"}),
+    ("NotebookEdit", {"notebook_path": "samples/blank_forms/form5_unmarked_blank.xlsx", "new_source": "x"}),
+    ("Bash", {"command": f"cp output/filled.docx {TEMPLATE}"}),
+    ("Bash", {"command": "cp output/*.docx samples/blank_forms/"}),
+    ("Bash", {"command": f"echo broken > {TEMPLATE}"}),
+    ("Bash", {"command": f"ls && cat notes.txt >> '{TEMPLATE}' 2>&1"}),
+    ("Bash", {"command": f"rm -f {TEMPLATE}"}),
+    ("Bash", {"command": f"rm {TEMPLATE} --generate-samples"}),  # the generator exemption needs the generator itself
+    ("Bash", {"command": f"mv {TEMPLATE} /tmp/"}),
+    ("Bash", {"command": f"python -c \"import docx; d = docx.Document('{TEMPLATE}'); d.save('{TEMPLATE}')\""}),
+    ("Bash", {"command": f"python - <<'EOF'\nfrom pathlib import Path\nPath('{TEMPLATE}').write_bytes(b'')\nEOF"}),
+    ("Bash", {"command": f"sed -i 's/x/y/' {TEMPLATE}"}),
+    ("Bash", {"command": f"zip {TEMPLATE} word/document.xml"}),
+    ("PowerShell", {"command": "Copy-Item -Path output\\x.xlsx -Destination samples\\blank_forms\\"}),
+    ("PowerShell", {"command": "Set-Content -Path samples\\blank_forms\\form1_research_plan_change.docx -Value x"}),
+    ("PowerShell", {"command": "Remove-Item samples/blank_forms/form4_unmarked_blank.docx"}),
+])
+def test_pre_tool_use_hook_blocks_blank_template_mutation_before_execution(tool, tool_input):
+    reason = _denied(_hook("PreToolUse", tool, tool_input))
+    assert "BLOCKED by the Form-Guard template guard" in reason
+    assert "--generate-samples" in reason and "--out-dir" in reason  # tells the agent what to do instead
+
+
+@pytest.mark.parametrize("tool,tool_input", [
+    ("Write", {"file_path": "output/filled_form1.docx"}),
+    ("Edit", {"file_path": "form_guard/mapper.py", "old_string": "a", "new_string": "b"}),
+    ("Edit", {"file_path": "samples/blank_forms/form1_research_plan_change.slots.json", "new_string": "{}"}),
+    ("Bash", {"command": f"python -m form_guard.cli --form {TEMPLATE} --memo samples/memos/memo1_research_change.txt "
+                         f"--out-dir output/run1"}),
+    ("Bash", {"command": f"cp {TEMPLATE} output/copy.docx && python -m form_guard.cli --scan {TEMPLATE}"}),
+    ("Bash", {"command": f"unzip -l {TEMPLATE} && git diff --stat {TEMPLATE}"}),
+    ("Bash", {"command": "python -m form_guard.cli --generate-samples"}),
+    ("Bash", {"command": 'git grep -n "sk-' + 'ant-" && git log --all -p -S "sk-' + 'ant-"'}),  # the pre-push check itself
+    ("Bash", {"command": f"python -c \"import docx; d = docx.Document('{TEMPLATE}'); d.save('output/x.docx')\""}),
+    ("PowerShell", {"command": "Get-Content samples\\blank_forms\\form1_research_plan_change.slots.json"}),
+    ("Read", {"file_path": TEMPLATE}),
+])
+def test_pre_tool_use_hook_allows_normal_work(tool, tool_input):
+    proc = _hook("PreToolUse", tool, tool_input)
+    assert proc.returncode == 0 and proc.stdout == b"" and proc.stderr == b""
+
+
+def test_template_guard_override_comes_from_the_hook_environment_only():
+    inline = {"command": f"FORM_GUARD_ALLOW_TEMPLATE_WRITE=1 cp output/x.docx {TEMPLATE}"}
+    _denied(_hook("PreToolUse", "Bash", inline))  # an agent cannot switch the guard off inline
+    allowed = _hook("PreToolUse", "Write", {"file_path": TEMPLATE}, env={"FORM_GUARD_ALLOW_TEMPLATE_WRITE": "1"})
+    assert allowed.returncode == 0 and b"allowed by FORM_GUARD_ALLOW_TEMPLATE_WRITE=1" in allowed.stderr
+
+
+def test_pre_tool_use_hook_blocks_secrets_paths_and_emails_before_anything_is_written(tmp_path):
+    target = ROOT / "output" / "hook_probe" / "notes.md"
+    user = "taro" + "yamada"
+    bad = {
+        "Anthropic API key": ("Write", {"file_path": str(target), "content": "token " + _KEY}),
+        "literal API key assignment": ("Write", {"file_path": str(ROOT / "output" / "hook_probe" / "cfg.py"),
+                                                 "content": "ANTHROPIC_API_KEY = " + '"sk-' + "abc123456789" + '"\n'}),
+        "local user-profile path": ("Edit", {"file_path": str(target), "old_string": "x",
+                                             "new_string": "C:" + _BS + "Users" + _BS + user + _BS + "notes.txt"}),
+        "local user-profile path (POSIX)": ("MultiEdit", {"file_path": str(target), "edits": [
+            {"old_string": "a", "new_string": "/home/" + user + "/form-guard"}]}),
+        "local user-profile path (Git Bash)": ("Edit", {"file_path": str(target), "old_string": "x",
+                                                        "new_string": "/c/Users/" + user + "/form-guard"}),
+        "e-mail address": ("Write", {"file_path": str(target), "content": "連絡先: " + user + "@" + "corp-mail.co.jp"}),
+        "notebook key": ("NotebookEdit", {"notebook_path": str(ROOT / "output" / "hook_probe" / "n.ipynb"),
+                                          "new_source": "key = '" + _KEY + "'"}),
+    }
+    for label, (tool, ti) in bad.items():
+        reason = _denied(_hook("PreToolUse", tool, ti))
+        assert "secret & hygiene guard" in reason and "before writing" in reason, label
+        assert _KEY not in reason and user not in reason and "corp-mail" not in reason, label  # never echoes the value
+    assert not target.exists() and not (ROOT / "output" / "hook_probe").exists()  # refused before the write
+    shell = _denied(_hook("PreToolUse", "Bash", {"command": "echo " + _KEY + " > key.txt"}))
+    assert "Anthropic API key" in shell and _KEY not in shell
+    fine = [
+        ("Write", {"file_path": str(target), "content": "C:" + _BS + "Users" + _BS + "<user>" + _BS + "x, /home/<user>/y, "
+                                                        "%USERPROFILE%, info@example.jp, noreply@anthropic.com"}),
+        ("Write", {"file_path": str(ROOT / ".env"), "content": "ANTHROPIC_API_KEY=" + _KEY}),  # where the key belongs
+        ("Write", {"file_path": str(tmp_path / "outside.md"), "content": "token " + _KEY}),  # not a project file
+        ("Edit", {"file_path": str(target), "old_string": "a", "new_string": "Co-Authored-By: Claude "
+                                                                            "<noreply@anthropic.com>"}),
+    ]
+    for tool, ti in fine:
+        proc = _hook("PreToolUse", tool, ti)
+        assert proc.returncode == 0 and proc.stdout == b"", (tool, proc.stderr)
+
+
+def test_post_tool_use_hook_reports_syntax_import_json_and_hygiene_problems(tmp_path):
+    env = {"FORM_GUARD_HOOK_PYTHON": sys.executable, "CLAUDE_PROJECT_DIR": str(tmp_path)}
+    started = time.perf_counter()
+    ok = _hook("PostToolUse", "Edit", {"file_path": str(ROOT / "form_guard" / "mapper.py")}, env)
+    elapsed = time.perf_counter() - started
+    msg = json.loads(ok.stdout)["systemMessage"]
+    assert ok.returncode == 0 and "py_compile OK" in msg and "import form_guard.mapper OK" in msg and elapsed < 2.5
+    pkg = tmp_path / "form_guard"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    files = {
+        "form_guard/broken.py": ("def f(:\n    pass\n", "does not compile"),
+        "form_guard/boom.py": ("value = undefined_name\n", "NameError"),
+        "settings.json": ("{not json", "not valid JSON"),
+        "bom.json": ("\ufeff{}", "UTF-8 BOM"),
+        "secret.md": ("token " + _KEY + "\n", "Anthropic API key"),
+        "path.md": ("C:" + _BS + "Users" + _BS + "someone" + _BS + "x\n", "local user-profile path"),
+        "mail.md": ("contact: someone" + "@" + "mail.invalid\n", "e-mail address"),
+    }
+    for rel, (text, needle) in files.items():
+        (tmp_path / rel).write_text(text, encoding="utf-8")
+        res = json.loads(_hook("PostToolUse", "Write", {"file_path": str(tmp_path / rel)}, env).stdout)
+        assert res["decision"] == "block" and needle in res["reason"], rel
+        assert str(tmp_path) not in res["reason"]  # paths are shown relative to the project
+    (pkg / "optional.py").write_text("import surely_not_installed_pkg_xyz\n", encoding="utf-8")
+    optional = json.loads(_hook("PostToolUse", "Edit", {"file_path": str(pkg / "optional.py")}, env).stdout)
+    assert "decision" not in optional and "skipped" in optional["systemMessage"]  # a missing extra never blocks
+    (tmp_path / "good.json").write_text('{"a": "日本語"}', encoding="utf-8")
+    good = json.loads(_hook("PostToolUse", "Write", {"file_path": str(tmp_path / "good.json")}, env).stdout)
+    assert "JSON OK" in good["systemMessage"] and "hygiene OK" in good["systemMessage"]
+    (tmp_path / "example.md").write_text("contact: info@example.jp\n", encoding="utf-8")
+    quiet = _hook("PostToolUse", "Write", {"file_path": str(tmp_path / "example.md")}, env)
+    assert quiet.returncode == 0 and quiet.stdout == b""  # a clean non-code file produces no output
+    for event in ("PreToolUse", "PostToolUse"):  # an odd payload never blocks the session
+        for raw in (b"not json", b"[]", b"", b"\xef\xbb\xbf{}"):
+            assert _hook(event, "Write", {}, raw=raw).returncode == 0
+    assert subprocess.run([sys.executable, str(HOOK)], input=b"{}", capture_output=True, timeout=60).returncode == 1
+
+
+def test_hook_guard_is_utf8_safe_on_a_cp932_console(tmp_path):
+    env = {"PYTHONIOENCODING": "cp932", "PYTHONUTF8": "0"}  # a Japanese Windows console
+    proc = _hook("PreToolUse", "Write", {"file_path": "samples/blank_forms/様式①.docx", "content": "記入値 ✓ 🧪"}, env)
+    reason = _denied(proc)
+    assert "様式①.docx" in reason and "BLOCKED" in reason  # UTF-8 bytes, nothing mangled or crashed
+    jp = tmp_path / "メモ.md"
+    jp.write_text("申請日：令和8年11月2日（月） ✓\n", encoding="utf-8")
+    res = _hook("PostToolUse", "Write", {"file_path": str(jp)}, {**env, "CLAUDE_PROJECT_DIR": str(tmp_path)})
+    assert res.returncode == 0 and res.stdout == b"" and res.stderr == b""
+
+
+def test_settings_hook_commands_run_in_the_platform_shell(tmp_path):
+    """The exact command strings from settings.json, through the platform's shell (cmd.exe / sh), from the root."""
+    cfg = json.loads((ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    pre = cfg["hooks"]["PreToolUse"][0]["hooks"][0]["command"].replace("python", f'"{sys.executable}"', 1)
+    post = cfg["hooks"]["PostToolUse"][0]["hooks"][0]["command"].replace("python", f'"{sys.executable}"', 1)
+    env = {k: v for k, v in os.environ.items() if k != "FORM_GUARD_ALLOW_TEMPLATE_WRITE"}
+    payload = json.dumps({"tool_name": "Write", "tool_input": {"file_path": TEMPLATE}}).encode()
+    r = subprocess.run(pre, shell=True, input=payload, capture_output=True, cwd=ROOT, env=env, timeout=60)
+    assert r.returncode == 2 and json.loads(r.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
+    (tmp_path / "bad.py").write_text("def f(:\n", encoding="utf-8")
+    payload = json.dumps({"tool_name": "Write", "tool_input": {"file_path": str(tmp_path / "bad.py")}}).encode()
+    r = subprocess.run(post, shell=True, input=payload, capture_output=True, cwd=ROOT, timeout=60,
+                       env={**env, "CLAUDE_PROJECT_DIR": str(tmp_path)})
+    assert r.returncode == 0 and json.loads(r.stdout)["decision"] == "block"
+
+
+# --------------------------------------------- MCP: list_demos, UTF-8 over stdio, protocol stream isolation
+
+
+def test_mcp_list_demos_and_japanese_payloads_over_real_stdio_on_a_cp932_console(samples_dir, tmp_path):
+    root = _mcp_root(tmp_path, samples_dir)
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONUTF8", "PYTHONIOENCODING")}
+    env.update(FORM_GUARD_MCP_ROOT=str(root), PYTHONPATH=str(ROOT), PYTHONIOENCODING="cp932")
+    proc = subprocess.Popen([sys.executable, "-m", "form_guard.mcp_server"], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=root, env=env)
+
+    def call(i, name, args):
+        body = json.dumps({"jsonrpc": "2.0", "id": i, "method": "tools/call",
+                           "params": {"name": name, "arguments": args}}, ensure_ascii=False).encode("utf-8")
+        proc.stdin.write(body + b"\n")
+        proc.stdin.flush()
+        return json.loads(proc.stdout.readline().decode("utf-8"))["result"]
+
+    try:
+        demos = call(1, "form_guard_list_demos", {})["structuredContent"]
+        assert demos["count"] == 5 and demos["fictional"]
+        by = {d["id"]: d for d in demos["demos"]}
+        assert by["form4"]["title"].startswith("施設・備品一時使用許可申請書") and by["form5"]["unmarked"]
+        assert by["form4"]["next_tool"] == "form_guard_discover_blank_cells" and by["form1"]["naive_path"]
+        memo = read_memo(root / "samples" / "memos" / "memo1_research_change.txt")
+        res = call(2, "form_guard_fill", {"form_path": "samples/blank_forms/form1_research_plan_change.docx",
+                                          "memo_text": memo, "mode": "demo"})
+        fill = res["structuredContent"]
+        assert "令和8年11月2日（月）" in res["content"][0]["text"]  # Japanese survives the wire on a cp932 console
+        values = {f["slot_id"]: f["value"] for f in fill["fields"]}
+        assert values["提出日"] == "令和8年11月2日（月）" and values["研究課題番号"] == "JR-2026-047"
+        assert fill["approval_status"] == "UNAPPROVED_DRAFT_REQUIRES_HUMAN_SIGN_OFF"
+        audit = json.loads((root / fill["audit_log"]).read_text(encoding="utf-8"))
+        assert audit["approval_status"] == fill["approval_status"] and audit["approval"] is None
+        body = zipfile.ZipFile(root / fill["draft_path"]).read("word/document.xml")
+        assert b"UNAPPROVED" not in body and "未承認".encode() not in body  # no watermark inside the document
+        ver = call(3, "form_guard_verify", {"original_path": "samples/blank_forms/form1_research_plan_change.docx",
+                                            "filled_path": fill["draft_path"]})["structuredContent"]
+        assert ver["overall_status"] == "PASS" and ver["visual"]["checked"] and ver["visual"]["drift_count"] == 0
+        scan_res = call(4, "form_guard_scan", {"form_path": "samples/blank_forms/form2_municipal_equipment_subsidy.docx"})
+        tiers = {s["slot_id"]: s["model_tier"] for s in scan_res["structuredContent"]["slots"]}
+        assert tiers["申請日"] == "haiku" and tiers["申請事業者名"] == "sonnet"
+    finally:
+        proc.stdin.close()
+        proc.wait(timeout=60)
+    assert proc.returncode == 0, proc.stderr.read().decode("utf-8", "replace")
+
+
+def test_mcp_protocol_stream_survives_stray_prints_at_the_fd_level(tmp_path):
+    script = (
+        "import os\n"
+        "from form_guard import mcp_server as m\n"
+        "def noisy(self, args):\n"
+        "    os.write(1, b'C-level noise on file descriptor 1\\n')  # what a C extension printing to stdout does\n"
+        "    print('python-level noise')\n"
+        "    return {'ok': True, 'text': '日本語 ✓'}\n"
+        "m.FormGuardMCP.tool_list_demos = noisy\n"
+        "m.serve(m.FormGuardMCP(root=os.getcwd()))\n"
+    )
+    request = b'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"form_guard_list_demos","arguments":{}}}\n'
+    proc = subprocess.run([sys.executable, "-c", script], input=request, capture_output=True, cwd=tmp_path, timeout=60,
+                          env={**os.environ, "PYTHONPATH": str(ROOT), "PYTHONIOENCODING": "cp932"})
+    lines = proc.stdout.splitlines()
+    assert len(lines) == 1, proc.stdout  # only the JSON-RPC answer reached stdout
+    assert json.loads(lines[0])["result"]["structuredContent"]["text"] == "日本語 ✓"
+    assert b"C-level noise" in proc.stderr and b"python-level noise" in proc.stderr
+
+
+def test_mcp_fill_never_writes_inside_samples(samples_dir, tmp_path):
+    from form_guard.mcp_server import FormGuardMCP
+
+    srv = FormGuardMCP(root=_mcp_root(tmp_path, samples_dir) / "samples")  # a root that IS the samples folder
+    res = srv.call_tool("form_guard_fill", {"form_path": "blank_forms/form1_research_plan_change.docx",
+                                            "memo_path": "memos/memo1_research_change.txt", "mode": "demo"})
+    assert res["isError"] and "inside samples/" in res["content"][0]["text"]
+    assert not (tmp_path / "mcp_root" / "samples" / "output").exists()
+
+
+# ------------------------------------------------------ model fallback chain and escalation to Opus
+
+
+def _sse_message(model: str, payload: dict) -> bytes:
+    text = json.dumps(payload, ensure_ascii=False)
+    events = [
+        ("message_start", {"type": "message_start", "message": {
+            "id": "msg_fb", "type": "message", "role": "assistant", "model": model, "content": [], "stop_reason": None,
+            "stop_sequence": None, "usage": {"input_tokens": 800, "output_tokens": 1}}}),
+        ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+        ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}}),
+        ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+        ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                           "usage": {"output_tokens": 200}}),
+        ("message_stop", {"type": "message_stop"}),
+    ]
+    return "".join(f"event: {e}\ndata: {json.dumps(d, ensure_ascii=False)}\n\n" for e, d in events).encode("utf-8")
+
+
+@pytest.mark.filterwarnings("ignore:The model .claude-sonnet-4-5. is deprecated")
+def test_model_fallback_chain_retries_a_404_model_id_through_the_real_sdk(samples_dir, tmp_path):
+    anthropic = pytest.importorskip("anthropic")
+    httpx2 = pytest.importorskip("httpx2")
+    from form_guard.mapper import MODEL_FALLBACK_CHAIN
+
+    assert MODEL_FALLBACK_CHAIN == {MODEL_OPUS: ("claude-opus-5", "claude-opus-4-6"),
+                                    MODEL_SONNET: ("claude-sonnet-5", "claude-sonnet-4-5"),
+                                    MODEL_HAIKU: ("claude-haiku-4-5-20251001", "claude-haiku-4-5")}
+    p = paths(samples_dir, "form1")
+    unavailable = {MODEL_SONNET, "claude-sonnet-5"}  # this API organisation has neither id
+    payloads = [_claude_fields(), _revision_fix()]
+    seen: list[dict] = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        seen.append(body)
+        if body["model"] in unavailable:
+            return httpx2.Response(404, json={"type": "error", "error": {"type": "not_found_error",
+                                                                         "message": f"model: {body['model']}"}})
+        return httpx2.Response(200, headers={"content-type": "text/event-stream"},
+                               content=_sse_message(body["model"], payloads.pop(0)))
+
+    client = anthropic.Anthropic(**{"api" + "_key": "mock"}, max_retries=0,
+                                 http_client=anthropic.DefaultHttpxClient(transport=httpx2.MockTransport(handler)))
+    r = run_pipeline(p["form"], read_memo(p["memo"]), tmp_path / "fb", mode="live", client=client, model_tier="sonnet")
+    assert [b["model"] for b in seen] == [MODEL_SONNET, "claude-sonnet-5", "claude-sonnet-4-5", "claude-sonnet-4-5"]
+    legacy = seen[2]  # the fallback id gets a request built from its own capabilities (no thinking / effort → no 400)
+    assert "thinking" not in legacy and "effort" not in legacy["output_config"] and "fallbacks" not in legacy
+    assert seen[0]["thinking"] == {"type": "adaptive", "display": "summarized"}
+    usage = r.engine["usage"]
+    (fb,) = usage["model_fallbacks"]  # recorded once; the revision went straight to the id that answered
+    assert fb["tier"] == "sonnet" and fb["requested_model"] == MODEL_SONNET and fb["used_model"] == "claude-sonnet-4-5"
+    assert fb["unavailable"] == [MODEL_SONNET, "claude-sonnet-5"] and "not_found_error" in fb["reason"]
+    assert [c["attempted_models"] for c in usage["calls"]] == [[MODEL_SONNET, "claude-sonnet-5", "claude-sonnet-4-5"],
+                                                               ["claude-sonnet-4-5"]]
+    assert {c["requested_model"] for c in usage["calls"]} == {MODEL_SONNET} and usage["models"] == ["claude-sonnet-4-5"]
+    assert r.report.overall_status == "PASS"
+    audit = json.loads((tmp_path / "fb" / "audit_log.json").read_text(encoding="utf-8"))
+    assert audit["engine"]["usage"]["model_fallbacks"][0]["used_model"] == "claude-sonnet-4-5"  # requested + served
+
+
+def test_model_fallback_chain_exhausted_is_a_live_engine_error_and_auto_mode_falls_back(samples_dir, tmp_path,
+                                                                                         fake_client_factory):
+    anthropic = pytest.importorskip("anthropic")
+    httpx2 = pytest.importorskip("httpx2")
+
+    def not_found(kwargs):
+        req = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+        body = {"type": "error", "error": {"type": "not_found_error", "message": f"model: {kwargs['model']}"}}
+        raise anthropic.NotFoundError(f"model: {kwargs['model']}", response=httpx2.Response(404, request=req, json=body),
+                                      body=body)
+
+    p = paths(samples_dir, "form1")
+    client = fake_client_factory([not_found] * 3)
+    with pytest.raises(LiveEngineError, match="none of claude-haiku-5-5, claude-haiku-4-5-20251001, claude-haiku-4-5"):
+        map_fields(scan(p["form"]).slots, read_memo(p["memo"]), ClaudeEngine(client=client, model_tier="haiku"))
+    r = run_pipeline(p["form"], read_memo(p["memo"]), tmp_path / "auto", mode="auto",
+                     client=fake_client_factory([not_found] * 9), model_tier="opus")
+    assert r.engine["mode"] == "demo" and "not_found_error" in r.engine["fallback_reason"]
+    assert r.report.overall_status == "PASS"  # the offline engine finished the job and the report says why
+
+
+def test_rejected_fast_tier_draft_is_escalated_to_opus_with_adaptive_thinking(samples_dir, fake_client_factory):
+    p = paths(samples_dir, "form1")
+    client = fake_client_factory([echo_model(_claude_fields())] * 3 + [echo_model(_revision_fix())])
+    engine = ClaudeEngine(client=client)  # auto tier
+    run = map_fields(scan(p["form"]).slots, read_memo(p["memo"]), engine)
+    (esc,) = run.usage["escalations"]
+    assert esc["slot_id"] == "所属部局" and (esc["from_tier"], esc["from_model"]) == ("sonnet", MODEL_SONNET)
+    assert (esc["to_tier"], esc["to_model"]) == ("opus", MODEL_OPUS) and "quote not found verbatim" in esc["reason"]
+    revise = client.beta.messages.calls[-1]
+    assert revise["model"] == MODEL_OPUS and revise["thinking"] == {"type": "adaptive", "display": "summarized"}
+    assert {m.slot_id: m for m in run.mappings}["所属部局"].filled_value == "理工学研究科"
+    fixed = ClaudeEngine(client=fake_client_factory([echo_model(_claude_fields()), echo_model(_revision_fix())]),
+                         model_tier="sonnet")
+    assert map_fields(scan(p["form"]).slots, read_memo(p["memo"]), fixed).usage["escalations"] == []  # one tier: none
+
+
+def test_model_tier_and_model_tiering_switches(samples_dir, fake_client_factory, tmp_path, monkeypatch, capsys):
+    from form_guard.cli import main
+    from form_guard.mapper import resolve_model_tier
+
+    assert resolve_model_tier(None, None) is None and resolve_model_tier("haiku", None) == "haiku"
+    assert resolve_model_tier(None, "auto") == "auto" and resolve_model_tier(None, "off") == "opus"
+    assert resolve_model_tier("sonnet", "off") == "sonnet" and resolve_model_tier("auto", "auto") == "auto"
+    for tier, tiering in (("auto", "off"), ("haiku", "auto")):
+        with pytest.raises(ValueError, match="contradicts"):
+            resolve_model_tier(tier, tiering)
+    monkeypatch.setenv("FORM_GUARD_MODEL_TIERING", "off")
+    assert ClaudeEngine(client=object()).model_tier == "opus" and ClaudeEngine(client=object(), model_tier="haiku").model_tier == "haiku"
+    monkeypatch.delenv("FORM_GUARD_MODEL_TIERING")
+    p = paths(samples_dir, "form1")
+    client = fake_client_factory([echo_model(_claude_fields()), echo_model(_revision_fix())])
+    r = run_pipeline(p["form"], read_memo(p["memo"]), tmp_path / "off", mode="live", client=client,
+                     model_tier=resolve_model_tier(None, "off"))
+    assert {c["model"] for c in client.beta.messages.calls} == {MODEL_OPUS} and r.engine["model_tier"] == "opus"
+    assert main(["--form", str(p["form"]), "--memo", str(p["memo"]), "--out-dir", str(tmp_path / "cli"), "--mode", "demo",
+                 "--model-tiering", "auto"]) == 0
+    capsys.readouterr()
+    with pytest.raises(SystemExit):
+        main(["--scan", str(p["form"]), "--model-tier", "haiku", "--model-tiering", "auto"])
+    assert "contradicts" in capsys.readouterr().err
+    assert main(["--scan", str(p["form"]), "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["slot_count"] == 8 and data["read_only"] and {s["model_tier"] for s in data["slots"]} <= {"haiku", "sonnet", "opus"}
+
+
+# ---------------------------------------------- archive gate: path traversal, ZIP bombs, DTD / entities
+
+
+def _zip_with(path: Path, entries: dict[str, bytes]) -> Path:
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, data in entries.items():
+            zi = zipfile.ZipInfo(name, date_time=(2026, 11, 2, 0, 0, 0))
+            zi.compress_type = zipfile.ZIP_DEFLATED
+            zf.writestr(zi, data)
+    return path
+
+
+def test_archive_gate_rejects_path_traversal_bombs_and_dtds(samples_dir, tmp_path):
+    from form_guard.ziputil import (
+        MAX_ARCHIVE_ENTRIES,
+        MAX_UNCOMPRESSED_BYTES,
+        UnsafeArchiveError,
+        check_archive,
+        unsafe_entry_name,
+        xml_has_dtd,
+    )
+
+    assert (MAX_ARCHIVE_ENTRIES, MAX_UNCOMPRESSED_BYTES) == (2_000, 100 * 1024 * 1024)
+    for name in ("../evil.xml", "word/../../evil.xml", "word" + _BS + ".." + _BS + "evil.xml", "/etc/passwd",
+                 _BS + "share" + _BS + "x.xml", "C:/x.xml", "word/a\x00.xml"):
+        assert unsafe_entry_name(name), name
+    for name in ("word/document.xml", "[Content_Types].xml", "xl/worksheets/sheet1.xml", "word/a..b.xml"):
+        assert not unsafe_entry_name(name), name
+    ok = {"[Content_Types].xml": b"<Types/>", "word/document.xml": b"<w:document/>"}
+    assert len(check_archive(_zip_with(tmp_path / "ok.docx", ok))) == 2
+    with pytest.raises(UnsafeArchiveError, match="path traversal"):
+        check_archive(_zip_with(tmp_path / "trav.docx", {**ok, "../../evil.xml": b"<x/>"}))
+    with pytest.raises(UnsafeArchiveError, match="absolute entry name"):
+        check_archive(_zip_with(tmp_path / "abs.docx", {**ok, "/word/x.xml": b"<x/>"}))
+    with pytest.raises(UnsafeArchiveError, match="duplicate entry name"):
+        check_archive(_zip_with(tmp_path / "dup.docx", {**ok, "WORD/document.xml": b"<x/>"}))
+    many = {f"word/media/{i}.xml": b"<x/>" for i in range(MAX_ARCHIVE_ENTRIES + 1)}
+    with pytest.raises(UnsafeArchiveError, match="2,001 entries"):
+        check_archive(_zip_with(tmp_path / "many.docx", many))
+    bomb = _zip_with(tmp_path / "bomb.docx", {**ok, "word/media/zeros.bin": bytes(2 * 1024 * 1024)})
+    with pytest.raises(UnsafeArchiveError, match="compression ratio"):  # 2 MiB of zeros deflate to ~2 KiB
+        check_archive(bomb)
+    with pytest.raises(UnsafeArchiveError, match="ZIP bomb guard"):
+        check_archive(_zip_with(tmp_path / "big.docx", {**ok, "word/media/a.bin": os.urandom(4096)}), max_uncompressed=4000)
+    dtd = b'<?xml version="1.0"?><!DOCTYPE x [<!ENTITY a "aaaa">]><w:document/>'
+    assert xml_has_dtd(dtd) and xml_has_dtd(dtd.decode().encode("utf-16")) and not xml_has_dtd(b"<w:t>&lt;!DOCTYPE</w:t>")
+    with pytest.raises(UnsafeArchiveError, match="DTD / entity"):
+        check_archive(_zip_with(tmp_path / "xxe.docx", {**ok, "word/document.xml": dtd}))
+    # every entry point goes through the gate: scan / discovery …
+    p = paths(samples_dir, "form1")
+    evil = tmp_path / "xxe_form1.docx"
+    rewrite_entry(p["form"], evil, "word/document.xml",
+                  lambda d: d.replace(b"?>", b'?><!DOCTYPE w:document [<!ENTITY x "boom">]>', 1))
+    with pytest.raises(UnsafeArchiveError, match="DTD / entity"):
+        scan(evil)
+    with pytest.raises(UnsafeArchiveError):
+        discover_blank_cells(evil)
+    # … and the verifier: an unsafe filled copy fails ZIP-01 before anything is decompressed
+    trav = tmp_path / "filled_trav.docx"
+    shutil.copy(p["form"], trav)
+    with zipfile.ZipFile(trav, "a") as zf:
+        zf.writestr("../../outside.xml", b"<x/>")
+    rep = verify(scan(p["form"]), trav, [], "")
+    zip01 = next(c for c in rep.checks if c.check_id == "ZIP-01")
+    assert rep.overall_status == "FAIL" and not zip01.passed and "path traversal" in zip01.details
+    rep = verify(scan(p["form"]), evil, [], "")
+    assert rep.overall_status == "FAIL" and "DTD / entity" in next(c for c in rep.checks if c.check_id == "ZIP-01").details
+
+
+# ------------------------------------------- web: five demos, one-click unmarked demos, upload limits
+
+
+@pytest.mark.parametrize("uid,office", [("form4", {"受付番号", "受付日", "事務局受付欄", "審査欄"}), ("form5", {"事務局使用欄"})])
+def test_run_demo_one_click_discovery_auto_preview_then_reviewer_confirmed_fill(api, uid, office):
+    res = api.post("/api/run-demo", json={"demo_id": uid, "mode": "demo"})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["unmarked"] and body["auto_preview"]
+    disc, run = body["discovery"], body["run"]
+    assert re.fullmatch(r"[0-9a-f]{24}", disc["discovery_id"]) and disc["requires_human_confirmation"]
+    assert {c["slot_id"] for c in disc["candidates"] if c["office_only"]} == office
+    rec = [c["candidate_id"] for c in disc["candidates"] if c["recommended"]]
+    assert run["confirmed_candidates"] == rec and run["auto_preview"] and not run["can_approve"]
+    assert run["report"]["overall_status"] == "PASS" and run["previews"]["filled"].startswith("<svg")
+    assert not office & {pr["slot_id"] for pr in run["patches"]}  # office-only cells are never written
+
+    def approve(r):
+        checked = [h["item_id"] for h in r["report"]["hitl_checklist"] if h["required"]]
+        return api.post(f"/api/runs/{r['run_id']}/approve", json={"reviewer": "架空 花子", "checked": checked,
+                                                                   "filled_sha256": r["filled"]["sha256"],
+                                                                   "revision": r["revision"]})
+
+    refused = approve(run)  # the server picked these cells: no sign-off until a reviewer confirms them
+    assert refused.status_code == 409 and "auto-preview" in refused.json()["detail"]["message"]
+    chosen = rec[1:]  # stage 4: the reviewer's own selection (here: one recommended cell left out)
+    conf = api.post("/api/run-demo", json={"demo_id": uid, "mode": "demo", "discovery_id": disc["discovery_id"],
+                                           "confirmed_targets": chosen})
+    assert conf.status_code == 200, conf.text
+    run2 = conf.json()["run"]
+    assert not conf.json()["auto_preview"] and run2["confirmed_candidates"] == chosen and run2["can_approve"]
+    assert approve(run2).json()["approved"]
+    office_ids = [c["candidate_id"] for c in disc["candidates"] if c["office_only"]]
+    bad = api.post("/api/run-demo", json={"demo_id": uid, "discovery_id": disc["discovery_id"],
+                                          "confirmed_targets": office_ids[:1]})
+    assert bad.status_code == 422 and "office/administrative use only" in bad.text
+
+
+def test_run_demo_for_marked_forms_and_discover_by_demo_id_or_upload(api, samples_dir):
+    r = api.post("/api/run-demo", json={"demo_id": "form1", "mode": "demo"}).json()
+    assert not r["unmarked"] and r["run"]["report"]["overall_status"] == "PASS" and "naive" in r["run"]["previews"]
+    assert api.post("/api/run-demo", json={"demo_id": "form1", "confirmed_targets": ["c01"]}).status_code == 400
+    assert api.post("/api/run-demo", json={"demo_id": "form9"}).status_code == 404
+    assert api.post("/api/run-demo", json={"demo_id": "form4", "approve": True}).status_code == 422  # extra fields refused
+    d4 = api.post("/api/discover", data={"demo_id": "form4", "mode": "demo"})
+    assert d4.status_code == 200 and d4.json()["demo_id"] == "form4" and len(d4.json()["candidates"]) == 11
+    assert d4.json()["title"].startswith("施設・備品一時使用許可申請書")
+    blob = unmarked(samples_dir, "form5")["form"].read_bytes()
+    d5 = api.post("/api/discover", files={"file": ("防災備蓄品 貸出・返却管理票.xlsx", blob)}, data={"mode": "demo"})
+    assert d5.status_code == 200 and len(d5.json()["candidates"]) == 6
+    assert d5.json()["form"] == "防災備蓄品 貸出・返却管理票.xlsx"
+    assert api.post("/api/discover", data={"mode": "demo"}).status_code == 400
+    wrong = api.post("/api/run-demo", json={"demo_id": "form5", "discovery_id": d4.json()["discovery_id"],
+                                            "confirmed_targets": ["c01"]})
+    assert wrong.status_code == 400 and "another form" in wrong.text  # one form's discovery never fills another
+
+
+def test_web_upload_limits_and_archive_gate(api, samples_dir, tmp_path):
+    from form_guard.server import MAX_UPLOAD_BYTES
+
+    assert MAX_UPLOAD_BYTES == 15 * 1024 * 1024
+    big = api.post("/api/runs/upload", files={"file": ("big.docx", b"PK" + bytes(MAX_UPLOAD_BYTES))}, data={"memo_text": "m"})
+    assert big.status_code == 413 and "15 MB" in big.text
+    p = paths(samples_dir, "form1")
+    trav = tmp_path / "trav.docx"
+    shutil.copy(p["form"], trav)
+    with zipfile.ZipFile(trav, "a") as zf:
+        zf.writestr("../../evil.xml", b"<x/>")
+    res = api.post("/api/runs/upload", files={"file": ("trav.docx", trav.read_bytes())}, data={"memo_text": "m"})
+    assert res.status_code == 400 and "path traversal" in res.text
+    xxe = tmp_path / "xxe.docx"
+    rewrite_entry(p["form"], xxe, "word/document.xml",
+                  lambda d: d.replace(b"?>", b'?><!DOCTYPE w:document [<!ENTITY x "boom">]>', 1))
+    res = api.post("/api/discover", files={"file": ("xxe.docx", xxe.read_bytes())}, data={"mode": "demo"})
+    assert res.status_code == 400 and "DTD / entity" in res.text
+    bomb = tmp_path / "bomb.docx"
+    shutil.copy(p["form"], bomb)
+    with zipfile.ZipFile(bomb, "a", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("word/media/zeros.bin", bytes(4 * 1024 * 1024))
+    res = api.post("/api/runs/upload", files={"file": ("bomb.docx", bomb.read_bytes())}, data={"memo_text": "m"})
+    assert res.status_code == 400 and "ZIP bomb guard" in res.text
+
+
+def test_cli_mcp_entry_point_serves_all_five_tools(tmp_path):
+    msgs = (b'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}\n'
+            b'{"jsonrpc":"2.0","id":2,"method":"tools/list"}\n')
+    proc = subprocess.run([sys.executable, "-m", "form_guard.cli", "--mcp"], input=msgs, capture_output=True, cwd=ROOT,
+                          timeout=120, env={**os.environ, "FORM_GUARD_MCP_ROOT": str(ROOT)})
+    answers = [json.loads(line) for line in proc.stdout.splitlines()]
+    assert proc.returncode == 0 and [a["id"] for a in answers] == [1, 2]
+    assert [t["name"] for t in answers[1]["result"]["tools"]] == [
+        "form_guard_list_demos", "form_guard_scan", "form_guard_discover_blank_cells", "form_guard_fill", "form_guard_verify"]
+
+
+def test_readme_and_docs_describe_the_two_stage_hooks_fallback_chain_and_archive_gate():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    doc = (ROOT / "docs" / "BUILT_WITH_CLAUDE_CODE.md").read_text(encoding="utf-8")
+    for text in (readme, doc):
+        for needle in ("scripts/hook_guard.py", "PreToolUse", "PostToolUse", "permissionDecision", "py_compile",
+                       "form_guard_list_demos", "MODEL_FALLBACK_CHAIN", "not_found_error", "claude-sonnet-5",
+                       "claude-haiku-4-5-20251001", "UNAPPROVED_DRAFT_REQUIRES_HUMAN_SIGN_OFF", "2,000", "100 MB",
+                       "15 MB", "検出した空欄を承認して外科的差込を実行"):
+            assert needle in text, needle
+    for needle in ('<a id="claude-usage"></a>', "## How Claude & Claude Code Are Used / Claude と Claude Code 機能の目的別使い分け",
+                   "**No file-editing tools (`Edit`/`Write`)**: `memo-extractor` uses only `Read, Grep, Glob`, and "
+                   "`form-auditor` (like `field-mapper` and `structure-auditor`) uses `Read, Grep, Glob, Bash` for "
+                   "verification commands under `PreToolUse` protection", "Offline vs live", "デモ1–デモ5", "空欄自動検出",
+                   "POST /api/run-demo", "GET /api/demos", "施設・備品一時使用許可申請書", "防災備蓄品 貸出・返却管理票",
+                   "なぜ Form-Guard か？（解決する現場課題）", "`Offline Rule`"):
+        assert needle in readme, needle
+    assert "**No subagent has a file-editing tool (`Edit`/`Write`)**" in doc and "Hooks**（2 段）" in doc
+    for name in ("研究設備共用利用申請書", "地域防災備蓄品貸出申請書"):  # the retitled unmarked forms
+        assert name not in readme and name not in doc, name

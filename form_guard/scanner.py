@@ -115,8 +115,10 @@ def load_spec(form_path: Path, spec: Union[dict, str, Path, None]) -> dict:
 
 
 def detect_file_type(path: Path) -> str:
-    with zipfile.ZipFile(path) as zf:
-        names = set(zf.namelist())
+    """docx | xlsx — after the archive safety gate (path traversal, ZIP bomb, DTD / entity declarations)."""
+    from .ziputil import check_archive
+
+    names = {i.filename for i in check_archive(Path(path))}
     if "word/document.xml" in names:
         return "docx"
     if "xl/workbook.xml" in names:
