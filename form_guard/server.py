@@ -9,10 +9,16 @@ bytes from memory after re-checking the file, under a per-run lock.
 The server is meant for 127.0.0.1 only: requests with any other Host header (DNS
 rebinding) and state-changing requests from another Origin (cross-site forms) are refused.
 
-Unmarked blank forms: ``POST /api/discover`` returns candidate empty cells (applicant vs
-office-only) and a ``discovery_id``; ``POST /api/runs/upload`` with that ``discovery_id``
-and the reviewer's ``confirmed_targets`` fills only those cells — after re-checking that
-the uploaded blank form is byte-identical to the one discovery looked at.
+Unmarked blank forms: ``POST /api/discover`` (an uploaded form) or ``POST /api/discover/demo``
+(the built-in form4 / form5, listed by ``GET /api/unmarked-demos``) returns candidate empty
+cells (applicant vs office-only) and a ``discovery_id``. ``POST /api/runs/from-discovery``
+(JSON) or ``POST /api/runs/upload`` (multipart) with that ``discovery_id`` and the reviewer's
+``confirmed_targets`` fills only those cells — after re-checking that the blank form is
+byte-identical to the one discovery looked at. The discovery stays on the server; the
+client only names candidate ids.
+
+``GET /api/claude-suite`` describes the repository's Claude Code skills, subagents, hook and
+MCP server (read from the files), the model routing policy and the measured workflow numbers.
 """
 
 from __future__ import annotations
@@ -22,26 +28,38 @@ import json
 import os
 import re
 import secrets
+import tempfile
 import threading
 import zipfile
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional, Union
 from urllib.parse import quote, urlsplit
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from . import DEFAULT_MODEL, MODEL_HAIKU, MODEL_OPUS, MODEL_SONNET, __version__
-from .mapper import MODEL_TIERS, live_credentials_present, load_dotenv
+from .claude_suite import PROJECT_ROOT, describe_suite
+from .mapper import MODEL_TIERS, DemoEngine, live_credentials_present, load_dotenv
+from .measure import measure, totals
 from .models import FieldMapping
 from .pipeline import PipelineResult, new_run_id, run_pipeline
-from .samples import DEMOS, demo_by_id, demo_paths, ensure_samples, read_memo
-from .scanner import build_confirmed_slot_spec, detect_file_type, discover_blank_cells
+from .samples import (
+    DEMOS,
+    UNMARKED_FORMS,
+    demo_by_id,
+    demo_paths,
+    ensure_samples,
+    read_memo,
+    unmarked_by_id,
+    unmarked_paths,
+)
+from .scanner import build_confirmed_slot_spec, detect_file_type, discover_blank_cells, recommended_ids
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
@@ -74,6 +92,27 @@ class ApproveRequest(BaseModel):
     # What the reviewer was looking at: approval is refused if the run changed since (stale view).
     filled_sha256: Optional[str] = Field(default=None, max_length=64)
     revision: Optional[int] = None
+
+
+class DiscoverDemoRequest(BaseModel):
+    demo_id: str = Field(max_length=32)
+    mode: str = "auto"
+    model_tier: Optional[ModelTier] = None
+
+
+CandidateIds = Annotated[list[Annotated[str, Field(max_length=32)]], Field(max_length=500)]
+
+
+class FromDiscoveryRequest(BaseModel):
+    """Fill the cells a reviewer confirmed. The stored discovery — never anything the client sends — defines them,
+    so extra fields (a client-side discovery, a form hash) are refused outright."""
+
+    model_config = ConfigDict(extra="forbid")
+    discovery_id: str = Field(max_length=64)
+    confirmed_targets: Union[CandidateIds, Annotated[str, Field(max_length=4000)]]  # ids, or "recommended"
+    memo_text: Optional[str] = Field(default=None, max_length=MAX_MEMO_CHARS)  # None: the demo's sample memo
+    mode: str = "auto"
+    model_tier: Optional[ModelTier] = None
 
 
 @dataclass
@@ -129,17 +168,18 @@ class RunStore:
 
 
 class DiscoveryStore:
-    """Discovery reports of uploaded blank forms, kept on the server so a client cannot edit them."""
+    """Discovery reports of blank forms (uploaded or built-in), kept on the server so a client cannot edit them."""
 
     def __init__(self, limit: int = 60):
         self.limit = limit
         self.items: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
         self.lock = threading.Lock()
 
-    def put(self, discovery: dict[str, Any], path: Path) -> str:
+    def put(self, discovery: dict[str, Any], path: Path, **meta: Any) -> str:
+        """meta: memo_text (built-in demos), demo_id, display_name."""
         token = secrets.token_hex(12)
         with self.lock:
-            self.items[token] = {"discovery": discovery, "path": path}
+            self.items[token] = {"discovery": discovery, "path": path, **meta}
             while len(self.items) > self.limit:
                 self.items.popitem(last=False)
         return token
@@ -181,6 +221,15 @@ def _parse_ids(raw: str) -> list[str]:
     return [x.strip() for x in raw.split(",") if x.strip()]
 
 
+def _confirmed_ids(discovery: dict[str, Any], targets: Union[list[str], str]) -> list[str]:
+    """The reviewer's confirmed candidate ids: a list, a JSON list / comma-separated string, or "recommended"."""
+    if isinstance(targets, str):
+        if targets.strip().lower() == "recommended":
+            return recommended_ids(discovery)
+        return _parse_ids(targets)
+    return [str(i) for i in targets]
+
+
 def _hostname(host: str) -> str:
     host = host.strip().lower()
     if host.startswith("["):  # [::1]:8000
@@ -218,6 +267,8 @@ def _payload(run_id: str, st: RunState) -> dict[str, Any]:
     d["revision"] = st.revision
     d["filled"]["sha256"] = st.verified_sha256 or d["filled"]["sha256"]
     d["can_approve"] = rep.overall_status == "PASS"
+    confirmed = st.spec.get("confirmed_candidates") if isinstance(st.spec, dict) else None
+    d["confirmed_candidates"] = [str(c) for c in confirmed] if isinstance(confirmed, list) else []  # unmarked forms
     d["links"] = {"report": f"/api/runs/{run_id}/report", "audit": f"/api/runs/{run_id}/audit",
                   "download": f"/api/runs/{run_id}/download"}
     return d
@@ -242,13 +293,17 @@ def _check_package(path: Path) -> str:
         raise HTTPException(400, str(exc)) from exc
 
 
-def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = None, client: Any = None) -> FastAPI:
+def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = None, client: Any = None,
+               project_root: Optional[Path] = None) -> FastAPI:
     load_dotenv()
     app = FastAPI(title="Form-Guard Agent", version=__version__, docs_url="/api/docs", redoc_url=None)
     store = RunStore(Path(run_root or os.environ.get("FORM_GUARD_RUN_DIR") or Path.cwd() / "output" / "web_runs"))
     app.state.store = store
     app.state.client = client
     app.state.samples_dir = samples_dir
+    app.state.project_root = Path(project_root or PROJECT_ROOT)  # where .claude/ and .mcp.json live
+    app.state.workflow = None  # measured once per process (GET /api/claude-suite)
+    workflow_lock = threading.Lock()
 
     @app.middleware("http")
     async def security_headers(request, call_next):
@@ -353,17 +408,75 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
                           model_tier=req.model_tier)
         return _payload(run_id, st)
 
+    def _discover(form_path: Path, mode: str, tier: Optional[str]) -> dict[str, Any]:
+        try:
+            return discover_blank_cells(form_path, mode=mode, client=app.state.client, model_tier=tier)
+        except Exception as exc:  # noqa: BLE001 - surface any discovery error to the UI
+            raise HTTPException(422, f"discovery failed: {exc}") from exc
+
+    @app.get("/api/unmarked-demos")
+    def unmarked_demos():
+        base = samples()
+        out = []
+        for u in UNMARKED_FORMS:
+            p = unmarked_paths(u, base)
+            out.append({**{k: u[k] for k in ("id", "title", "title_en", "org", "file_type", "highlights")},
+                        "form": p["form"].name, "memo_name": p["memo"].name, "memo_text": read_memo(p["memo"])})
+        return out
+
     @app.post("/api/discover")
     def discover(file: UploadFile = File(...), mode: str = Form("auto"), model_tier: Optional[str] = Form(None)):
         """Stages 1-3 of blank-cell discovery for an unmarked form; nothing is filled until a reviewer confirms."""
         tier = _check_tier(model_tier)
         form_path = _stage_upload(file)
-        try:
-            d = discover_blank_cells(form_path, mode=mode, client=app.state.client, model_tier=tier)
-        except Exception as exc:  # noqa: BLE001 - surface any discovery error to the UI
-            raise HTTPException(422, f"discovery failed: {exc}") from exc
+        d = _discover(form_path, mode, tier)
         d["form"] = file.filename or form_path.name
-        return {**d, "discovery_id": discoveries.put(d, form_path)}
+        return {**d, "discovery_id": discoveries.put(d, form_path, display_name=d["form"])}
+
+    @app.post("/api/discover/demo")
+    def discover_demo(req: DiscoverDemoRequest):
+        """Stages 1-3 on a built-in unmarked form (form4 .docx / form5 .xlsx), with its sample memo."""
+        try:
+            u = unmarked_by_id(req.demo_id)
+        except KeyError as exc:
+            raise HTTPException(404, "unknown unmarked demo") from exc
+        p = unmarked_paths(u, samples())
+        d = _discover(p["form"], req.mode, req.model_tier)
+        memo = read_memo(p["memo"])
+        token = discoveries.put(d, p["form"], memo_text=memo, demo_id=u["id"], display_name=p["form"].name)
+        return {**d, "discovery_id": token, "demo_id": u["id"], "title": u["title"], "title_en": u["title_en"],
+                "org": u["org"], "memo_text": memo}
+
+    @app.post("/api/runs/from-discovery")
+    def run_from_discovery(req: FromDiscoveryRequest):
+        """Stage 4: fill only the confirmed cells of a stored discovery (the blank form is re-checked by SHA-256)."""
+        entry = discoveries.get(req.discovery_id)
+        memo = req.memo_text if req.memo_text is not None else entry.get("memo_text")
+        if not (memo or "").strip():
+            raise HTTPException(400, "memo_text is required — paste the source memo")
+        ids = _confirmed_ids(entry["discovery"], req.confirmed_targets)
+        try:  # refuses a changed form, 0 confirmed cells, unknown ids and office-only cells
+            spec = build_confirmed_slot_spec(entry["discovery"], ids, entry["path"])
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        run_id, st = _run(entry["path"], memo, req.mode, naive=None, spec=spec, demo_id=entry.get("demo_id"),
+                          display=entry.get("display_name") or entry["path"].name, model_tier=req.model_tier)
+        return _payload(run_id, st)
+
+    @app.get("/api/claude-suite")
+    def claude_suite():
+        """Skills, subagents, hook and MCP server read from the repository, the routing policy and measured numbers."""
+        suite = describe_suite(app.state.project_root)
+        with workflow_lock:  # five offline pipeline runs, measured once per process
+            if app.state.workflow is None:
+                with tempfile.TemporaryDirectory() as tmp:
+                    rows = measure(samples(), Path(tmp))
+                app.state.workflow = {
+                    "rows": rows, "totals": totals(rows), "engine": DemoEngine.label,
+                    "measured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "note": "measured on this machine with the offline engine (no network); the manual columns are "
+                            "counted from the files, not a timed study of a person"}
+        return {**suite, "workflow": app.state.workflow}
 
     @app.post("/api/runs/upload")
     def run_upload(file: UploadFile = File(...), memo_text: str = Form(...), mode: str = Form("auto"),
@@ -382,14 +495,17 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
                 spec = json.loads(raw.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise HTTPException(400, f"slot spec is not valid JSON: {exc}") from exc
+            if not isinstance(spec, dict):  # a JSON string would otherwise be read as a file path on the server
+                raise HTTPException(400, "slot spec must be a JSON object")
         if confirmed_targets is not None or discovery_id:
             if spec is not None:
                 raise HTTPException(400, "send either a slot spec or confirmed discovery targets, not both")
             if confirmed_targets is None:
                 raise HTTPException(400, "confirmed_targets is required with discovery_id")
             entry = discoveries.get(discovery_id)
+            ids = _confirmed_ids(entry["discovery"], confirmed_targets)
             try:  # the stored discovery, not anything the client sends, defines the cells
-                spec = build_confirmed_slot_spec(entry["discovery"], _parse_ids(confirmed_targets), form_path)
+                spec = build_confirmed_slot_spec(entry["discovery"], ids, form_path)
             except ValueError as exc:
                 raise HTTPException(422, str(exc)) from exc
         run_id, st = _run(form_path, memo_text, mode, naive=None, spec=spec, demo_id=None,

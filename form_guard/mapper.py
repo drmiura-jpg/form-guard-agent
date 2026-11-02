@@ -13,6 +13,10 @@ Two interchangeable engines propose values:
   lines, ``■ heading`` sections, format-aware token picking) so judges can run the
   whole pipeline with zero setup and fully reproducible output.
 
+Every ``FieldMapping`` records ``routed_model`` / ``route_reason``: the model id(s) that
+actually served the field in live mode, or — offline — the model live auto mode would
+use, labelled ``offline (… in live auto)`` so a plan is never mistaken for a call.
+
 Every proposal then goes through the same loop:
 
     validate (constraints + independent grounding check)
@@ -190,19 +194,57 @@ def _subsequence_cover(alias: str, key: str) -> float:
 
 
 class DemoEngine:
-    """Deterministic offline extractor — no network, no randomness."""
+    """Deterministic offline extractor — no network, no randomness.
+
+    It also records the per-field model routing that live ``auto`` mode would use (``usage["routing"]`` entries
+    carry ``planned_in_live_auto: True``), so the routing design is visible without an API key — clearly marked
+    as a plan, never as a call that happened.
+    """
 
     name = "demo"
     label = "Offline demo engine (deterministic rules, no API key)"
 
     def __init__(self) -> None:
         self.usage: dict[str, Any] = {}
+        self._plan: dict[str, tuple[str, str]] = {}  # slot_id -> (tier, reason) in live auto mode
+        self._revised: set[str] = set()
 
     def propose(self, slots: list[FormSlot], memo: str, form_title: str = "") -> dict[str, Draft]:
+        self._plan_routing(slots, memo)
         return {s.slot_id: self._extract(s, slots, memo) for s in slots}
 
     def revise(self, failing, memo: str) -> dict[str, Draft]:
+        """No offline revision; notes that live auto mode would send these fields to Opus."""
+        ids = [slot.slot_id for slot, _draft, _issues in failing]
+        if ids:
+            self._revised.update(ids)
+            self.usage.setdefault("routing", []).append({
+                "task": "revise", "model": MODEL_OPUS, "slots": ids, "planned_in_live_auto": True,
+                "reasons": {sid: REVISE_REASON for sid in ids}})
         return {}
+
+    def _plan_routing(self, slots: list[FormSlot], memo: str) -> None:
+        groups: dict[str, tuple[list[str], dict[str, str]]] = {}
+        self._plan, self._revised = {}, set()
+        for s in slots:
+            tier, why = route_slot(s, slots, memo)
+            self._plan[s.slot_id] = (tier, why)
+            group = groups.setdefault(tier, ([], {}))
+            group[0].append(s.slot_id)
+            group[1][s.slot_id] = why
+        self.usage["routing"] = [{"task": "propose", "model": TIER_MODELS[t], "slots": groups[t][0],
+                                  "reasons": groups[t][1], "planned_in_live_auto": True}
+                                 for t in ("haiku", "sonnet", "opus") if t in groups]
+
+    def field_route(self, slot_id: str) -> tuple[str, str]:
+        """(routed_model, route_reason) for the field's mapping — the live auto plan, labelled offline."""
+        tier, why = self._plan.get(slot_id, ("", ""))
+        if not tier:
+            return "", ""
+        if slot_id in self._revised:
+            return (f"offline ({TIER_MODELS[tier]} → {MODEL_OPUS} (revision) in live auto)",
+                    f"{why}; then {REVISE_REASON}")
+        return f"offline ({TIER_MODELS[tier]} in live auto)", why
 
     # -- region finding ------------------------------------------------------
     def _regions(self, slot: FormSlot, all_slots: list[FormSlot], memo: str) -> list[tuple[int, int, str, float]]:
@@ -426,6 +468,37 @@ MODEL_TIERS = ("auto", "opus", "sonnet", "haiku")
 TIER_MODELS = {"opus": MODEL_OPUS, "sonnet": MODEL_SONNET, "haiku": MODEL_HAIKU}
 STRUCTURED_FORMATS = ("wareki_date", "date", "wareki_period", "digits", "pattern", "choice")
 LONG_TEXT_CHARS = 150  # a printed limit this long means long free text even when the memo passage cannot be located
+REVISE_REASON = "self-correction after validator rejection"
+HUMAN_ROUTE = ("human reviewer", "entered by the human reviewer — no model involved")
+
+# What --model-tier auto sends where, and why (README, docs/BUILT_WITH_CLAUDE_CODE.md, GET /api/claude-suite).
+ROUTING_POLICY: list[dict[str, str]] = [
+    {"task": "structured", "tier": "haiku",
+     "en": "Structured fields — 和暦 dates, periods, digits, ID patterns, choices",
+     "ja": "定型の欄（和暦日付・期間・桁数・書式・選択肢）",
+     "why_en": "Short, checkable tokens; the deterministic validator re-checks the format and the quote anyway.",
+     "why_ja": "短く検証しやすい値で、形式と引用は検証器が必ず確認します。"},
+    {"task": "classify", "tier": "haiku",
+     "en": "Blank-cell label classification (discovery stage 2)",
+     "ja": "空欄候補のラベル分類（発見の第2段階）",
+     "why_en": "Labels are short; the rules always win towards safety (a cell can only become less fillable).",
+     "why_ja": "ラベルは短く、判定は常に安全側（欄を「記入しない」側にしか変えられません）。"},
+    {"task": "standard", "tier": "sonnet",
+     "en": "Standard text, yen amounts, person names",
+     "ja": "通常の文章・金額・氏名",
+     "why_en": "Needs reading comprehension but no condensation.",
+     "why_ja": "読解は必要ですが、要約はいりません。"},
+    {"task": "long_text", "tier": "opus",
+     "en": "Long-text condensation (memo passage longer than the printed limit, or a 150+ char limit)",
+     "ja": "字数制限を超える長文の要約（または150字以上の欄）",
+     "why_en": "Deletion-only condensation that must not drop a condition is the hardest step.",
+     "why_ja": "条件を落とさずに削除だけで縮める、最も難しい作業です。"},
+    {"task": "revise", "tier": "opus",
+     "en": "Every self-correction pass after a validator rejection",
+     "ja": "検証器に差し戻された後の自己修正",
+     "why_en": "Continues the conversation that proposed the field, with the validator's findings.",
+     "why_ja": "その欄を提案した会話を、検証結果を添えて続けます。"},
+]
 _EFFORT_ORDER = ("low", "medium", "high", "xhigh", "max")
 _MODEL_ID_RE = re.compile(r"^claude-(?P<family>[a-z]+)-(?P<major>\d+)(?:-(?P<minor>\d{1,2}))?(?:-\d{8})?$")
 
@@ -540,6 +613,8 @@ class ClaudeEngine:
         self._client = client
         self.messages: list[dict[str, Any]] = []
         self._thread_of: dict[str, list[dict[str, Any]]] = {}
+        # slot_id -> [(served model, task, reason, fallback note)], one entry per call that handled the field
+        self._route_of: dict[str, list[tuple[str, str, str, str]]] = {}
         self.usage: dict[str, Any] = {"requests": 0, "input_tokens": 0, "output_tokens": 0,
                                       "cache_read_input_tokens": 0, "models": [], "calls": [], "routing": [],
                                       "thinking_summaries": [], "redacted_thinking_blocks": 0}
@@ -587,7 +662,8 @@ class ClaudeEngine:
         return self._client
 
     def _call(self, thread: list[dict[str, Any]], model: str, task: str, system: str = SYSTEM_PROMPT,
-              schema: Optional[dict[str, Any]] = None, key: str = "fields") -> dict[str, Any]:
+              schema: Optional[dict[str, Any]] = None, key: str = "fields",
+              slots: Optional[list[str]] = None) -> dict[str, Any]:
         caps = model_capabilities(model)
         kwargs: dict[str, Any] = dict(model=model, max_tokens=min(self.max_tokens, caps["max_output_tokens"] or self.max_tokens),
                                       system=system, messages=thread)
@@ -625,12 +701,13 @@ class ClaudeEngine:
         if served not in self.usage["models"]:
             self.usage["models"].append(served)
         self.usage["calls"].append({
-            "task": task, "requested_model": model, "served_model": served, "effort": effort,
+            "task": task, "slots": list(slots or []), "requested_model": model, "served_model": served,
+            "effort": effort,
             "thinking": "adaptive, summarized" if caps["adaptive_thinking"] else "omitted (not supported by this model)",
             "stop_reason": msg.stop_reason, "input_tokens": int(getattr(u, "input_tokens", 0) or 0),
             "output_tokens": int(getattr(u, "output_tokens", 0) or 0),
         })
-        self._collect_thinking(msg, served, task)
+        self._collect_thinking(msg, served, task, slots)
         if msg.stop_reason == "refusal":
             details = getattr(msg, "stop_details", None)
             raise LiveEngineError(f"Claude declined the request (category: {getattr(details, 'category', None)})")
@@ -646,7 +723,7 @@ class ClaudeEngine:
         thread.append({"role": "assistant", "content": msg.content})  # sent back unchanged on the next turn
         return data
 
-    def _collect_thinking(self, msg: Any, served: str, task: str) -> None:
+    def _collect_thinking(self, msg: Any, served: str, task: str, slots: Optional[list[str]] = None) -> None:
         for block in getattr(msg, "content", None) or []:
             kind = getattr(block, "type", "")
             if kind == "redacted_thinking":
@@ -655,7 +732,35 @@ class ClaudeEngine:
                 text = (getattr(block, "thinking", "") or "").strip()
                 if text and len(self.usage["thinking_summaries"]) < MAX_THINKING_SUMMARIES:
                     self.usage["thinking_summaries"].append(
-                        {"label": THINKING_SUMMARY_LABEL, "model": served, "task": task, "text": text[:4000]})
+                        {"label": THINKING_SUMMARY_LABEL, "model": served, "task": task, "slots": list(slots or []),
+                         "text": text[:4000]})
+
+    def _note_route(self, slot_ids: list[str], requested: str, task: str, reasons: dict[str, str]) -> None:
+        """Remember which model actually served each field (the served id can differ after a server-side fallback)."""
+        served = self.usage["calls"][-1]["served_model"]
+        note = "" if served.startswith(requested) else f" (served by {served}; requested {requested})"
+        for sid in slot_ids:
+            self._route_of.setdefault(sid, []).append((served, task, reasons.get(sid, ""), note))
+
+    def field_route(self, slot_id: str) -> tuple[str, str]:
+        """(routed_model, route_reason): e.g. ("claude-haiku-5-5 → claude-opus-5-5 (revision)",
+        "structured field (wareki_date); then self-correction after validator rejection")."""
+        steps = self._route_of.get(slot_id) or []
+        if not steps:
+            return "", ""
+        hops: list[list[Any]] = []  # [label, count]; repeated revision rounds by one model are folded
+        for served, task, _why, _note in steps:
+            label = served + (" (revision)" if task == "revise" else "")
+            if hops and task == "revise" and hops[-1][0] == label:
+                hops[-1][1] += 1
+            else:
+                hops.append([label, 1])
+        routed = " → ".join(lab if n == 1 else lab.replace("(revision)", f"(revision ×{n})") for lab, n in hops)
+        why = "; ".join(dict.fromkeys(w for _s, task, w, _n in steps if task != "revise" and w)) \
+            or "not proposed by this engine"
+        if any(task == "revise" for _s, task, _w, _n in steps):
+            why += f"; then {REVISE_REASON}"
+        return routed, why + "".join(dict.fromkeys(n for *_rest, n in steps if n))
 
     @staticmethod
     def _to_drafts(data: dict[str, Any], known: set[str], memo: str = "") -> dict[str, Draft]:
@@ -700,12 +805,13 @@ class ClaudeEngine:
 
     def propose(self, slots: list[FormSlot], memo: str, form_title: str = "") -> dict[str, Draft]:
         drafts: dict[str, Draft] = {}
-        self._thread_of = {}
+        self._thread_of, self._route_of = {}, {}
         for model, group, reasons in self.route(slots, memo):
             thread: list[dict[str, Any]] = [{"role": "user", "content": self._mapping_prompt(group, memo, form_title)}]
-            self.usage["routing"].append({"task": "propose", "model": model, "slots": [s.slot_id for s in group],
-                                          "reasons": reasons})
-            data = self._call(thread, model, task="propose")
+            ids = [s.slot_id for s in group]
+            self.usage["routing"].append({"task": "propose", "model": model, "slots": ids, "reasons": reasons})
+            data = self._call(thread, model, task="propose", slots=ids)
+            self._note_route(ids, model, "propose", reasons)
             for s in group:
                 self._thread_of[s.slot_id] = thread
             drafts.update(self._to_drafts(data, {s.slot_id for s in group}, memo))
@@ -717,7 +823,7 @@ class ClaudeEngine:
     def revise(self, failing, memo: str) -> dict[str, Draft]:
         """Re-prompt with the validator's findings, in the conversation that proposed each field (Opus in auto)."""
         model = self.model_for("revise")
-        why = ("self-correction after validator rejection" if not self.fixed
+        why = (REVISE_REASON if not self.fixed
                else "model set explicitly" if self.explicit_model else f"model tier '{self.model_tier}'")
         by_thread: dict[int, tuple[list[dict[str, Any]], list]] = {}
         for item in failing:
@@ -738,9 +844,11 @@ class ClaudeEngine:
                 "\n\nReturn corrected entries for these slot_ids only, in the same JSON format. Quotes must be copied "
                 "exactly from a single memo line. If the memo does not support a value, return status \"not_found\".")})
             ids = [slot.slot_id for slot, _, _ in items]
-            self.usage["routing"].append({"task": "revise", "model": model, "slots": ids,
-                                          "reasons": {sid: why for sid in ids}})
-            out.update(self._to_drafts(self._call(thread, model, task="revise"), set(ids), memo))
+            reasons = {sid: why for sid in ids}
+            self.usage["routing"].append({"task": "revise", "model": model, "slots": ids, "reasons": reasons})
+            data = self._call(thread, model, task="revise", slots=ids)
+            self._note_route(ids, model, "revise", reasons)
+            out.update(self._to_drafts(data, set(ids), memo))
             self.messages = thread
         return out
 
@@ -755,7 +863,7 @@ class ClaudeEngine:
         self.usage["routing"].append({"task": "classify", "model": model, "slots": ids,
                                       "reasons": {cid: "blank-cell label classification" for cid in ids}})
         data = self._call(thread, model, task="classify", system=CLASSIFY_SYSTEM_PROMPT, schema=CLASSIFY_SCHEMA,
-                          key="cells")
+                          key="cells", slots=ids)
         return {str(c.get("candidate_id")): c for c in data["cells"]
                 if isinstance(c, dict) and str(c.get("candidate_id")) in set(ids)}
 
@@ -1014,12 +1122,18 @@ def map_fields(slots: list[FormSlot], memo: str, engine, form_title: str = "", m
                 st.action = f"{engine.name} revision round {round_no + 1} after verifier feedback"
             else:
                 st.done = True
-    mappings = [_to_mapping(st, engine.name) for st in states.values()]
+    route = getattr(engine, "field_route", None)
+    mappings = []
+    for st in states.values():
+        routed, why = route(st.slot.slot_id) if route else ("", "")
+        mappings.append(_to_mapping(st, engine.name, routed or engine.name,
+                                    why or "this engine has no per-field model routing"))
     return MappingRun(mappings, engine.name, getattr(engine, "label", engine.name), dict(getattr(engine, "usage", {})), rounds)
 
 
-def _to_mapping(st: _State, engine_name: str) -> FieldMapping:
+def _to_mapping(st: _State, engine_name: str, routed_model: str = "", route_reason: str = "") -> FieldMapping:
     d = st.draft
+    route = {"engine": engine_name, "routed_model": routed_model, "route_reason": route_reason}
     if st.passed:
         lines = [(sp.line_start, sp.line_end) for sp in st.spans]
         lr = (min(a for a, _ in lines), max(b for _, b in lines)) if lines else None
@@ -1028,21 +1142,21 @@ def _to_mapping(st: _State, engine_name: str) -> FieldMapping:
             slot_id=d.slot_id, filled_value=d.value, source_quote=" … ".join(sp.text for sp in st.spans),
             source_line_range=lr, confidence=d.confidence, reasoning=d.reasoning, char_count=len(d.value),
             validation_passed=True, warnings=warns, status="filled", source_spans=st.spans, attempts=st.attempts,
-            normalizations=list(dict.fromkeys(st.flags)), engine=engine_name, condensed_removed=list(st.removed),
+            normalizations=list(dict.fromkeys(st.flags)), condensed_removed=list(st.removed), **route,
         )
     errors = [i.message for i in st.last_errors]
     if d.status != "filled" or not d.value:
         reason = d.reasoning or "No evidence in the memo."
-        return FieldMapping(slot_id=d.slot_id, status="needs_human_input", reasoning=reason, engine=engine_name,
-                            attempts=st.attempts, warnings=["not stated in the memo — left blank for the reviewer"])
+        return FieldMapping(slot_id=d.slot_id, status="needs_human_input", reasoning=reason, attempts=st.attempts,
+                            warnings=["not stated in the memo — left blank for the reviewer"], **route)
     # Grounding / validation still fails after every repair and revision: the proposal is only a
     # suggestion for the reviewer and is never written into the form.
     return FieldMapping(
         slot_id=d.slot_id, status="needs_human_input", suggested_value=d.value, reasoning=d.reasoning,
         errors=errors, warnings=list(dict.fromkeys(["could not be validated automatically — not written into the form"]
                                                    + st.warnings)),
-        attempts=st.attempts, normalizations=list(dict.fromkeys(st.flags)), engine=engine_name,
-        char_count=len(d.value), confidence=d.confidence, condensed_removed=list(st.removed),
+        attempts=st.attempts, normalizations=list(dict.fromkeys(st.flags)),
+        char_count=len(d.value), confidence=d.confidence, condensed_removed=list(st.removed), **route,
     )
 
 
@@ -1053,6 +1167,7 @@ def human_mapping(slot: FormSlot, value: str) -> FieldMapping:
     return FieldMapping(
         slot_id=slot.slot_id, filled_value=value.strip(), status="human_entered", char_count=len(value.strip()),
         validation_passed=not errors, errors=errors, confidence=1.0, engine="human",
+        routed_model=HUMAN_ROUTE[0], route_reason=HUMAN_ROUTE[1],
         reasoning="Entered by the human reviewer.", warnings=[i.message for i in issues if i.severity == "warning"],
         normalizations=["human"],
         attempts=[CorrectionAttempt(attempt=1, action="entered by the reviewer", value=value.strip(), issues=issues,

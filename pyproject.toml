@@ -7,6 +7,7 @@ name = "form-guard-agent"
 version = "0.2.0"
 description = "Fill only the designated fields of Word/Excel forms, prove nothing else changed, and keep a human in the loop."
 readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.10"
 authors = [{ name = "Masaki Miura" }]
 dependencies = [

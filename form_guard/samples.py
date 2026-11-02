@@ -75,6 +75,8 @@ UNMARKED_FORMS = [
         "file_type": "docx",
         "form": "form4_unmarked_blank.docx",
         "memo": "memo4_equipment_use.txt",
+        "highlights": ["no markers — 11 candidate cells", "4 office-only cells locked (受付番号・受付日・審査欄・事務局受付欄)",
+                       "duplicate 「氏名」 → 研究代表者_氏名 / 事務担当者_氏名", "vMerge continuation rejected"],
     },
     {
         "id": "form5",
@@ -84,6 +86,8 @@ UNMARKED_FORMS = [
         "file_type": "xlsx",
         "form": "form5_unmarked_blank.xlsx",
         "memo": "memo5_stockpile_loan.txt",
+        "highlights": ["5 applicant cells in merged ranges", "SUM formula cell rejected", "事務局使用欄（決裁印・受付番号） locked",
+                       "cell style ids kept"],
     },
 ]
 
@@ -93,6 +97,13 @@ def demo_by_id(demo_id: str) -> dict:
         if d["id"] == demo_id:
             return d
     raise KeyError(demo_id)
+
+
+def unmarked_by_id(form_id: str) -> dict:
+    for u in UNMARKED_FORMS:
+        if u["id"] == form_id:
+            return u
+    raise KeyError(form_id)
 
 
 def unmarked_paths(item: dict, samples_dir: Path | None = None) -> dict[str, Path]:

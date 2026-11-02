@@ -77,7 +77,8 @@ def _print_result(result, out_root: Optional[Path] = None) -> None:
         if not c.passed:
             print(f"   ✗ {c.check_id} {c.description}: {c.details[:160]}")
     for step in (result.engine.get("usage") or {}).get("routing", []):
-        print(f"   · {step['task']} → {step['model']}: {', '.join(step['slots'])}")
+        plan = "planned in live auto (offline: no call) · " if step.get("planned_in_live_auto") else ""
+        print(f"   · {plan}{step['task']} → {step['model']}: {', '.join(step['slots'])}")
     rel = result.out_dir / "report.html" if result.out_dir else None
     if rel is not None:
         try:
@@ -127,8 +128,10 @@ def _print_discovery(d: dict) -> None:
 
 
 def _confirmed_ids(discovery: dict, confirm: str) -> list[str]:
+    from .scanner import recommended_ids
+
     if confirm.strip().lower() == "recommended":
-        return [c["candidate_id"] for c in discovery.get("candidates", []) if c.get("recommended")]
+        return recommended_ids(discovery)
     return [x.strip() for x in confirm.split(",") if x.strip()]
 
 

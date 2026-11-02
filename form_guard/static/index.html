@@ -1,31 +1,47 @@
 <!doctype html>
-<html lang="ja" data-theme="light">
+<html lang="ja" data-theme="light" data-lang="ja">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Form-Guard Agent — fill only the designated fields</title>
+<title>Form-Guard Agent — 指定欄だけを記入し、様式の変更を検査する書類記入エージェント</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='5' y='3' width='22' height='26' rx='3' fill='%23fff' stroke='%230b0b0b' stroke-width='2'/%3E%3Cpath d='M10 11h12M10 16h12M10 21h7' stroke='%230b0b0b' stroke-width='2'/%3E%3Cpath d='M18.5 22.5l2.6 2.6 5-5.6' fill='none' stroke='%230ca30c' stroke-width='2.6'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/static/styles.css">
 <script src="/static/app.js" defer></script>
 </head>
 <body>
+<!-- Bilingual UI: [data-bi="日本語|English"] = primary + sub-label (order follows the 日本語 / EN toggle),
+     [data-t] = text swap, [data-ph] = placeholder swap, [data-l="ja|en"] = whole block per language. -->
 <header class="topbar">
   <div class="brand">
     <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><rect x="5" y="3" width="22" height="26" rx="3"/><path d="M10 11h12M10 16h12M10 21h7"/><path class="tick" d="M18.5 22.5l2.6 2.6 5-5.6"/></svg>
     <div>
       <div class="brand-name">Form-Guard Agent</div>
-      <div class="brand-sub">指定欄だけを記入し、様式の変更を検査する書類記入エージェント</div>
+      <div class="brand-sub" data-t="指定欄だけを記入し、様式の変更を検査する書類記入エージェント|Fills only the designated fields of a form — and proves nothing else changed">指定欄だけを記入し、様式の変更を検査する書類記入エージェント</div>
     </div>
   </div>
   <div class="top-actions">
-    <label class="mode-pick" title="Auto uses Claude when an API key is configured, otherwise the offline demo engine">
-      <span>Engine</span>
+    <button id="suiteBtn" class="btn btn-ghost btn-sm" type="button"><span data-bi="🧩 Claude Code 連携|🧩 Claude Code · Architecture"></span></button>
+    <label class="mode-pick" data-tip="Auto は API キーがあれば Claude、無ければオフラインの決定論エンジンを使います|Auto uses Claude when an API key is configured, otherwise the offline demo engine">
+      <span data-bi="エンジン|Engine"></span>
       <select id="modeSelect">
-        <option value="auto">Auto</option>
-        <option value="demo">Offline demo (no key)</option>
-        <option value="live">Live Claude</option>
+        <option value="auto" data-t="自動 / Auto|Auto">Auto</option>
+        <option value="demo" data-t="オフライン（キー不要） / Offline demo|Offline demo (no key)">Offline demo (no key)</option>
+        <option value="live" data-t="ライブ Claude / Live Claude|Live Claude">Live Claude</option>
+      </select>
+    </label>
+    <label class="mode-pick" data-tip="ライブモードで使う Claude モデル（オフライン実行では auto の割り当て計画を表示）|Claude model(s) used in live mode (offline runs show the live auto plan)">
+      <span data-bi="モデル|Model tier"></span>
+      <select id="tierSelect">
+        <option value="auto" data-t="自動：Haiku / Sonnet / Opus|Auto: Haiku / Sonnet / Opus">Auto: Haiku / Sonnet / Opus</option>
+        <option value="opus" data-t="Opus 5.5 のみ|Opus 5.5 only">Opus 5.5 only</option>
+        <option value="sonnet" data-t="Sonnet 5.5 のみ|Sonnet 5.5 only">Sonnet 5.5 only</option>
+        <option value="haiku" data-t="Haiku 5.5 のみ|Haiku 5.5 only">Haiku 5.5 only</option>
       </select>
     </label>
     <span id="engineBadge" class="pill pill-neutral">…</span>
+    <div class="seg lang-seg" id="langToggle" role="group" aria-label="Language / 言語">
+      <button type="button" data-lang="ja" class="on">日本語</button><button type="button" data-lang="en">EN</button>
+    </div>
     <button id="themeToggle" class="icon-btn" type="button" aria-label="Toggle dark mode">◐</button>
   </div>
 </header>
@@ -33,46 +49,134 @@
 <div class="shell">
   <aside class="rail">
     <section>
-      <h2 class="rail-h">Demo forms <span>デモ様式（すべて架空）</span></h2>
+      <h2 class="rail-h" data-bi="デモ様式（マーカーあり・すべて架空）|Demo forms (marked, all fictional)"></h2>
       <div id="demoList" class="demo-list"></div>
     </section>
     <section>
-      <h2 class="rail-h">Your own form <span>自分の様式で試す</span></h2>
+      <h2 class="rail-h" data-bi="マーカーなし白紙様式・空欄自動発見|Unmarked blank forms — blank-cell discovery"></h2>
+      <div id="unmarkedList" class="demo-list"></div>
+    </section>
+    <section>
+      <h2 class="rail-h" data-bi="自分の様式で試す|Your own form"></h2>
       <form id="uploadForm" class="upload">
         <label class="file-drop">
           <input id="fileInput" type="file" accept=".docx,.xlsx" required>
-          <span id="fileLabel">Choose a .docx / .xlsx with <code>{{項目名}}</code> or <code>[記入欄: 項目名]</code> markers</span>
+          <span id="fileLabel"><span id="fileHint"><span data-l="ja"><code>{{項目名}}</code>・<code>[記入欄: 項目名]</code> の入った .docx / .xlsx、またはマーカーの無い白紙様式（下の 🔍 で空欄を発見）</span><span data-l="en">A .docx / .xlsx with <code>{{項目名}}</code> or <code>[記入欄: 項目名]</code> markers — or an unmarked blank form (use 🔍 below)</span></span><b id="fileName" hidden></b></span>
         </label>
-        <label class="field-l">Source memo <span>入力メモ</span>
-          <textarea id="memoInput" rows="7" placeholder="会議メモ・メールなどを貼り付け（実在の個人情報は入れないでください）" required></textarea>
+        <label class="field-l"><span data-bi="入力メモ|Source memo"></span>
+          <textarea id="memoInput" rows="7" data-ph="会議メモ・メールなどを貼り付け（実在の個人情報は入れないでください）|Paste meeting notes or an e-mail (no real personal data)" placeholder="会議メモ・メールなどを貼り付け（実在の個人情報は入れないでください）" required></textarea>
         </label>
-        <details class="spec-opt"><summary>Optional slot spec (.slots.json)</summary>
+        <details class="spec-opt"><summary data-t="任意：欄の定義（.slots.json）|Optional slot spec (.slots.json)">Optional slot spec (.slots.json)</summary>
           <input id="specInput" type="file" accept=".json">
-          <p class="hint">Aliases for the offline engine, or <code>targets</code> to fill empty table cells by coordinates.</p>
+          <p class="hint" data-t="オフラインエンジン用の別名や、座標で空欄を指定する targets を書けます。|Aliases for the offline engine, or targets to fill empty table cells by coordinates.">Aliases for the offline engine, or targets to fill empty table cells by coordinates.</p>
         </details>
-        <button class="btn btn-primary" type="submit">Run pipeline</button>
+        <div class="upload-actions">
+          <button class="btn btn-primary" type="submit"><span data-bi="▶ 記入して検査|▶ Run pipeline"></span></button>
+          <button id="discoverBtn" class="btn btn-ghost" type="button"><span data-bi="🔍 マーカーなし白紙から空欄を自動発見|🔍 Discover blank cells"></span></button>
+        </div>
       </form>
     </section>
     <section class="rail-note">
-      <p><b>Human-in-the-loop by design.</b> AI output is a draft. Every value shows its verbatim source;
-      a person confirms each field before the file can be downloaded.</p>
-      <p>人が全項目を確認するまで、ダウンロードはサーバー側でロックされます。</p>
+      <p data-l="ja"><b>人が最終確認する設計（HITL）。</b>AI の出力は下書きです。各値には原文の根拠が表示され、全項目を人が確認するまでダウンロードはサーバー側でロックされます。</p>
+      <p data-l="en"><b>Human-in-the-loop by design.</b> AI output is a draft. Every value shows its verbatim source; the download stays locked on the server until a person confirms every item.</p>
     </section>
   </aside>
 
   <main class="workspace">
+    <nav id="tourBar" class="tour" aria-label="Judge quick walkthrough">
+      <div class="tour-row">
+        <span class="tour-h" data-bi="🎬 審査員向け 90秒ガイドツアー|🎬 Judge Quick Walkthrough"></span>
+        <div class="tour-steps">
+          <button type="button" class="tour-step" data-tour="1"><b>①</b><span data-bi="課題と視覚比較（Visual Diff）|Problem &amp; Visual Diff"></span></button>
+          <button type="button" class="tour-step" data-tour="2"><b>②</b><span data-bi="マーカーなし白紙からの空欄発見|Unmarked form → blank cells"></span></button>
+          <button type="button" class="tour-step" data-tour="3"><b>③</b><span data-bi="原文根拠ハイライトと推測拒否|Grounding &amp; no guessing"></span></button>
+          <button type="button" class="tour-step" data-tour="4"><b>④</b><span data-bi="Claude 活用・モデル使い分け|Claude Code &amp; model routing"></span></button>
+          <button type="button" class="tour-step" data-tour="5"><b>⑤</b><span data-bi="21項目構造証明＆人間承認ロック|21-check audit &amp; HITL lock"></span></button>
+        </div>
+      </div>
+      <div id="tourCaption" class="tour-cap" hidden></div>
+    </nav>
+
     <section id="emptyState" class="empty">
-      <h1>Fill the form. Prove nothing else changed.</h1>
-      <p class="lede">Generative AI that re-writes a Word or Excel form tends to break borders, merged cells and legal text, and to invent numbers.
-        Form-Guard writes <em>only</em> into the designated fields, byte-for-byte, and shows a source for every value.</p>
+      <h1 data-l="ja">様式は1バイトも崩さず、指定欄だけを記入する。</h1>
+      <h1 data-l="en">Fill the form. Prove nothing else changed.</h1>
+      <div class="pitch">
+        <div class="pitch-card">
+          <div class="pitch-h" data-bi="誰の課題か|Whose problem"></div>
+          <p data-l="ja">研究事務・自治体の窓口・施設管理などで、Word / Excel の公式様式に毎月記入している事務担当者。</p>
+          <p data-l="en">Back-office staff in research administration, municipal counters and facility management who fill official Word / Excel forms every month.</p>
+        </div>
+        <div class="pitch-card">
+          <div class="pitch-h" data-bi="どんな課題か|What problem"></div>
+          <p data-l="ja">生成AIに頼むと様式ごと作り直され、罫線・結合セル・定型文が崩れ、メモに無い数字まで入る。罫線1本・文言1つで差し戻しになるため、AIを安全に使えない。</p>
+          <p data-l="en">Chat AI re-creates the document: borders, merged cells and legal text break, and numbers the notes never said appear. One broken border or paraphrased clause means rejection — so they cannot use AI safely.</p>
+        </div>
+        <div class="pitch-card">
+          <div class="pitch-h" data-bi="どう解決するか|How Form-Guard solves it"></div>
+          <p data-l="ja">指定欄だけを XML のバイト範囲で書き換え、21項目の決定論的検査で「他は何も変わっていない」ことを証明。各値に原文の根拠を示し、人が確認するまでダウンロードをロックします。</p>
+          <p data-l="en">It rewrites only the designated fields at the XML byte level, proves with 21 deterministic checks that nothing else changed, shows the verbatim source of every value, and locks the download until a person signs off.</p>
+        </div>
+      </div>
       <ol class="steps">
-        <li><b>Scan</b><span>find {{markers}} and printed rules (字数・和暦・上限)</span></li>
-        <li><b>Map &amp; self-correct</b><span>Claude or the offline engine, verbatim quotes only</span></li>
-        <li><b>Surgical write</b><span>replace marker characters inside the XML, nothing else</span></li>
-        <li><b>Verify</b><span>ZIP · XML skeleton · tables · borders · text · grounding</span></li>
-        <li><b>Human sign-off</b><span>checklist, then the download unlocks</span></li>
+        <li><b data-t="スキャン|Scan">スキャン</b><span data-t="欄と印刷ルール（字数・和暦・上限）を読む|find fields and printed rules (字数・和暦・上限)">欄と印刷ルール（字数・和暦・上限）を読む</span></li>
+        <li><b data-t="対応付け・自己修正|Map &amp; self-correct">対応付け・自己修正</b><span data-t="Claude（Haiku / Sonnet / Opus）またはオフライン、原文引用のみ|Claude (Haiku / Sonnet / Opus) or offline, verbatim quotes only">Claude（Haiku / Sonnet / Opus）またはオフライン、原文引用のみ</span></li>
+        <li><b data-t="外科的な書き込み|Surgical write">外科的な書き込み</b><span data-t="XML のマーカー文字だけを置換|replace only the marker characters in the XML">XML のマーカー文字だけを置換</span></li>
+        <li><b data-t="構造検査（21項目）|Verify (21 checks)">構造検査（21項目）</b><span data-t="ZIP・XML骨格・表・罫線・定型文・根拠|ZIP · XML skeleton · tables · borders · text · grounding">ZIP・XML骨格・表・罫線・定型文・根拠</span></li>
+        <li><b data-t="人による最終確認|Human sign-off">人による最終確認</b><span data-t="全項目を確認するとダウンロード解錠|checklist, then the download unlocks">全項目を確認するとダウンロード解錠</span></li>
       </ol>
-      <p class="muted">Pick a demo on the left to start. すべてのサンプル様式・メモは本ハッカソン期間中に作成した架空のものです。</p>
+      <div class="cta-row">
+        <button id="tourStart" class="btn btn-primary" type="button"><span data-bi="▶ 90秒ガイドを始める|▶ Start the 90-second walkthrough"></span></button>
+        <button id="suiteBtn2" class="btn btn-ghost" type="button"><span data-bi="🧩 Claude Code 連携を見る|🧩 See the Claude Code architecture"></span></button>
+      </div>
+      <p class="muted" data-l="ja">左のデモを選んでも始められます。すべてのサンプル様式・メモは本ハッカソン期間中にゼロから作成した架空のものです。</p>
+      <p class="muted" data-l="en">Or pick a demo on the left. All sample forms and memos were written from scratch during the hackathon and are fictional.</p>
+    </section>
+
+    <section id="discoveryView" hidden>
+      <div class="run-head">
+        <div class="run-title">
+          <div class="status st-need" data-bi="④ 人の確定待ち|Awaiting your confirmation"></div>
+          <div>
+            <h1 id="discTitle"></h1>
+            <div id="discSub" class="muted"></div>
+          </div>
+        </div>
+        <div class="run-links"><span class="pill pill-neutral" data-bi="4段階 空欄発見インスペクター|4-Stage Blank-Cell Discovery Inspector"></span></div>
+      </div>
+      <ol id="discStages" class="stages"></ol>
+      <div id="discKpis" class="kpis kpis-4"></div>
+      <div class="fields-grid">
+        <div class="card table-card">
+          <table class="cands">
+            <thead><tr>
+              <th><span data-bi="記入|Fill"></span></th><th>ID</th><th><span data-bi="位置|Location"></span></th>
+              <th><span data-bi="印字ラベル|Printed label"></span></th><th><span data-bi="推定ルール|Inferred rule"></span></th>
+              <th><span data-bi="役割|Role"></span></th><th><span data-bi="理由|Reason"></span></th>
+            </tr></thead>
+            <tbody id="candRows"></tbody>
+          </table>
+          <div class="cand-tools">
+            <button id="candRecommended" class="btn btn-ghost btn-sm" type="button"><span data-bi="推奨の申請者欄を選択|Select recommended"></span></button>
+            <button id="candNone" class="btn btn-ghost btn-sm" type="button"><span data-bi="選択を解除|Clear"></span></button>
+          </div>
+        </div>
+        <div class="side">
+          <div class="card" id="discRejected"></div>
+          <div class="card">
+            <div class="card-h"><span data-bi="入力メモ（編集可）|Source memo (editable)"></span></div>
+            <textarea id="discMemo" rows="11"></textarea>
+          </div>
+          <div class="card confirm-card">
+            <div id="discCount" class="msg"></div>
+            <button id="fillConfirmed" class="btn btn-primary btn-wide" type="button"><span data-bi="確定した空欄だけに外科的記入＆21項目検査を実行|Fill confirmed cells &amp; run 21 checks"></span></button>
+            <p class="hint" data-t="記入前に、白紙様式の SHA-256 が発見時と同じか、0件でないか、事務局欄を含まないかをサーバーが再確認します。|Before anything is written, the server re-checks the blank form's SHA-256 and refuses 0 cells or any office-only cell.">Before anything is written, the server re-checks the blank form's SHA-256 and refuses 0 cells or any office-only cell.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="suiteView" hidden>
+      <div id="suiteStandalone"></div>
     </section>
 
     <section id="runView" hidden>
@@ -85,34 +189,36 @@
           </div>
         </div>
         <div class="run-links">
-          <a id="reportLink" class="btn btn-ghost" target="_blank" rel="noopener">Full report ↗</a>
-          <a id="auditLink" class="btn btn-ghost" target="_blank" rel="noopener">Audit JSON ↗</a>
+          <button id="backToDisc" class="btn btn-ghost" type="button" hidden><span data-bi="↩ 空欄の選択に戻る|↩ Back to cell selection"></span></button>
+          <a id="reportLink" class="btn btn-ghost" target="_blank" rel="noopener"><span data-bi="レポート ↗|Full report ↗"></span></a>
+          <a id="auditLink" class="btn btn-ghost" target="_blank" rel="noopener"><span data-bi="監査ログ ↗|Audit JSON ↗"></span></a>
         </div>
       </div>
       <div id="kpis" class="kpis"></div>
 
       <nav class="tabs" role="tablist">
-        <button role="tab" data-tab="visual" aria-selected="true">Visual diff <span>見た目の比較</span></button>
-        <button role="tab" data-tab="fields" aria-selected="false">Fields &amp; sources <span>記入値と根拠</span></button>
-        <button role="tab" data-tab="audit" aria-selected="false">Structural audit <span>構造検査</span></button>
-        <button role="tab" data-tab="hitl" aria-selected="false">Human approval <span>人による最終確認</span></button>
+        <button role="tab" data-tab="visual" aria-selected="true"><span data-bi="見た目の比較|Visual diff"></span></button>
+        <button role="tab" data-tab="fields" aria-selected="false"><span data-bi="記入値と根拠|Fields &amp; sources"></span></button>
+        <button role="tab" data-tab="audit" aria-selected="false"><span data-bi="構造検査|Structural audit"></span></button>
+        <button role="tab" data-tab="hitl" aria-selected="false"><span data-bi="人による最終確認|Human approval"></span></button>
+        <button role="tab" data-tab="claude" aria-selected="false"><span data-bi="Claude Code 連携|Claude Code · Architecture"></span></button>
       </nav>
 
       <div id="tab-visual" class="tab-panel">
         <div class="toolbar">
           <div class="seg" id="cmpMode">
-            <button data-v="naive" class="on">Naive AI ↔ Form-Guard</button>
-            <button data-v="blank">Blank original ↔ Form-Guard</button>
+            <button data-v="naive" class="on" data-t="生成AIで作り直し ↔ Form-Guard|Naive AI ↔ Form-Guard">Naive AI ↔ Form-Guard</button>
+            <button data-v="blank" data-t="白紙の原本 ↔ Form-Guard|Blank original ↔ Form-Guard">Blank original ↔ Form-Guard</button>
           </div>
           <div class="seg" id="cmpLayout">
-            <button data-v="split" class="on">Side by side</button>
-            <button data-v="slider">Slider</button>
+            <button data-v="split" class="on" data-t="左右に並べる|Side by side">Side by side</button>
+            <button data-v="slider" data-t="スライダー|Slider">Slider</button>
           </div>
           <div class="legend">
-            <span class="lg lg-good">✓ written value</span>
-            <span class="lg lg-warn">⚠ awaiting human input</span>
-            <span class="lg lg-info">▭ designated field</span>
-            <span class="lg lg-bad">✗ naive regeneration problem</span>
+            <span class="lg lg-good" data-t="✓ 記入した値|✓ written value">✓ written value</span>
+            <span class="lg lg-warn" data-t="⚠ 人の入力待ち|⚠ awaiting human input">⚠ awaiting human input</span>
+            <span class="lg lg-info" data-t="▭ 指定欄|▭ designated field">▭ designated field</span>
+            <span class="lg lg-bad" data-t="✗ 作り直しで壊れた箇所|✗ naive regeneration problem">✗ naive regeneration problem</span>
           </div>
         </div>
         <div id="cmpSplit" class="cmp-split">
@@ -138,14 +244,18 @@
         <div class="fields-grid">
           <div class="card table-card">
             <table class="fields">
-              <thead><tr><th>Field</th><th>Value</th><th class="num">Chars</th><th>Status</th><th>Source</th></tr></thead>
+              <thead><tr>
+                <th><span data-bi="欄|Field"></span></th><th><span data-bi="記入値|Value"></span></th>
+                <th class="num"><span data-bi="字数|Chars"></span></th><th><span data-bi="状態|Status"></span></th>
+                <th><span data-bi="モデル|Model"></span></th><th><span data-bi="根拠|Source"></span></th>
+              </tr></thead>
               <tbody id="fieldRows"></tbody>
             </table>
           </div>
           <div class="side">
-            <div class="card" id="fieldDetail"><p class="muted">Select a field — or click a highlighted value in the preview.</p></div>
+            <div class="card" id="fieldDetail"></div>
             <div class="card memo-card">
-              <div class="card-h">Source memo <span>入力メモ（黄色＝根拠として引用された箇所）</span></div>
+              <div class="card-h"><span data-bi="入力メモ（黄色＝根拠として引用された箇所）|Source memo (yellow = quoted as evidence)"></span></div>
               <div id="memoView" class="memo"></div>
             </div>
           </div>
@@ -155,11 +265,11 @@
       <div id="tab-audit" class="tab-panel" hidden>
         <div id="auditGroups" class="audit-groups"></div>
         <div class="card">
-          <div class="card-h">ZIP entries <span>パーツ単位のSHA-256</span></div>
+          <div class="card-h"><span data-bi="ZIP 内パーツ（SHA-256）|ZIP entries (per-part SHA-256)"></span></div>
           <table class="mono-table"><thead><tr><th>Entry</th><th>Role</th><th>SHA-256 (original)</th><th>Result</th></tr></thead><tbody id="entryRows"></tbody></table>
         </div>
         <div class="card">
-          <div class="card-h">Surgical patch manifest <span>実際に書き換えたバイト範囲</span></div>
+          <div class="card-h"><span data-bi="外科的パッチ一覧（実際に書き換えたバイト範囲）|Surgical patch manifest (the byte ranges actually rewritten)"></span></div>
           <table class="mono-table"><thead><tr><th>Part</th><th>Field</th><th class="num">Bytes</th><th>Change</th></tr></thead><tbody id="patchRows"></tbody></table>
         </div>
       </div>
@@ -167,17 +277,19 @@
       <div id="tab-hitl" class="tab-panel" hidden>
         <div id="pendingBox"></div>
         <div class="card">
-          <div class="card-h">Final confirmation checklist <span>全項目を人が確認してから出力</span></div>
+          <div class="card-h"><span data-bi="最終確認チェックリスト（全項目を人が確認してから出力）|Final confirmation checklist (a person confirms every item)"></span></div>
           <ul id="checklist" class="checklist"></ul>
           <div class="approve-row">
-            <label class="field-l inline">Reviewer <span>確認者名</span><input id="reviewerInput" type="text" maxlength="80" placeholder="例：架空 花子（確認担当）"></label>
-            <button id="checkAll" class="btn btn-ghost" type="button">Check all (I reviewed each)</button>
-            <button id="approveBtn" class="btn btn-primary" type="button" disabled>Approve</button>
-            <a id="downloadBtn" class="btn btn-success disabled" aria-disabled="true">⬇ Download verified file</a>
+            <label class="field-l inline"><span data-bi="確認者名|Reviewer"></span><input id="reviewerInput" type="text" maxlength="80" data-ph="例：架空 花子（確認担当）|e.g. 架空 花子 (reviewer)" placeholder="例：架空 花子（確認担当）"></label>
+            <button id="checkAll" class="btn btn-ghost" type="button"><span data-bi="すべて確認済みにする（各項目を確認した）|Check all (I reviewed each)"></span></button>
+            <button id="approveBtn" class="btn btn-primary" type="button" disabled><span data-bi="承認する|Approve"></span></button>
+            <a id="downloadBtn" class="btn btn-success disabled" aria-disabled="true"></a>
           </div>
           <div id="approveMsg" class="msg"></div>
         </div>
       </div>
+
+      <div id="tab-claude" class="tab-panel" hidden></div>
     </section>
   </main>
 </div>
@@ -185,14 +297,14 @@
 <div id="busy" class="busy" hidden>
   <div class="busy-card">
     <div class="spinner" aria-hidden="true"></div>
-    <div><b>Running pipeline…</b><div class="muted" id="busyStep">Scan → Map &amp; self-correct → Surgical write → Verify → Visual diff</div></div>
+    <div><b data-t="処理中…|Working…">処理中…</b><div class="muted" id="busyStep"></div></div>
   </div>
 </div>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
 <footer class="foot">
-  All sample forms, memos and names are 100% fictional and were written during the hackathon. Do not upload real personal data.
-  ・ 記入内容の事実確認と提出判断は人が行います（AIは材料と根拠を示すだけです）。
+  <span data-l="ja">サンプルの様式・メモ・人名はすべて本ハッカソン期間中に作成した架空のものです。実在の個人情報はアップロードしないでください。記入内容の事実確認と提出判断は人が行います（AI は材料と根拠を示すだけです）。</span>
+  <span data-l="en">All sample forms, memos and names are 100% fictional and were written during the hackathon. Do not upload real personal data. Checking the facts and deciding to submit stays with a person — the AI only supplies drafts and their sources.</span>
 </footer>
 </body>
 </html>

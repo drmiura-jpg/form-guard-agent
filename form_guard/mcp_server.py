@@ -343,7 +343,8 @@ class FormGuardMCP:
                              "ungrounded_claims": rep.ungrounded_claims_count, "checks": self._checks(rep)},
             "fields": [{"slot_id": m.slot_id, "status": m.status, "value": m.filled_value,
                         "suggested_value": m.suggested_value, "source_quote": m.source_quote,
-                        "source_line_range": m.source_line_range, "normalizations": m.normalizations}
+                        "source_line_range": m.source_line_range, "normalizations": m.normalizations,
+                        "routed_model": m.routed_model, "route_reason": m.route_reason}
                        for m in r.mappings],
             "hitl_checklist": [{"item_id": h.item_id, "kind": h.kind, "prompt": h.prompt, "value": h.value,
                                 "source_quote": h.source_quote, "flags": h.flags, "required": h.required}

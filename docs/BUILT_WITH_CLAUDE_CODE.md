@@ -15,6 +15,12 @@ models. [日本語 ↓](#日本語)
 | **Hook** | `.claude/settings.json` — `PostToolUse` on `Edit\|Write` | After every edit, a one-line `python -c "…"` checks Python syntax and JSON validity and scans the edited file for Anthropic API key patterns, literal API key assignments, local user-profile paths and e-mail addresses outside the reserved example domains. A finding is fed back to Claude (exit code 2). | Hygiene that must never be forgotten is enforced by the harness, not by memory. The command contains no shell-specific characters, so it runs in bash/sh and cmd.exe alike; if Python is missing it simply does not run and never blocks editing. No `bypassPermissions` anywhere. |
 | **MCP server** | `.mcp.json` → `python -m form_guard.mcp_server` (`form_guard/mcp_server.py`) | Four tools over stdio JSON-RPC 2.0: `form_guard_scan`, `form_guard_discover_blank_cells`, `form_guard_fill`, `form_guard_verify`, each with a full JSON Schema `inputSchema`. Newline-delimited and Content-Length framed messages; no dependencies (the official `mcp` SDK can be used with `--fastmcp`). | Claude Code (or any MCP client) calls the deterministic engine directly and gets structured results. `form_guard_fill` only writes an **unapproved draft** (`approval_status: UNAPPROVED_DRAFT_REQUIRES_HUMAN_SIGN_OFF`) under `output/mcp_runs/`; reviewer-entered values cannot be sent through MCP, office-only cells cannot be confirmed, and paths must stay inside the project. |
 
+The web UI makes the suite inspectable without opening an editor: the tab **Claude Code 連携 · Architecture**
+(`GET /api/claude-suite`, `form_guard/claude_suite.py`) reads these files at request time — skill and subagent front
+matter (with each subagent's model and tools), the hook's event, matcher and checks, the permission denials, the MCP
+server registration and its tools — and shows how they work together, next to this run's per-field model routing,
+the routing policy and the measured workflow numbers of section 3.
+
 A typical Claude Code session with these assets:
 
 1. *"What does this form need?"* → skill `form-scan` (MCP `form_guard_scan`, or `form_guard_discover_blank_cells` for an
@@ -49,6 +55,16 @@ field and why, every served model id, per-call stop reasons and tokens, and the 
 (labelled "API-returned thinking summary" — a summary written by the API, not the model's raw reasoning). The HTML
 report shows the routing table.
 
+Every `FieldMapping` carries `routed_model` and `route_reason`. In live mode `routed_model` is the model id the API
+actually served — `claude-haiku-5-5` for a date, `claude-sonnet-5-5 → claude-opus-5-5 (revision)` for a field the
+validator sent back — and a server-side fallback to another model is recorded as
+`(served by …; requested …)`. Offline, the deterministic engine records the plan live auto mode would follow
+(`offline (claude-haiku-5-5 in live auto)`, routing groups marked `planned_in_live_auto: True`), so a judge without an
+API key still sees the routing design while the UI, the report and the CLI never present a plan as a call. The web UI
+shows a model badge and the reason on every field (Fields & sources, with the API-returned thinking summary of the
+call that handled the field when there is one) and the whole run in the Claude Code tab; the top-bar **Model tier**
+selector (`Auto: Haiku / Sonnet / Opus`, `Opus 5.5 only`, `Sonnet 5.5 only`, `Haiku 5.5 only`) is sent with every run.
+
 ## 3. Measured workflow comparison
 
 Measured on 2026-11-02（月） on Windows 11 with Python 3.13, using the offline demo engine (no network; live Claude
@@ -58,22 +74,26 @@ Form-Guard columns are measured. Reproduce with `python docs/measure_workflow.py
 
 | Form | Fields to set up by hand | Characters to transcribe | Printed elements to re-check line by line | Form-Guard wall-clock (measured) | Automated checks | Left for human sign-off |
 |---|---|---|---|---|---|---|
-| form1 `form1_research_plan_change.docx` | 8 (markers / coordinates already designated) | 325 | 492 XML tags · 35 printed text blocks · 19 merged cells/ranges · 9 border definitions · 18 package parts | 175 ms | 21/21 (PASS) | 10 checklist items |
-| form2 `form2_municipal_equipment_subsidy.docx` | 11 (markers / coordinates already designated) | 174 | 519 XML tags · 34 printed text blocks · 7 merged cells/ranges · 12 border definitions · 18 package parts | 158 ms | 21/21 (NEEDS_HUMAN_INPUT) | 13 checklist items, 1 field(s) to enter |
-| form3 `form3_facility_safety_inspection.xlsx` | 10 (markers / coordinates already designated) | 180 | 323 XML tags · 34 printed text blocks · 40 merged cells/ranges · 350 border definitions · 9 package parts | 180 ms | 21/21 (PASS) | 12 checklist items |
-| form4 `form4_unmarked_blank.docx` | 7 (locate 11 empty cells, decide office vs applicant) | 113 | 503 XML tags · 38 printed text blocks · 24 merged cells/ranges · 10 border definitions · 18 package parts | 102 ms | 21/21 (PASS) | 9 checklist items |
-| form5 `form5_unmarked_blank.xlsx` | 5 (locate 6 empty cells, decide office vs applicant) | 52 | 282 XML tags · 30 printed text blocks · 34 merged cells/ranges · 269 border definitions · 9 package parts | 145 ms | 21/21 (PASS) | 7 checklist items |
+| form1 `form1_research_plan_change.docx` | 8 (markers / coordinates already designated) | 325 | 492 XML tags · 35 printed text blocks · 19 merged cells/ranges · 9 border definitions · 18 package parts | 189 ms | 21/21 (PASS) | 10 checklist items |
+| form2 `form2_municipal_equipment_subsidy.docx` | 11 (markers / coordinates already designated) | 174 | 519 XML tags · 34 printed text blocks · 7 merged cells/ranges · 12 border definitions · 18 package parts | 183 ms | 21/21 (NEEDS_HUMAN_INPUT) | 13 checklist items, 1 field(s) to enter |
+| form3 `form3_facility_safety_inspection.xlsx` | 10 (markers / coordinates already designated) | 180 | 323 XML tags · 34 printed text blocks · 40 merged cells/ranges · 350 border definitions · 9 package parts | 246 ms | 21/21 (PASS) | 12 checklist items |
+| form4 `form4_unmarked_blank.docx` | 7 (locate 11 empty cells, decide office vs applicant) | 113 | 503 XML tags · 38 printed text blocks · 24 merged cells/ranges · 10 border definitions · 18 package parts | 120 ms | 21/21 (PASS) | 9 checklist items |
+| form5 `form5_unmarked_blank.xlsx` | 5 (locate 6 empty cells, decide office vs applicant) | 52 | 282 XML tags · 30 printed text blocks · 34 merged cells/ranges · 269 border definitions · 9 package parts | 154 ms | 21/21 (PASS) | 7 checklist items |
 
 Across the five forms, Form-Guard wrote 40 values (844 characters) into 41 designated fields and compared 2,119 XML
-tags, 171 printed text blocks, 124 merged cells/ranges and 650 border definitions, in 0.1–0.2 s per form. What is left
-for the person is the 51-item sign-off checklist (each value next to its verbatim source) and the one fact the memo
-does not contain (法人番号 in form2), which Form-Guard leaves empty instead of guessing.
+tags, 171 printed text blocks, 124 merged cells/ranges and 650 border definitions, in about 0.1–0.25 s per form
+(wall-clock varies with machine load; the counted columns do not). What is left for the person is the 51-item sign-off
+checklist (each value next to its verbatim source) and the one fact the memo does not contain (法人番号 in form2),
+which Form-Guard leaves empty instead of guessing. The same numbers are measured live in the web UI's Claude Code tab.
 
 ## 4. Safety by design
 
 - Discovery never fills anything: the human picks the cells, office-only cells (事務局・受付印・受付番号・審査欄・決裁・検印)
   are refused, and the confirmed slot spec is bound to the SHA-256 of the blank form — a changed form is refused before
-  any fill.
+  any fill. The web UI makes this interactive for the built-in unmarked forms form4 (`.docx`) and form5 (`.xlsx`) under
+  **マーカーなし白紙様式・空欄自動発見 / Unmarked blank forms**, and for uploads (**🔍 Discover blank cells**): the
+  4-stage Blank-Cell Discovery Inspector pre-checks applicant cells, locks office-only cells, and
+  `POST /api/runs/from-discovery` accepts nothing but candidate ids of the discovery stored on the server.
 - Coordinate-designated cells are checked strictly: a Word cell may gain one run with one `<w:t>` and the blank cell's
   paragraph-mark formatting (no drawing, field, hyperlink or table); an Excel cell may only become an inline string
   with its style id kept, and reverting the designated cells must give back the blank sheet byte for byte.
@@ -81,6 +101,23 @@ does not contain (法人番号 in form2), which Form-Guard leaves empty instead 
   download refuse a stale hash or revision and a file that changed on disk.
 - All sample forms, memos, names and organisations were written from scratch during the hackathon and are fictional
   and non-medical.
+
+## 5. Iterating with Claude Code
+
+The git history shows the iterations, each one done with Claude Code and each one adding regression tests:
+
+1. **Core pipeline** — scanner, surgical writer, 21-check verifier, visual diff, web app with the HITL gate.
+2. **Audit fixes (R1)** — strict grounding, condition-safe condensation, approval bound to the verified bytes; one
+   test per finding that fails on the pre-fix code.
+3. **Phase 2** — the Claude Code suite (skills, subagents, hook, MCP server), multi-model routing, unmarked blank-form
+   discovery and strict checks of coordinate-designated cells.
+4. **Phase 3 (judging-criteria polish)** — MIT licence, interactive discovery of unmarked forms in the web UI,
+   `routed_model` / `route_reason` on every field, the Claude Code tab (`GET /api/claude-suite`), the Japanese-first
+   bilingual UI with the judge walkthrough, and this documentation.
+
+The suite now has 120 tests (fake and mock-transport Claude clients, tampering attacks, the web API's human gate, the
+MCP server over stdio, the hook in the platform shell). Claude Code made it practical to add regression tests in every
+iteration and, in Phase 3, to drive the web UI end to end in a headless browser before committing.
 
 ---
 
@@ -101,6 +138,11 @@ Form-Guard Agent は **Built with Claude: Japan 2026**（開発開始 2026-11-02
 | **Hooks** | `.claude/settings.json`（`Edit\|Write` 後の `PostToolUse`） | 編集のたびに 1 行の `python -c "…"` が Python 構文・JSON の妥当性を確認し、API キーらしき文字列、API キーの直書き、ローカルのユーザーフォルダのパス、例示用ドメイン以外のメールアドレスを検出して Claude に返します（終了コード 2）。 | 忘れてはいけない衛生チェックは、記憶ではなく仕組みで強制します。シェル依存の文字を使わないので bash/sh と cmd.exe の両方で動き、Python が無い環境では実行されないだけで編集を妨げません。`bypassPermissions` は使いません。 |
 | **MCP サーバー** | `.mcp.json` → `python -m form_guard.mcp_server`（`form_guard/mcp_server.py`） | stdio の JSON-RPC 2.0 で 4 つのツール（`form_guard_scan`・`form_guard_discover_blank_cells`・`form_guard_fill`・`form_guard_verify`）を JSON Schema 付きで提供します。改行区切りと Content-Length 形式の両方に対応し、追加の依存はありません（`--fastmcp` で公式 `mcp` SDK も利用可）。 | Claude Code などの MCP クライアントが決定論的な検証エンジンを直接呼び、構造化された結果を受け取れます。`form_guard_fill` が書くのは**未承認の下書き**（`UNAPPROVED_DRAFT_REQUIRES_HUMAN_SIGN_OFF`）だけで、担当者入力値の送信、事務局欄の確定、プロジェクト外のパスは受け付けません。 |
 
+Web 画面の「Claude Code 連携 · Architecture」タブ（`GET /api/claude-suite`、`form_guard/claude_suite.py`）は、これらの
+ファイルをリクエストのたびに読み込み（Skills とサブエージェントの定義、各サブエージェントのモデルとツール、フックの対象と
+検査項目、読み取り禁止の権限、MCP サーバーの登録とツール）、連携の流れを、この実行の欄ごとのモデル割り当て・ルーティング方針・
+第3節の計測値と並べて表示します。
+
 ### 2. アプリ内のモデルの使い分け
 
 ライブモードで `--model-tier auto`（既定）のとき、作業ごとにモデルを選びます。
@@ -118,6 +160,14 @@ adaptive thinking（`display: "summarized"`）と effort は対応モデルに�
 送らないので、パラメータ違いの 400 エラーは起きません。どの欄をどのモデルが担当したか（理由つき）、実際に応答したモデル、
 API が返した思考の要約（「API-returned thinking summary」と明記）は監査ログに記録され、HTML レポートにも表示されます。
 
+すべての `FieldMapping` に `routed_model` と `route_reason` を記録します。ライブでは API が実際に返したモデル ID
+（日付なら `claude-haiku-5-5`、検証器に差し戻された欄なら `claude-sonnet-5-5 → claude-opus-5-5 (revision)`）で、サーバー側の
+フォールバックで別のモデルが応答した場合も `(served by …; requested …)` と残ります。オフラインでは、ライブ auto 時の割り当て
+計画を `offline (claude-haiku-5-5 in live auto)`（ルーティングには `planned_in_live_auto: True`）として記録するので、API キーの
+無い審査員にも設計が見え、計画を「呼び出した」と表示することはありません。Web 画面では「記入値と根拠」で欄ごとにモデルの
+バッジと理由（その欄を処理した呼び出しの思考の要約があれば併記）を、Claude Code タブで実行全体の割り当てを表示し、右上の
+「モデル」選択（自動：Haiku / Sonnet / Opus、Opus 5.5 のみ、Sonnet 5.5 のみ、Haiku 5.5 のみ）は毎回の実行に送られます。
+
 ### 3. 作業量の比較（計測）
 
 2026-11-02（月）に Windows 11・Python 3.13 で、オフラインのデモエンジン（ネットワークなし）を使って計測しました。
@@ -126,16 +176,37 @@ API が返した思考の要約（「API-returned thinking summary」と明記�
 計測値です。`python docs/measure_workflow.py` で再現できます（表は英語版と同じ）。
 
 5 つの様式で、Form-Guard は 41 の指定欄に 40 件（844 文字）を記入し、XML タグ 2,119 個・定型文 171 か所・結合セル 124・
-罫線定義 650 を 1 様式あたり 0.1〜0.2 秒で照合しました。人に残るのは、各値を原文と並べて確認する計 51 項目の最終確認と、
-メモに無い事実（様式 2 の法人番号）の入力だけです。Form-Guard はその欄を推測で埋めません。
+罫線定義 650 を 1 様式あたり約 0.1〜0.25 秒で照合しました（時間は PC の負荷で変わりますが、数えた列は変わりません）。
+人に残るのは、各値を原文と並べて確認する計 51 項目の最終確認と、メモに無い事実（様式 2 の法人番号）の入力だけです。
+Form-Guard はその欄を推測で埋めません。同じ数値は Web 画面の Claude Code タブでもその場で計測して表示します。
 
 ### 4. 安全のための設計
 
 - 空欄の発見は記入を一切しません。記入する欄は人が選び、事務局欄（事務局・受付印・受付番号・審査欄・決裁・検印）は拒否し、
-  確定した欄の定義は白紙様式の SHA-256 に結び付けます。様式が変わっていれば記入前に止めます。
+  確定した欄の定義は白紙様式の SHA-256 に結び付けます。様式が変わっていれば記入前に止めます。Web 画面では左の
+  「マーカーなし白紙様式・空欄自動発見」の form4（.docx）・form5（.xlsx）と、アップロードした様式（「🔍 マーカーなし白紙から
+  空欄を自動発見」）でこれを対話的に行えます。4段階の空欄発見インスペクターは申請者欄を最初からチェックし、事務局専用欄を
+  ロックします。`POST /api/runs/from-discovery` が受け取るのは、サーバーに保存した発見結果の候補 ID だけです。
 - 座標で指定した欄は厳しく検査します。Word の欄に追加できるのは、元の段落記号の書式を持つ 1 つの run と 1 つの `<w:t>` だけ
   （図・フィールド・ハイパーリンク・表は不可）、Excel の欄は書式番号 `s` を保ったインライン文字列だけで、指定欄を元に戻すと
   白紙のシートとバイト単位で一致しなければなりません。
 - Web 画面の承認は、画面上の版（revision）と検査済みファイルの SHA-256 に結び付けます。古いハッシュや版、ディスク上で
   変更されたファイルは、承認もダウンロードも拒否します。
 - サンプルの様式・メモ・人名・組織は、すべて本ハッカソン期間中にゼロから自作した架空のもので、医療とは無関係です。
+
+### 5. Claude Code による反復開発
+
+git の履歴に、Claude Code で進めた各段階が残っています。どの段階も回帰テストを追加しています。
+
+1. **基本パイプライン** — スキャン、外科的な書き込み、21 項目の検査、見た目の比較、人による承認ゲートつきの Web 画面。
+2. **監査指摘の修正（R1）** — 根拠の厳格化、条件を落とさない要約、検査済みバイト列に結び付けた承認。指摘ごとに、修正前の
+   コードでは失敗するテストを追加。
+3. **Phase 2** — Claude Code 拡張一式（Skills・サブエージェント・フック・MCP サーバー）、モデルの使い分け、マーカーなし白紙
+   様式の空欄発見、座標指定欄の厳格な検査。
+4. **Phase 3（審査基準に沿った仕上げ）** — MIT ライセンス、Web 画面でのマーカーなし様式の対話的な空欄発見、全欄の
+   `routed_model` / `route_reason`、Claude Code タブ（`GET /api/claude-suite`）、日本語を既定とする 2 言語 UI と審査員向け
+   ガイドツアー、このドキュメント。
+
+テストは 120 件です（偽の Claude クライアントとモックの通信、改ざん攻撃、Web API の承認ゲート、stdio 経由の MCP サーバー、
+各 OS のシェルでのフック）。Claude Code によって、どの段階でも回帰テストを追加し、Phase 3 ではコミット前にヘッドレス
+ブラウザーで Web 画面を端から端まで操作して確認する進め方を無理なく続けられました。

@@ -26,7 +26,9 @@ from form_guard import DEFAULT_MODEL, MODEL_HAIKU, MODEL_OPUS, MODEL_SONNET
 from form_guard.constraints import pattern_from_example, validate_value
 from form_guard.grounding import affirmed_options, ground_value, locate_quote
 from form_guard.mapper import (
+    HUMAN_ROUTE,
     THINKING_SUMMARY_LABEL,
+    TIER_MODELS,
     ClaudeEngine,
     DemoEngine,
     Draft,
@@ -37,6 +39,7 @@ from form_guard.mapper import (
     model_capabilities,
     route_slot,
 )
+from form_guard.measure import markdown, measure
 from form_guard.models import FormSlot
 from form_guard.ooxml import S_NS, UnsafeXMLError, UnsupportedXMLError, add_preserve_attr, index_part, raw_char_offsets
 from form_guard.pipeline import run_pipeline
@@ -1097,7 +1100,7 @@ def test_r1_a9_validate_value_rejects_impossible_dates_eras_periods_and_weekdays
     assert errs(period, "令和9年1月1日（金）～令和8年12月1日（火）") == ["period_order"]
     assert errs(period, "令和8年12月1日（火）～令和9年2月26日（金）") == []
     assert errs(period, "令和8年12月1日（水）～令和9年2月26日（金）") == ["weekday_mismatch"]
-    for bad in ("2026年2月29日", "2026年2月30日", "2026/02/29", "2026年11月2日（火）", "11月2日"):
+    for bad in ("2026年2月29日", "2026年2月30日", "2026/02/29", "2026年11月2日" + "（火）", "11月2日"):
         assert errs(western, bad), bad
     for good in ("2026年11月2日（月）", "2028年2月29日", "2026/11/02", "2026年12月1日（火）～2027年2月26日（金）"):
         assert errs(western, good) == [], good
@@ -1113,7 +1116,7 @@ def test_r1_a9_validate_value_rejects_impossible_dates_eras_periods_and_weekdays
 
 def test_r1_a10_weekday_or_calendar_error_in_the_memo_is_never_auto_filled(samples_dir):
     slots = [s for s in scan(paths(samples_dir, "form1")["form"]).slots if s.slot_id == "提出日"]
-    m = map_fields(slots, "提出日：2026年11月2日（火）に提出\n", DemoEngine()).mappings[0]
+    m = map_fields(slots, "提出日：2026年11月2日" + "（火）に提出\n", DemoEngine()).mappings[0]
     assert m.status == "needs_human_input" and m.filled_value == "" and m.suggested_value == "令和8年11月2日（火）"
     assert any("曜日" in e or "weekday" in e for e in m.errors)
     m2 = map_fields(slots, "提出日：2026年2月30日に提出\n", DemoEngine()).mappings[0]
@@ -1728,6 +1731,7 @@ def test_p01_api_returned_thinking_summaries_are_recorded_and_labelled(samples_d
                      ClaudeEngine(client=fake_client_factory([msg]), model_tier="opus"))
     (summary,) = run.usage["thinking_summaries"]
     assert summary == {"label": THINKING_SUMMARY_LABEL, "model": MODEL_OPUS, "task": "propose",
+                       "slots": [s.slot_id for s in scan(p["form"]).slots],  # the fields this call covered
                        "text": "Checked every quote against the numbered memo lines."}
     assert THINKING_SUMMARY_LABEL.startswith("API-returned thinking summary") and run.usage["redacted_thinking_blocks"] == 1
 
@@ -2161,12 +2165,6 @@ def test_p01_measured_workflow_script_reproduces_the_table(samples_dir, tmp_path
         assert re.sub(r"\| [\d,]+ ms \|", "| ms |", line) in re.sub(r"\| [\d,]+ ms \|", "| ms |", doc), line
 
 
-ASSETS_INSTALLED = (ROOT / ".claude" / "settings.json").is_file() and (ROOT / ".mcp.json").is_file()
-needs_assets = pytest.mark.skipif(not ASSETS_INSTALLED, reason=(
-    ".claude/ and .mcp.json are not installed yet: writing them needs the user's approval "
-    "(staged copies: output/claude_assets_pending/)"))
-
-
 def _frontmatter(path: Path) -> dict[str, str]:
     text = path.read_text(encoding="utf-8")
     assert text.startswith("---\n"), path
@@ -2174,7 +2172,6 @@ def _frontmatter(path: Path) -> dict[str, str]:
     return dict(line.split(": ", 1) for line in head.strip().splitlines())
 
 
-@needs_assets
 def test_p01_project_skills_subagents_hook_and_mcp_registration():
     claude = ROOT / ".claude"
     commands = {"form-scan": ["--scan", "--discover-blanks"], "surgical-fill": ["--form", "--memo", "--confirm"],
@@ -2200,7 +2197,6 @@ def test_p01_project_skills_subagents_hook_and_mcp_registration():
     assert server["type"] == "stdio" and server["command"] == "python" and server["args"] == ["-m", "form_guard.mcp_server"]
 
 
-@needs_assets
 def test_p01_post_edit_hook_checks_syntax_and_hygiene_in_the_platform_shell(tmp_path):
     settings = json.loads((ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
     command = settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
@@ -2228,3 +2224,301 @@ def test_p01_post_edit_hook_checks_syntax_and_hygiene_in_the_platform_shell(tmp_
         assert str(tmp_path) not in r.stderr.decode("utf-8", "replace")  # only the file name is reported
     r = subprocess.run(command, shell=True, input=b"not json", capture_output=True, timeout=60)
     assert r.returncode not in (0, 2)  # a broken payload is a non-blocking error, never a block
+
+
+# ===================================================================== Phase 3
+# P3-1 open-source licence, P3-2 web discovery of unmarked forms (built-in + upload), P3-3 per-field model
+# routing on every mapping and the Claude Code suite endpoint, P3-4 bilingual UI + judge walkthrough, P3-5 docs.
+
+
+def test_p3_1_mit_license_file_and_package_metadata():
+    lic = (ROOT / "LICENSE").read_text(encoding="utf-8")
+    assert lic.startswith("MIT License\n\nCopyright (c) 2026 Masaki Miura\n\nPermission is hereby granted, free of charge")
+    assert 'THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND' in lic
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert re.search(r'^license = \{ text = "MIT" \}$', pyproject, re.M)
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.10: the regex above already checked the line
+        tomllib = None
+    if tomllib is not None:
+        assert tomllib.loads(pyproject)["project"]["license"] == {"text": "MIT"}
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "License: MIT (see [LICENSE](LICENSE))." in readme and "ライセンス：MIT（[LICENSE](LICENSE) を参照）。" in readme
+    assert "to be decided" not in readme
+
+
+def test_p3_2_api_lists_the_unmarked_demo_forms(api, samples_dir):
+    demos = api.get("/api/unmarked-demos").json()
+    assert [(d["id"], d["file_type"], d["form"], d["memo_name"]) for d in demos] == [
+        ("form4", "docx", "form4_unmarked_blank.docx", "memo4_equipment_use.txt"),
+        ("form5", "xlsx", "form5_unmarked_blank.xlsx", "memo5_stockpile_loan.txt")]
+    for d in demos:
+        assert set(d) == {"id", "title", "title_en", "org", "file_type", "form", "memo_name", "memo_text", "highlights"}
+        assert d["memo_text"] == read_memo(unmarked(samples_dir, d["id"])["memo"]) and len(d["highlights"]) >= 3
+        assert "架空" in d["org"] and d["title"] == UNMARKED[d["id"]]["title"]
+
+
+@pytest.mark.parametrize("uid,office", [("form4", ["受付番号", "受付日", "事務局受付欄", "審査欄"]), ("form5", ["事務局使用欄"])])
+def test_p3_2_discover_a_builtin_unmarked_form_then_fill_only_the_confirmed_cells(api, samples_dir, uid, office):
+    p = unmarked(samples_dir, uid)
+    res = api.post("/api/discover/demo", json={"demo_id": uid, "mode": "demo", "model_tier": "auto"})
+    assert res.status_code == 200, res.text
+    d = res.json()
+    assert re.fullmatch(r"[0-9a-f]{24}", d["discovery_id"]) and d["demo_id"] == uid and d["requires_human_confirmation"]
+    assert d["form_sha256"] == hashlib.sha256(p["form"].read_bytes()).hexdigest()
+    assert (d["title"], d["title_en"], d["org"]) == (UNMARKED[uid]["title"], UNMARKED[uid]["title_en"], UNMARKED[uid]["org"])
+    assert d["memo_text"] == read_memo(p["memo"]) and d["stages"][3]["status"] == "awaiting human confirmation"
+    assert [c["slot_id"] for c in d["candidates"] if c["office_only"]] == office
+    rec = [c for c in d["candidates"] if c["recommended"]]
+    assert rec and not any(c["office_only"] for c in rec)
+    res = api.post("/api/runs/from-discovery", json={"discovery_id": d["discovery_id"], "confirmed_targets": "recommended",
+                                                     "mode": "demo"})
+    assert res.status_code == 200, res.text
+    r = res.json()
+    assert r["report"]["overall_status"] == "PASS" and r["report"]["passed_count"] == 21 and r["can_approve"]
+    assert [m["slot_id"] for m in r["mappings"]] == [c["slot_id"] for c in rec]
+    assert r["confirmed_candidates"] == [c["candidate_id"] for c in rec] and r["demo_id"] == uid
+    assert r["display_name"] == p["form"].name and "naive" not in r["previews"]
+    assert not {pr["slot_id"] for pr in r["patches"]} & set(office)  # 0 office-only cells written
+    assert all(m["routed_model"].startswith("offline (claude-") and m["route_reason"] for m in r["mappings"])
+    assert r["is_builtin_demo"] and "100% fictional" in api.get(r["links"]["report"]).text
+    assert api.get(r["links"]["download"]).status_code == 403  # the human gate still applies
+    required = [i["item_id"] for i in r["report"]["hitl_checklist"] if i["required"]]
+    ok = api.post(f"/api/runs/{r['run_id']}/approve", json={"reviewer": "架空 花子", "checked": required,
+                                                            "filled_sha256": r["filled"]["sha256"], "revision": r["revision"]})
+    assert ok.status_code == 200, ok.text
+    dl = api.get(r["links"]["download"])
+    assert dl.status_code == 200 and hashlib.sha256(dl.content).hexdigest() == r["filled"]["sha256"]
+    edited = api.post("/api/runs/from-discovery", json={"discovery_id": d["discovery_id"], "confirmed_targets": "recommended",
+                                                        "mode": "demo", "memo_text": d["memo_text"] + "追記：私的なメモ\n"}).json()
+    assert not edited["is_builtin_demo"]  # an edited memo is no longer the fictional built-in demo
+
+
+def test_p3_2_from_discovery_refuses_office_only_tampered_hash_empty_and_client_defined_cells(api):
+    d = api.post("/api/discover/demo", json={"demo_id": "form4", "mode": "demo"}).json()
+    did = d["discovery_id"]
+    rec = [c["candidate_id"] for c in d["candidates"] if c["recommended"]]
+    office = [c["candidate_id"] for c in d["candidates"] if c["office_only"]]
+    runs_before = len(api.app.state.store.runs)
+
+    def fill(**body):
+        return api.post("/api/runs/from-discovery", json={"discovery_id": did, "mode": "demo", **body})
+
+    for empty in ([], "", "[]"):
+        res = fill(confirmed_targets=empty)
+        assert res.status_code == 422 and "no confirmed fillable slots" in res.json()["detail"], empty
+    for targets in (rec + office[:1], ",".join(office), office[-1:]):
+        res = fill(confirmed_targets=targets)
+        assert res.status_code == 422 and "office/administrative use only" in res.json()["detail"], targets
+    unknown = fill(confirmed_targets=["c01", "c99"])
+    assert unknown.status_code == 422 and "unknown candidate id" in unknown.json()["detail"]
+    # the client only names candidate ids: a client-side discovery, form hash or cell list is refused outright
+    for extra in ({"discovery": d}, {"form_sha256": d["form_sha256"]},
+                  {"targets": [{"slot_id": "受付番号", "table": 0, "row": 12, "col": 2}]}):
+        assert fill(confirmed_targets=rec, **extra).status_code == 422, extra
+    assert api.post("/api/runs/from-discovery", json={"discovery_id": "0" * 24, "confirmed_targets": rec}).status_code == 404
+    assert api.post("/api/runs/from-discovery", json={"discovery_id": "../etc", "confirmed_targets": rec}).status_code == 404
+    assert fill(confirmed_targets=rec, model_tier="gpt").status_code == 422
+    assert fill(confirmed_targets=rec, memo_text="  \n").status_code == 400
+    # tampered SHA-256: the stored discovery no longer matches the blank form, so nothing is filled
+    entry = api.app.state.discoveries.items[did]
+    entry["discovery"] = {**entry["discovery"], "form_sha256": "0" * 64}
+    stale = fill(confirmed_targets=rec)
+    assert stale.status_code == 422 and "blank form changed after discovery — re-run discovery" in stale.json()["detail"]
+    assert len(api.app.state.store.runs) == runs_before  # no refused request produced a run
+    assert api.post("/api/discover/demo", json={"demo_id": "form1"}).status_code == 404  # a marked demo is not unmarked
+    assert api.post("/api/discover/demo", json={"demo_id": "form4", "model_tier": "gpt"}).status_code == 422
+
+
+def test_p3_2_uploaded_unmarked_form_round_trip_and_tampered_staged_file(api, samples_dir):
+    p = unmarked(samples_dir, "form5")
+    blob, memo = p["form"].read_bytes(), read_memo(p["memo"])
+    d = api.post("/api/discover", files={"file": ("備蓄品 申請.xlsx", blob)}, data={"mode": "demo", "model_tier": "auto"}).json()
+    rec = [c["candidate_id"] for c in d["candidates"] if c["recommended"]]
+    body = {"discovery_id": d["discovery_id"], "confirmed_targets": rec[:3], "mode": "demo"}
+    no_memo = api.post("/api/runs/from-discovery", json=body)
+    assert no_memo.status_code == 400 and "memo_text is required" in no_memo.json()["detail"]  # uploads store no memo
+    ok = api.post("/api/runs/from-discovery", json={**body, "memo_text": memo}).json()
+    assert ok["report"]["overall_status"] == "PASS" and [m["slot_id"] for m in ok["mappings"]] == ["申請日", "申請団体名", "代表者氏名"]
+    assert ok["display_name"] == "備蓄品 申請.xlsx" and ok["demo_id"] is None and not ok["is_builtin_demo"]
+    staged = api.app.state.discoveries.items[d["discovery_id"]]["path"]
+    staged.write_bytes(blob + b"\0")  # the staged blank form changed on disk after discovery
+    stale = api.post("/api/runs/from-discovery", json={**body, "memo_text": memo})
+    assert stale.status_code == 422 and "blank form changed after discovery" in stale.json()["detail"]
+    d2 = api.post("/api/discover", files={"file": ("x.xlsx", blob)}, data={"mode": "demo"}).json()
+    multipart = api.post("/api/runs/upload", files={"file": ("x.xlsx", blob)},
+                         data={"memo_text": memo, "mode": "demo", "discovery_id": d2["discovery_id"],
+                               "confirmed_targets": "recommended", "model_tier": "auto"}).json()
+    assert multipart["report"]["overall_status"] == "PASS" and len(multipart["mappings"]) == len(rec)
+    for raw in (b'"samples/blank_forms/form1_research_plan_change.slots.json"', b"[]", b"7"):  # only an object is a spec
+        bad = api.post("/api/runs/upload", files={"file": ("x.xlsx", blob), "slot_spec": ("s.json", raw)},
+                       data={"memo_text": memo, "mode": "demo"})
+        assert bad.status_code == 400 and bad.json()["detail"] == "slot spec must be a JSON object", raw
+
+
+def test_p3_3_offline_runs_show_the_live_auto_routing_plan_on_every_field(demo_runs, samples_dir, tmp_path, capsys):
+    r = demo_runs("form1")
+    for m in r.mappings:
+        tier, why = route_slot(r.scan.slot(m.slot_id), r.scan.slots, r.memo_text)
+        assert (m.routed_model, m.route_reason) == (f"offline ({TIER_MODELS[tier]} in live auto)", why), m.slot_id
+    by = {m.slot_id: m for m in r.mappings}
+    assert by["提出日"].routed_model == f"offline ({MODEL_HAIKU} in live auto)"
+    assert by["研究代表者氏名"].routed_model == f"offline ({MODEL_SONNET} in live auto)"
+    assert by["変更理由および予算影響"].routed_model == f"offline ({MODEL_OPUS} in live auto)"
+    routing = r.engine["usage"]["routing"]
+    assert [(g["task"], g["model"], g["planned_in_live_auto"]) for g in routing] == [
+        ("propose", MODEL_HAIKU, True), ("propose", MODEL_SONNET, True), ("propose", MODEL_OPUS, True)]
+    assert sorted(s for g in routing for s in g["slots"]) == sorted(s.slot_id for s in r.scan.slots)
+    assert r.engine["mode"] == "demo" and "requests" not in r.engine["usage"]  # no API call is claimed offline
+    audit = json.loads((r.out_dir / "audit_log.json").read_text(encoding="utf-8"))
+    assert all(m["routed_model"] and m["route_reason"] for m in audit["mappings"])
+    html = (r.out_dir / "report.html").read_text(encoding="utf-8")
+    assert "Planned model routing (live auto mode)" in html and "no model was called" in html
+    assert "<h2>Model routing / モデルの使い分け</h2>" not in html
+    from form_guard.cli import main
+
+    p = paths(samples_dir, "form1")
+    assert main(["--form", str(p["form"]), "--memo", str(p["memo"]), "--out-dir", str(tmp_path / "cli"), "--mode", "demo"]) == 0
+    assert f"· planned in live auto (offline: no call) · propose → {MODEL_HAIKU}: 提出日" in capsys.readouterr().out
+    # a field the validator still rejects would go to Opus for self-correction in live auto mode: the plan says so
+    slot = _text_slot("所見", max_chars=4)
+    run = map_fields([slot], "所見：今日は晴れです。明日は雨の予報です。\n", DemoEngine())
+    (m,) = run.mappings
+    assert m.status == "needs_human_input" and m.routed_model == f"offline ({MODEL_OPUS} → {MODEL_OPUS} (revision) in live auto)"
+    assert m.route_reason.endswith("(condensation); then self-correction after validator rejection")
+    assert run.usage["routing"][-1] == {"task": "revise", "model": MODEL_OPUS, "slots": ["所見"], "planned_in_live_auto": True,
+                                        "reasons": {"所見": "self-correction after validator rejection"}}
+
+
+def test_p3_3_live_mappings_record_the_served_model_revisions_and_thinking(samples_dir, fake_client_factory, tmp_path):
+    from form_guard.mcp_server import FormGuardMCP
+
+    p = paths(samples_dir, "form1")
+    memo = read_memo(p["memo"])
+    client = fake_client_factory([echo_model(_claude_fields(), thinking="read the numbered memo")] * 3
+                                 + [echo_model(_revision_fix(), thinking="re-quoted line 8")])
+    r = run_pipeline(p["form"], memo, tmp_path / "live", mode="live", client=client)
+    by = {m.slot_id: m for m in r.mappings}
+    assert (by["提出日"].routed_model, by["提出日"].route_reason) == (MODEL_HAIKU, "structured field (wareki_date)")
+    assert (by["研究代表者氏名"].routed_model, by["研究代表者氏名"].route_reason) == (MODEL_SONNET, "standard person_name field")
+    assert by["変更理由および予算影響"].routed_model == MODEL_OPUS and "(condensation)" in by["変更理由および予算影響"].route_reason
+    assert by["所属部局"].routed_model == f"{MODEL_SONNET} → {MODEL_OPUS} (revision)"  # rejected 「工学部」, fixed by Opus
+    assert by["所属部局"].route_reason == "standard text field; then self-correction after validator rejection"
+    assert all(m.status == "filled" for m in r.mappings) and r.report.overall_status == "PASS"
+    calls = r.engine["usage"]["calls"]
+    assert [(c["task"], c["requested_model"]) for c in calls][-1] == ("revise", MODEL_OPUS) and calls[-1]["slots"] == ["所属部局"]
+    thinking = {t["text"]: t for t in r.engine["usage"]["thinking_summaries"]}
+    assert thinking["re-quoted line 8"]["slots"] == ["所属部局"] and thinking["re-quoted line 8"]["model"] == MODEL_OPUS
+    assert sorted(s for t in r.engine["usage"]["thinking_summaries"][:3] for s in t["slots"]) == sorted(by)
+    audit = json.loads((tmp_path / "live" / "audit_log.json").read_text(encoding="utf-8"))
+    assert {m["slot_id"]: m["routed_model"] for m in audit["mappings"]}["所属部局"] == f"{MODEL_SONNET} → {MODEL_OPUS} (revision)"
+    # the served model id is what counts: a server-side fallback to another model is recorded as such
+    fields = _claude_fields({"所属部局": ("理工学研究科", ["・所属部局：理工学研究科"])})
+    fallback = fake_client_factory([lambda kw: fake_message(fields, model=MODEL_OPUS)])
+    run = map_fields(scan(p["form"]).slots, memo, ClaudeEngine(client=fallback, model_tier="haiku"))
+    assert {(m.routed_model, m.route_reason) for m in run.mappings} == {
+        (MODEL_OPUS, f"model tier 'haiku' (served by {MODEL_OPUS}; requested {MODEL_HAIKU})")}
+    # reviewer entries and engines without routing are labelled too: every mapping says who produced the value
+    p2 = paths(samples_dir, "form2")
+    r2 = run_pipeline(p2["form"], read_memo(p2["memo"]), tmp_path / "human", mode="demo", overrides={"法人番号": "1234567890123"})
+    hm = {m.slot_id: m for m in r2.mappings}["法人番号"]
+    assert hm.status == "human_entered" and (hm.routed_model, hm.route_reason) == HUMAN_ROUTE
+    fixed = map_fields([_text_slot("備考")], "備考：特になし\n", FixedEngine({"備考": Draft("備考", "filled", "特になし", ["特になし"], 0.9)}))
+    assert (fixed.mappings[0].routed_model, fixed.mappings[0].route_reason) == ("fixed", "this engine has no per-field model routing")
+    srv = FormGuardMCP(root=_mcp_root(tmp_path, samples_dir))
+    mcp_fill = srv.call_tool("form_guard_fill", {"form_path": "samples/blank_forms/form1_research_plan_change.docx",
+                                                 "memo_path": "samples/memos/memo1_research_change.txt", "mode": "demo"})
+    assert all(f["routed_model"].startswith("offline (claude-") and f["route_reason"]
+               for f in mcp_fill["structuredContent"]["fields"])
+
+
+def test_p3_3_claude_suite_endpoint_reads_the_repository_assets(api, tmp_path):
+    from form_guard.claude_suite import describe_suite
+    from form_guard.mcp_server import TOOL_NAMES
+
+    s = api.get("/api/claude-suite").json()
+    assert [x["name"] for x in s["skills"]] == ["form-scan", "structural-audit", "surgical-fill"]
+    for x in s["skills"] + s["agents"]:
+        assert x["description"] == _frontmatter(ROOT / x["path"])["description"], x["path"]  # read from the files
+    agents = {a["name"]: a for a in s["agents"]}
+    assert (agents["memo-extractor"]["model"], agents["memo-extractor"]["tools"]) == ("sonnet", ["Read", "Grep", "Glob"])
+    assert (agents["form-auditor"]["model"], agents["form-auditor"]["tools"]) == ("opus", ["Read", "Grep", "Glob", "Bash"])
+    (hook,) = s["settings"]["hooks"]
+    assert (hook["event"], hook["matcher"], hook["type"], hook["runner"], hook["timeout"]) == (
+        "PostToolUse", "Edit|Write", "command", "python", 30)
+    assert [c["en"] for c in hook["checks"]] == [
+        "Python syntax (.py)", "JSON validity (.json)", "Anthropic API key pattern", "literal API key assignment",
+        "local user-profile paths", "e-mail addresses outside the reserved example domains"]
+    assert hook["feeds_back_to_claude"] and not s["settings"]["bypass_permissions"]
+    assert s["settings"]["deny"] == ["Read(./.env)", "Read(./.env.*)"]
+    assert s["mcp"]["servers"] == [{"name": "form-guard", "type": "stdio", "command": "python",
+                                    "args": ["-m", "form_guard.mcp_server"]}]
+    assert [t["name"] for t in s["mcp"]["tools"]] == TOOL_NAMES
+    assert [f["step"] for f in s["flow"]] == [1, 2, 3, 4, 5] and all(u["present"] for f in s["flow"] for u in f["uses"])
+    assert {p["task"]: p["model"] for p in s["routing"]["policy"]} == {
+        "structured": MODEL_HAIKU, "classify": MODEL_HAIKU, "standard": MODEL_SONNET, "long_text": MODEL_OPUS,
+        "revise": MODEL_OPUS}
+    assert all(p["ja"] and p["en"] and p["why_ja"] and p["why_en"] for p in s["routing"]["policy"])
+    t = s["workflow"]["totals"]
+    assert (t["forms"], t["fields"], t["written"], t["chars"], t["tags"], t["text_blocks"], t["merges"], t["borders"],
+            t["hitl"]) == (5, 41, 40, 844, 2119, 171, 124, 650, 51)
+    assert t["pending_slots"] == ["form2:法人番号"] and t["all_checks_passed"] and t["checks_per_form"] == [21]
+    assert [row["form"] for row in s["workflow"]["rows"]] == ["form1", "form2", "form3", "form4", "form5"]
+    assert api.get("/api/claude-suite").json()["workflow"] == s["workflow"]  # measured once per process
+    bare = describe_suite(tmp_path)  # e.g. an installed package without the repository's .claude/ folder
+    assert bare["skills"] == bare["agents"] == [] and not bare["settings"]["installed"] and not bare["mcp"]["installed"]
+    assert not any(u["present"] for f in bare["flow"] for u in f["uses"] if u["kind"] != "human")
+
+
+def test_p3_4_web_ui_ships_the_inspector_tier_selector_claude_tab_walkthrough_and_language_toggle(api):
+    html, js, css = (api.get(u).text for u in ("/", "/static/app.js", "/static/styles.css"))
+    for needle in ('<html lang="ja"', 'data-lang="ja"', 'id="langToggle"', 'data-lang="en"', 'id="tierSelect"',
+                   '<option value="auto" data-t="自動：Haiku / Sonnet / Opus|Auto: Haiku / Sonnet / Opus">',
+                   ">Opus 5.5 only<", ">Sonnet 5.5 only<", ">Haiku 5.5 only<",
+                   'data-tab="claude"', 'data-bi="Claude Code 連携|Claude Code · Architecture"', 'id="tab-claude"',
+                   'id="unmarkedList"', "マーカーなし白紙様式・空欄自動発見|Unmarked blank forms", 'id="discoverBtn"',
+                   "🔍 マーカーなし白紙から空欄を自動発見|🔍 Discover blank cells", 'id="discoveryView"', 'id="candRows"',
+                   'id="discMemo"', "確定した空欄だけに外科的記入＆21項目検査を実行|Fill confirmed cells &amp; run 21 checks",
+                   "🎬 審査員向け 90秒ガイドツアー|🎬 Judge Quick Walkthrough", "誰の課題か|Whose problem",
+                   "どんな課題か|What problem", "どう解決するか|How Form-Guard solves it"):
+        assert needle in html, needle
+    assert re.findall(r'data-tour="(\d)"', html) == ["1", "2", "3", "4", "5"]
+    for label in ("課題と視覚比較（Visual Diff）", "マーカーなし白紙からの空欄発見", "原文根拠ハイライトと推測拒否",
+                  "Claude 活用・モデル使い分け", "21項目構造証明＆人間承認ロック"):
+        assert label in html, label
+    for endpoint in ('"/api/unmarked-demos"', '"/api/discover/demo"', '"/api/runs/from-discovery"', '"/api/claude-suite"',
+                     '"/api/discover"', '"/api/runs/upload"', '"/api/runs"'):
+        assert endpoint in js, endpoint
+    assert js.count("model_tier: tier()") == 3 and js.count('fd.append("model_tier", tier())') == 2  # every run/discovery
+    assert "disabled: locked" in js and "if (locked) { cb.checked = false; return; }" in js  # office-only: never checkable
+    assert 'B("事務局専用欄（除外）", "Office-only — locked")' in js and 'B("申請者記入欄", "Applicant field")' in js
+    assert "h(\"td\", {}, modelBadge(m))" in js and "routeBlock(m)," in js and "thinking_summaries" in js
+    assert 'window.addEventListener("hashchange", handleDeepLink)' in js
+    assert 'html[data-lang="ja"] [data-l="en"]' in css and ".mb-plan" in css
+    node = shutil.which("node")
+    if node:  # syntax check when Node.js is available (it is not a project requirement)
+        assert subprocess.run([node, "--check", str(ROOT / "form_guard" / "static" / "app.js")], capture_output=True,
+                              timeout=60).returncode == 0
+
+
+def test_p3_5_readme_and_docs_answer_impact_continued_use_and_match_the_measured_numbers(samples_dir, tmp_path):
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    doc = (ROOT / "docs" / "BUILT_WITH_CLAUDE_CODE.md").read_text(encoding="utf-8")
+    for needle in ("## Why this matters & Who keeps using it after the hackathon",
+                   "### 誰のどんな課題を解決し、ハッカソン後にどこで使われ続けるか", "差し戻し", "Post-hackathon continued use",
+                   "ハッカソン後の継続利用場面", "approval.json", "report.html", ".mcp.json", "--discover-blanks",
+                   "POST /api/discover/demo", "POST /api/runs/from-discovery", "GET /api/claude-suite", "41 designated fields",
+                   "844 characters", "2,119 XML tags", "171 printed text blocks", "124 merged cells/ranges",
+                   "650 border definitions", "51-item", "法人番号", "routed_model"):
+        assert needle in readme, needle
+    for needle in ("form4", "form5", "routed_model", "GET /api/claude-suite", "Claude Code 連携 · Architecture",
+                   "マーカーなし白紙様式・空欄自動発見"):
+        assert needle in doc, needle
+    rows = measure(samples_dir, tmp_path / "measure")
+    for line in markdown(rows).splitlines()[2:]:  # the counted columns in the README match a fresh run
+        assert re.sub(r"\| [\d,]+ ms \|", "| ms |", line) in re.sub(r"\| [\d,]+ ms \|", "| ms |", readme), line
+    collected = subprocess.run([sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider",
+                                str(ROOT / "tests")], capture_output=True, text=True, cwd=ROOT, timeout=300)
+    n = int(re.search(r"(\d+) tests? collected", collected.stdout).group(1))
+    assert f"pytest -v                                # {n} tests" in readme, n  # the README states the real count

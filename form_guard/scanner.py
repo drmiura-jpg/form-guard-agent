@@ -1011,6 +1011,11 @@ def _classify_with_claude(candidates: list[dict[str, Any]], title: str, mode: st
             "usage": engine.usage}
 
 
+def recommended_ids(discovery: dict[str, Any]) -> list[str]:
+    """The candidates discovery recommends (applicant fields, never office-only) — what ``recommended`` confirms."""
+    return [c["candidate_id"] for c in discovery.get("candidates", []) if c.get("recommended")]
+
+
 def build_confirmed_slot_spec(discovery: dict[str, Any], confirmed_ids: list[str], current_form_path: Union[str, Path],
                               allow_office_only: bool = False) -> dict[str, Any]:
     """Stage 4: turn the cells a human confirmed into a .slots.json spec for run_pipeline(slot_spec=...)."""

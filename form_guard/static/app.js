@@ -20,6 +20,49 @@ function h(tag, attrs = {}, ...kids) {
   return el;
 }
 
+const S = {
+  demos: [], unmarked: [], run: null, sel: null, cmp: "naive", layout: "split", checked: new Set(), health: null,
+  activeDemo: null, view: "empty", tab: "visual", disc: null, suite: null, suitePromise: null, tour: 0, lang: "ja",
+};
+
+/* ------------------------------------------------------------- language */
+// Japanese first (all judges read Japanese): primary text in the selected language, the other as a sub-label.
+
+const L = (ja, en) => (S.lang === "en" ? en : ja);
+
+function biKids(ja, en) {
+  const [p, s] = S.lang === "en" ? [en, ja] : [ja, en];
+  return [h("span", { class: "pri" }, p), h("span", { class: "sub" }, s)];
+}
+
+// A bilingual label node; it re-renders itself when the language changes (data-bi).
+function B(ja, en, cls) {
+  return h("span", { class: cls ? `bi ${cls}` : "bi", dataset: { bi: `${ja}|${en}` } }, ...biKids(ja, en));
+}
+
+function applyLang() {
+  const root = document.documentElement;
+  root.lang = S.lang;
+  root.dataset.lang = S.lang;
+  const pair = (v) => { const [ja, en] = v.split("|"); return L(ja, en === undefined ? ja : en); };
+  $$("[data-bi]").forEach((el) => { const [ja, en] = el.dataset.bi.split("|"); el.replaceChildren(...biKids(ja, en)); });
+  $$("[data-t]").forEach((el) => { el.textContent = pair(el.dataset.t); });
+  $$("[data-ph]").forEach((el) => { el.placeholder = pair(el.dataset.ph); });
+  $$("[data-tip]").forEach((el) => { el.title = pair(el.dataset.tip); });
+  $$("#langToggle button").forEach((b) => {
+    b.classList.toggle("on", b.dataset.lang === S.lang);
+    b.setAttribute("aria-pressed", String(b.dataset.lang === S.lang));
+  });
+}
+
+function setLang(lang) {
+  if (lang !== "ja" && lang !== "en") return;
+  S.lang = lang;
+  try { localStorage.setItem("fg-lang", lang); } catch (_) { /* private mode */ }
+  applyLang();
+  rerender();
+}
+
 const FLAG = {
   wareki: "和暦に変換 · to 和暦", halfwidth: "半角に統一 · half-width", yen: "金額表記を統一 · amount format",
   condensed: "抽出要約 · condensed by deletion", re_extracted: "制約違反→再抽出 · re-extracted", order: "様式の順に整列 · reordered",
@@ -31,6 +74,46 @@ const FLAG = {
   recovered_unverified: "根拠未検証 · not verified",
 };
 const ATTENTION = new Set(["year_inferred", "low_conf", "needs_input", "re_extracted", "condensed", "unsafe_condensation", "re_anchored"]);
+const FORMAT = {
+  text: ["文章", "text"], person_name: ["氏名", "person name"], wareki_date: ["和暦日付", "和暦 date"],
+  wareki_period: ["和暦期間", "和暦 period"], date: ["日付", "date"], yen: ["金額（円）", "yen amount"],
+  digits: ["数字", "digits"], pattern: ["書式（ID）", "ID pattern"], choice: ["選択肢", "choice"],
+};
+const fmtLabel = (f) => { const x = FORMAT[f || "text"]; return x ? L(x[0], x[1]) : String(f); };
+const fmtJa = (f) => (FORMAT[f] || [f])[0];
+
+// Reasons come from the server as fixed English phrases (they are also in the audit log). In Japanese mode the UI
+// shows a translation; the original text stays in the tooltip.
+const REASON_JA = [
+  [/^applicant field — empty cell next to a printed label$/, () => "申請者欄 — 印字ラベルの隣の空欄"],
+  [/^office\/administrative use only — excluded from applicant fill(.*)$/, (m) => `事務局専用 — 申請者の記入対象から除外${m[1]}`],
+  [/^not an input field \(Claude: (.*)\)$/, (m) => `入力欄ではない（Claude: ${m[1]}）`],
+  [/^vertically merged continuation \(vMerge\)/, () => "縦に結合したセルの続き（vMerge）— 結合の先頭セルだけが記入対象"],
+  [/^merged continuation of (\S+) — only the top-left cell (\S+) can hold a value$/, (m) => `結合範囲 ${m[1]} の続き — 値を入れられるのは左上の ${m[2]} だけ`],
+  [/^formula cell \((.*)\) — formulas are never fill targets$/, (m) => `計算式のセル（${m[1]}）— 計算式は記入対象にしない`],
+  [/^the cell already holds content$/, () => "既に内容が入っているセル"],
+  [/^the cell holds a field, content control or object/, () => "フィールド・コンテンツコントロール・図を含むセル — 記入対象にしない"],
+  [/^the worksheet has rows\/cells without an r attribute/, () => "r 属性の無い行・セルがあり、位置を安全に特定できない"],
+];
+function reasonText(r) {
+  if (S.lang !== "ja" || !r) return r || "";
+  for (const [re, fn] of REASON_JA) { const m = re.exec(r); if (m) return fn(m); }
+  return r;
+}
+const ROUTE_JA = [
+  [/structured field \((\w+)\)/g, (_, f) => `定型の欄（${fmtJa(f)}）`],
+  [/standard (\w+) field/g, (_, f) => `通常の欄（${fmtJa(f)}）`],
+  [/long text: memo passage of (\d+) chars for a (\d+)-char field \(condensation\)/g, (_, a, b) => `長文：メモの該当箇所 ${a} 字を ${b} 字の欄へ要約`],
+  [/long free-text field \((\d+)-char limit\)/g, (_, a) => `長い自由記述欄（${a} 字以内）`],
+  [/model tier '(\w+)'/g, (_, t) => `モデル固定（${t}）`],
+  [/model set explicitly/g, () => "モデルを明示指定"],
+  [/; then self-correction after validator rejection/g, () => "；検証器に差し戻された後に自己修正"],
+  [/ \(served by ([^;\s]+); requested ([^)\s]+)\)/g, (_, s, q) => `（応答モデル ${s}／要求 ${q}）`],
+  [/entered by the human reviewer — no model involved/g, () => "確認者が入力（モデルは関与なし）"],
+  [/this engine has no per-field model routing/g, () => "このエンジンには欄ごとのモデル割り当てがありません"],
+  [/no model: .*/g, () => "モデルなし：記入済みファイルから読み戻した値を検証"],
+];
+const routeReasonText = (r) => (S.lang !== "ja" || !r ? r || "" : ROUTE_JA.reduce((s, [re, fn]) => s.replace(re, fn), r));
 
 // Python counts characters as Unicode code points; JS .length counts UTF-16 units (𠮷 or 🧪 = 2).
 // Every offset / length that comes from the server is therefore applied to Array.from(text).
@@ -40,13 +123,13 @@ const GROUPS = [
   ["text", "Text", "定型文"], ["grounding", "Grounding", "根拠"], ["constraints", "Constraints", "記入ルール"],
   ["application", "Application", "読込確認"], ["visual", "Visual", "見た目"],
 ];
-
-const S = { demos: [], run: null, sel: null, cmp: "naive", layout: "split", checked: new Set(), health: null, activeDemo: null };
+const TABS = ["visual", "fields", "audit", "hitl", "claude"];
+const JSON_HEADERS = { "Content-Type": "application/json" };
 
 class ApiError extends Error {
   constructor(status, body) {
     const d = body && body.detail;
-    super(typeof d === "string" ? d : (d && d.message) || `HTTP ${status}`);
+    super(typeof d === "string" ? d : (d && d.message) || (Array.isArray(d) && d[0] && d[0].msg) || `HTTP ${status}`);
     this.status = status; this.body = body;
   }
 }
@@ -70,7 +153,7 @@ function toast(msg) {
   t.textContent = msg;
   t.classList.add("show");
   clearTimeout(toast._t);
-  toast._t = setTimeout(() => t.classList.remove("show"), 4200);
+  toast._t = setTimeout(() => t.classList.remove("show"), 4800);
 }
 
 function busy(on, step) {
@@ -78,9 +161,19 @@ function busy(on, step) {
   if (step) $("#busyStep").textContent = step;
 }
 
+const mode = () => $("#modeSelect").value;
+const tier = () => $("#tierSelect").value;
+const PIPELINE_STEPS = () => L("スキャン → 対応付け・自己修正 → 外科的な書き込み → 構造検査 → 見た目の比較",
+  "Scan → Map & self-correct → Surgical write → Verify → Visual diff");
+
 /* ------------------------------------------------------------------ init */
 
 document.addEventListener("DOMContentLoaded", async () => {
+  const params = new URLSearchParams(location.hash.slice(1));
+  let saved = null;
+  try { saved = localStorage.getItem("fg-lang"); } catch (_) { /* private mode */ }
+  S.lang = ["ja", "en"].includes(params.get("lang")) ? params.get("lang") : (saved === "en" ? "en" : "ja");
+  applyLang();
   const theme = localStorage.getItem("fg-theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
   document.documentElement.dataset.theme = theme;
   $("#themeToggle").addEventListener("click", () => {
@@ -88,16 +181,33 @@ document.addEventListener("DOMContentLoaded", async () => {
     document.documentElement.dataset.theme = next;
     localStorage.setItem("fg-theme", next);
   });
+  $$("#langToggle button").forEach((b) => b.addEventListener("click", () => setLang(b.dataset.lang)));
   $$(".tabs button").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
   $$("#cmpMode button").forEach((b) => b.addEventListener("click", () => { S.cmp = b.dataset.v; renderVisual(); }));
   $$("#cmpLayout button").forEach((b) => b.addEventListener("click", () => { S.layout = b.dataset.v; renderVisual(); }));
+  $$(".tour-step").forEach((b) => b.addEventListener("click", () => startTour(Number(b.dataset.tour))));
+  $("#tourStart").addEventListener("click", () => startTour(1));
+  $("#suiteBtn").addEventListener("click", openSuite);
+  $("#suiteBtn2").addEventListener("click", openSuite);
+  $("#backToDisc").addEventListener("click", () => { showView("discovery"); renderDiscovery(); });
   $("#sliderRange").addEventListener("input", (e) => $("#sliderStage").style.setProperty("--pos", `${e.target.value}%`));
   bindSliderDrag();
   $("#uploadForm").addEventListener("submit", onUpload);
+  $("#discoverBtn").addEventListener("click", onDiscoverUpload);
   $("#fileInput").addEventListener("change", (e) => {
     const f = e.target.files[0];
-    $("#fileLabel").textContent = f ? `${f.name} (${Math.round(f.size / 1024)} KB)` : "Choose a .docx / .xlsx";
+    $("#fileName").textContent = f ? `${f.name} (${Math.round(f.size / 1024)} KB)` : "";
+    $("#fileName").hidden = !f;
+    $("#fileHint").hidden = Boolean(f);
   });
+  $("#discMemo").addEventListener("input", (e) => { if (S.disc) S.disc.memo = e.target.value; });
+  $("#candRecommended").addEventListener("click", () => {
+    if (!S.disc) return;
+    S.disc.checked = new Set(S.disc.d.candidates.filter((c) => c.recommended && !c.office_only).map((c) => c.candidate_id));
+    renderDiscovery();
+  });
+  $("#candNone").addEventListener("click", () => { if (S.disc) { S.disc.checked = new Set(); renderDiscovery(); } });
+  $("#fillConfirmed").addEventListener("click", onFillConfirmed);
   $("#checkAll").addEventListener("click", () => {
     $$("#checklist input[type=checkbox]:not(:disabled)").forEach((c) => { c.checked = true; S.checked.add(c.value); });
     updateApprove();
@@ -107,55 +217,193 @@ document.addEventListener("DOMContentLoaded", async () => {
   try {
     S.health = await api("/api/health");
     $("#modeSelect").value = "auto";
-    const b = $("#engineBadge");
-    b.textContent = S.health.live_available ? `Claude ready · ${S.health.default_model}` : "Offline demo engine (no API key)";
-    b.className = `pill ${S.health.live_available ? "pill-live" : "pill-neutral"}`;
-    if (!S.health.live_available) $("#modeSelect option[value=live]").textContent = "Live Claude (needs ANTHROPIC_API_KEY)";
-  } catch (e) { toast(`Health check failed: ${e.message}`); }
+    if (S.health.model_tiers.includes(S.health.default_model_tier)) $("#tierSelect").value = S.health.default_model_tier;
+    const m = S.health.models || {};
+    $$("#tierSelect option").forEach((o) => { if (m[o.value]) o.title = m[o.value]; });
+    renderEngineBadge();
+  } catch (e) { toast(L(`ヘルスチェックに失敗: ${e.message}`, `Health check failed: ${e.message}`)); }
   try {
-    S.demos = await api("/api/demos");
+    [S.demos, S.unmarked] = await Promise.all([api("/api/demos"), api("/api/unmarked-demos")]);
     renderDemos();
-  } catch (e) { toast(`Could not load demos: ${e.message}`); }
-  // Deep links for demos/recordings: /#demo=form2&tab=hitl&slot=法人番号&layout=slider
+  } catch (e) { toast(L(`デモを読み込めません: ${e.message}`, `Could not load demos: ${e.message}`)); }
+  await handleDeepLink();
+  window.addEventListener("hashchange", handleDeepLink);  // editing the hash while recording also works
+});
+
+// Deep links for demos / recordings: /#demo=form2&tab=hitl&slot=法人番号&layout=slider, #unmarked=form4,
+// #tour=3, #view=claude, #lang=en
+async function handleDeepLink() {
   const params = new URLSearchParams(location.hash.slice(1));
+  if (["ja", "en"].includes(params.get("lang")) && params.get("lang") !== S.lang) setLang(params.get("lang"));
   if (params.get("layout") === "slider") S.layout = "slider";
-  if (params.get("demo") && S.demos.some((d) => d.id === params.get("demo"))) {
+  if (params.get("tour")) {
+    await startTour(Number(params.get("tour")));
+  } else if (params.get("demo") && S.demos.some((d) => d.id === params.get("demo"))) {
     await runDemo(params.get("demo"));
     if (params.get("slot")) selectSlot(params.get("slot"), true);
     if (params.get("tab")) showTab(params.get("tab"));
+  } else if (params.get("unmarked") && S.unmarked.some((d) => d.id === params.get("unmarked"))) {
+    await discoverDemo(params.get("unmarked"));
+  } else if (params.get("view") === "claude") {
+    await openSuite();
   }
-});
+}
+
+/* ---------------------------------------------------------------- views */
+
+function showView(name) {
+  S.view = name;
+  const ids = { empty: "emptyState", discovery: "discoveryView", suite: "suiteView", run: "runView" };
+  Object.entries(ids).forEach(([k, id]) => { $(`#${id}`).hidden = k !== name; });
+  renderEngineBadge();
+}
+
+function rerender() {
+  renderDemos();
+  renderEngineBadge();
+  renderTourBar();
+  if (S.view === "discovery") renderDiscovery();
+  if (S.view === "suite") renderSuiteInto($("#suiteStandalone"), null);
+  if (S.view === "run" && S.run) {
+    renderRun();
+    if (S.sel) selectSlot(S.sel, false);
+  }
+}
+
+function renderEngineBadge() {
+  const b = $("#engineBadge");
+  const eng = S.view === "run" && S.run ? S.run.engine : null;
+  if (eng) {
+    const live = eng.mode === "live";
+    b.textContent = live ? `Claude · ${eng.model === "auto" ? L("自動モデル振り分け", "auto model routing") : eng.model}`
+      : L("オフラインエンジン（API 呼び出しなし）", "Offline demo engine (no API call)");
+    b.className = `pill ${live ? "pill-live" : "pill-neutral"}`;
+  } else if (S.health) {
+    b.textContent = S.health.live_available ? L(`Claude 利用可 · ${S.health.default_model}`, `Claude ready · ${S.health.default_model}`)
+      : L("オフライン（API キーなし）", "Offline demo engine (no API key)");
+    b.className = `pill ${S.health.live_available ? "pill-live" : "pill-neutral"}`;
+    const live = $("#modeSelect option[value=live]");
+    if (!S.health.live_available) live.textContent = L("ライブ Claude（要 API キー）", "Live Claude (needs an API key)");
+  }
+}
 
 function showTab(name) {
+  if (!TABS.includes(name)) return;
+  S.tab = name;
   $$(".tabs button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.tab === name)));
-  ["visual", "fields", "audit", "hitl"].forEach((t) => { $(`#tab-${t}`).hidden = t !== name; });
+  TABS.forEach((t) => { $(`#tab-${t}`).hidden = t !== name; });
+  if (name === "claude") renderClaudeTab();
+}
+
+/* ---------------------------------------------------------- guided tour */
+// Five proof points for a judge, each one click away (also #tour=N for recordings).
+
+const TOUR = [
+  {
+    ja: "左＝生成AIで様式ごと作り直した版（罫線・結合セルの消失、定型文の言い換え、メモに無い数値）。右＝Form-Guard（指定欄以外のずれ 0 px）。スライダーを左右に動かして重ねて比べてください。",
+    en: "Left: a naive from-scratch regeneration (borders and merged cells lost, legal text paraphrased, numbers the memo never stated). Right: Form-Guard — 0 px drift outside the designated fields. Drag the slider to compare.",
+    async go() {
+      if (!(S.run && S.run.previews && S.run.previews.naive)) await runDemo("form1");
+      if (!S.run || !S.run.previews.naive) return;
+      S.cmp = "naive"; S.layout = "slider";
+      showView("run"); showTab("visual"); renderVisual();
+    },
+    links: () => [[L("左右に並べて比較", "Side by side"), () => { S.layout = "split"; renderVisual(); }]],
+  },
+  {
+    ja: "マーカーも設定ファイルも無い白紙様式から、印字ラベルの横の空欄を自動で発見。申請者欄（✓）は推奨、事務局専用欄（⊘）はロックされ選べません。計算式・結合セルの続きは除外し、確定した欄だけに記入します。",
+    en: "From a blank form with no markers and no slot file, the empty cells next to printed labels are discovered. Applicant cells (✓) are recommended, office-only cells (⊘) are locked, formulas and merged continuations are rejected — and only confirmed cells are filled.",
+    async go() { await discoverDemo("form4"); },
+    links: () => [[L("Excel 版（form5）も見る", "Try the Excel form (form5)"), () => discoverDemo("form5")]],
+  },
+  {
+    ja: "黄色の原文「483万6千円」から「4,836,000円」へ。補助金申請額は様式に印刷された上限で 1,612,000円 → 1,000,000円 に再抽出。メモに無い法人番号は推測せず、人の入力待ちです。",
+    en: "From the highlighted memo text 「483万6千円」 to 4,836,000円. The subsidy amount is re-extracted under the printed cap (1,612,000円 → 1,000,000円). The 法人番号 the memo never states is not guessed — it waits for a person.",
+    async go() {
+      if (!(S.run && S.run.demo_id === "form2" && S.run.revision === 0)) await runDemo("form2");
+      if (!S.run || S.run.demo_id !== "form2") return;
+      showView("run"); showTab("fields"); selectSlot("導入予定金額_税抜", true);
+    },
+    links: () => [
+      [L("補助金申請額（上限で再抽出）", "Subsidy amount (printed cap)"), () => { showTab("fields"); selectSlot("補助金申請額", true); }],
+      [L("法人番号（人の入力待ち）", "法人番号 (awaiting a person)"), () => showTab("hitl")],
+    ],
+  },
+  {
+    ja: "欄ごとに Haiku（定型の日付・ID・選択肢）／Sonnet（文章・金額・氏名）／Opus（長文の要約・差し戻し後の自己修正）を割り当てます。開発では Skills・サブエージェント・Hook・MCP が連携します。",
+    en: "Each field goes to Haiku (structured dates, IDs, choices), Sonnet (text, amounts, names) or Opus (long-text condensation, self-correction). In development, Skills, subagents, a hook and an MCP server work together.",
+    async go() {
+      if (!(S.run && (S.run.engine.mode === "live" || S.run.demo_id === "form1"))) await runDemo("form1");
+      if (!S.run) return;
+      showView("run"); showTab("claude");
+    },
+    links: () => [[L("「記入値と根拠」で欄ごとのモデルを見る", "Per-field model in Fields & sources"), () => showTab("fields")]],
+  },
+  {
+    ja: "21項目の決定論的検査、ZIP 内パーツごとの SHA-256、実際に書き換えたバイト範囲。承認は画面上の版と SHA-256 に結び付き、人が全項目を確認するまでダウンロードはサーバー側でロックされます。",
+    en: "21 deterministic checks, per-part SHA-256 and the exact byte ranges rewritten. Approval is bound to the revision on screen and the SHA-256; the download stays locked on the server until a person confirms every item.",
+    async go() {
+      if (!S.run) await runDemo("form1");
+      if (!S.run) return;
+      showView("run"); showTab("audit");
+    },
+    links: () => [[L("人による最終確認を開く", "Open Human approval"), () => showTab("hitl")]],
+  },
+];
+
+async function startTour(n) {
+  if (!(n >= 1 && n <= TOUR.length)) return;
+  S.tour = n;
+  renderTourBar();
+  await TOUR[n - 1].go();
+  renderTourBar();
+}
+
+function renderTourBar() {
+  $$(".tour-step").forEach((b) => b.classList.toggle("on", Number(b.dataset.tour) === S.tour));
+  const cap = $("#tourCaption");
+  if (!S.tour) { cap.hidden = true; return; }
+  const step = TOUR[S.tour - 1];
+  cap.hidden = false;
+  fill(cap,
+    h("b", { class: "tour-num" }, "①②③④⑤"[S.tour - 1]),
+    h("span", { class: "tour-text" }, L(step.ja, step.en)),
+    h("span", { class: "tour-links" },
+      step.links().map(([label, fn]) => h("button", { class: "linkish", type: "button", onclick: fn }, `${label} →`)),
+      S.tour < TOUR.length ? h("button", { class: "btn btn-primary btn-sm", type: "button", onclick: () => startTour(S.tour + 1) }, L("次へ ▶", "Next ▶")) : null,
+      h("button", { class: "icon-btn icon-sm", type: "button", "aria-label": L("ガイドを閉じる", "Close the walkthrough"),
+        onclick: () => { S.tour = 0; renderTourBar(); } }, "✕")));
 }
 
 /* ---------------------------------------------------------------- demos */
 
+function demoButton(d, onclick, unmarked) {
+  return h("button", { class: `demo${unmarked ? " demo-unmarked" : ""}${S.activeDemo === d.id ? " active" : ""}`, type: "button", onclick },
+    h("div", { class: "demo-top" }, h("span", { class: "ftype" }, `.${d.file_type}`), h("span", { class: "demo-title" }, d.title)),
+    h("div", { class: "demo-org" }, `${d.org} · ${d.title_en}`),
+    unmarked ? h("div", { class: "demo-cta" }, "🔍 ", B("空欄を自動発見 → 人が確定 → 記入", "discover → you confirm → fill")) : null,
+    h("div", { class: "chips" }, (d.highlights || []).map((x) => h("span", { class: "chip" }, x))));
+}
+
 function renderDemos() {
-  const list = $("#demoList");
-  list.replaceChildren(...S.demos.map((d) => h("button", {
-    class: `demo${S.activeDemo === d.id ? " active" : ""}`, type: "button", onclick: () => runDemo(d.id),
-  },
-  h("div", { class: "demo-top" }, h("span", { class: "ftype" }, `.${d.file_type}`), h("span", { class: "demo-title" }, d.title)),
-  h("div", { class: "demo-org" }, `${d.org} · ${d.title_en}`),
-  h("div", { class: "chips" }, d.highlights.map((x) => h("span", { class: "chip" }, x))))));
+  $("#demoList").replaceChildren(...S.demos.map((d) => demoButton(d, () => runDemo(d.id), false)));
+  $("#unmarkedList").replaceChildren(...S.unmarked.map((d) => demoButton(d, () => discoverDemo(d.id), true)));
 }
 
 async function runDemo(id) {
   S.activeDemo = id;
   renderDemos();
-  busy(true, "Scan → Map & self-correct → Surgical write → Verify → Visual diff");
+  busy(true, PIPELINE_STEPS());
   try {
     const run = await api("/api/runs", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ demo_id: id, mode: $("#modeSelect").value }),
+      method: "POST", headers: JSON_HEADERS,
+      body: JSON.stringify({ demo_id: id, mode: mode(), model_tier: tier() }),
     });
     setRun(run, true);
   } catch (e) {
-    toast(e.status === 422 && $("#modeSelect").value === "live"
-      ? `Live mode failed: ${e.message}. Use Auto or Offline demo.` : `Run failed: ${e.message}`);
+    toast(e.status === 422 && mode() === "live"
+      ? L(`ライブモードに失敗: ${e.message}。自動かオフラインを選んでください。`, `Live mode failed: ${e.message}. Use Auto or Offline demo.`)
+      : L(`実行に失敗: ${e.message}`, `Run failed: ${e.message}`));
   } finally { busy(false); }
 }
 
@@ -163,19 +411,192 @@ async function onUpload(ev) {
   ev.preventDefault();
   const f = $("#fileInput").files[0];
   const memo = $("#memoInput").value;
-  if (!f || !memo.trim()) { toast("Choose a form and paste a memo first."); return; }
+  if (!f || !memo.trim()) { toast(L("様式を選び、メモを貼り付けてください。", "Choose a form and paste a memo first.")); return; }
   const fd = new FormData();
   fd.append("file", f);
   fd.append("memo_text", memo);
-  fd.append("mode", $("#modeSelect").value);
+  fd.append("mode", mode());
+  fd.append("model_tier", tier());
   const spec = $("#specInput").files[0];
   if (spec) fd.append("slot_spec", spec);
   S.activeDemo = null;
   renderDemos();
-  busy(true, "Uploading and running the pipeline…");
+  busy(true, L("アップロードして実行中…", "Uploading and running the pipeline…"));
   try {
     setRun(await api("/api/runs/upload", { method: "POST", body: fd }), true);
-  } catch (e) { toast(`Upload failed: ${e.message}`); } finally { busy(false); }
+  } catch (e) { toast(L(`アップロードに失敗: ${e.message}`, `Upload failed: ${e.message}`)); } finally { busy(false); }
+}
+
+/* ------------------------------------------------ blank-cell discovery */
+// Stages 1–3 run on the server; stage 4 is this inspector: the reviewer confirms cells, office-only cells are
+// locked, and POST /api/runs/from-discovery fills only the confirmed ones (the server re-checks everything).
+
+const DISCOVERY_STEPS = () => L("空欄を発見中… ① ヒューリスティック抽出 → ② 意味分類 → ③ 安全検査",
+  "Discovering blank cells… ① heuristics → ② classification → ③ safety checks");
+
+async function discoverDemo(id) {
+  S.activeDemo = id;
+  renderDemos();
+  busy(true, DISCOVERY_STEPS());
+  try {
+    setDiscovery(await api("/api/discover/demo", {
+      method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ demo_id: id, mode: mode(), model_tier: tier() }),
+    }));
+  } catch (e) { toast(L(`空欄の発見に失敗: ${e.message}`, `Discovery failed: ${e.message}`)); } finally { busy(false); }
+}
+
+async function onDiscoverUpload() {
+  const f = $("#fileInput").files[0];
+  if (!f) { toast(L("先に .docx / .xlsx の様式を選んでください。", "Choose a .docx / .xlsx form first.")); return; }
+  const fd = new FormData();
+  fd.append("file", f);
+  fd.append("mode", mode());
+  fd.append("model_tier", tier());
+  S.activeDemo = null;
+  renderDemos();
+  busy(true, DISCOVERY_STEPS());
+  try {
+    const d = await api("/api/discover", { method: "POST", body: fd });
+    setDiscovery({ ...d, title: d.form_title || d.form, memo_text: $("#memoInput").value, uploaded: true });
+  } catch (e) { toast(L(`空欄の発見に失敗: ${e.message}`, `Discovery failed: ${e.message}`)); } finally { busy(false); }
+}
+
+function setDiscovery(d) {
+  const eligible = d.candidates.filter((c) => c.recommended && !c.office_only).map((c) => c.candidate_id);
+  S.disc = { d, checked: new Set(eligible), memo: d.memo_text || "", memo0: d.memo_text || "" };
+  $("#discMemo").value = S.disc.memo;
+  showView("discovery");
+  renderDiscovery();
+}
+
+function cellWhere(c) {
+  if (c.file_type === "xlsx" || c.cell) {
+    return [h("b", { class: "mono" }, c.cell || "?"),
+      c.merged_range ? h("div", { class: "f-ctx" }, L(`結合 ${c.merged_range}`, `merged ${c.merged_range}`)) : null,
+      c.sheet_name ? h("div", { class: "f-ctx" }, c.sheet_name) : null];
+  }
+  return [h("span", { class: "mono" }, L(`表${c.table}・行${c.row}・列${c.col}`, `tbl ${c.table} · r${c.row} · c${c.col}`))];
+}
+
+function ruleText(c) {
+  const parts = [fmtLabel(c.required_format)];
+  if (c.max_chars) parts.push(L(`${c.max_chars}字以内`, `≤ ${c.max_chars} chars`));
+  const opts = (c.constraints || {}).allowed_values;
+  if (opts && opts.length) parts.push(opts.join("／"));
+  return parts.join(" · ");
+}
+
+function roleBadge(c) {
+  if (c.office_only) return h("span", { class: "role role-office" }, "⊘ ✗ ", B("事務局専用欄（除外）", "Office-only — locked"));
+  if (c.recommended) return h("span", { class: "role role-app" }, "✓ ", B("申請者記入欄", "Applicant field"));
+  return h("span", { class: "role role-maybe" }, "– ", B("記入欄ではない可能性", "Probably not a field"));
+}
+
+function stageCard(n, ja, en, value, note, extra) {
+  return h("li", { class: `stage${n === "4" ? " current" : ""}` },
+    h("div", { class: "stage-n" }, n),
+    h("div", {}, h("div", { class: "stage-t" }, B(ja, en)), h("div", { class: "stage-v", ...(extra || {}) }, value),
+      h("div", { class: "f-ctx" }, note)));
+}
+
+function renderDiscovery() {
+  const D = S.disc;
+  if (!D) return;
+  const d = D.d;
+  const cands = d.candidates;
+  const st = Object.fromEntries((d.stages || []).map((x) => [x.stage, x]));
+  const office = cands.filter((c) => c.office_only).length;
+  const applicant = cands.length - office;
+  const rec = cands.filter((c) => c.recommended && !c.office_only).length;
+  $("#discTitle").textContent = d.title || d.form_title || d.form;
+  $("#discSub").textContent = [d.title_en, d.org, d.form, `${L("第2段階", "stage 2")}: ${d.engine.label}`].filter(Boolean).join(" · ");
+  const found = (st[1] || {}).found ?? cands.length + d.rejected.length;
+  fill($("#discStages"),
+    stageCard("1", "ヒューリスティック抽出", "Heuristic extraction", L(`${found} 個の空欄`, `${found} empty cells`),
+      L("印字ラベルの右・列見出しの下の空欄", "next to a printed label / under a column header")),
+    stageCard("2", "意味分類・ルール推定", "Classification & rule inference",
+      L(`申請者 ${applicant}・事務局 ${office}`, `${applicant} applicant · ${office} office-only`), d.engine.label),
+    stageCard("3", "決定論的安全検査", "Deterministic safety check",
+      L(`合格 ${(st[3] || {}).passed ?? cands.length}・除外 ${d.rejected.length}`, `${(st[3] || {}).passed ?? cands.length} passed · ${d.rejected.length} rejected`),
+      L("計算式・結合セルの続き・既存の内容は除外", "formulas, merged continuations and filled cells are rejected")),
+    stageCard("4", "人による記入前確定", "Human pre-fill confirmation", "", L("確定した欄だけに記入", "only confirmed cells are filled"),
+      { id: "discStage4" }));
+  fill($("#discKpis"),
+    tile(B("白紙様式の SHA-256", "Blank form SHA-256", "stack"), h("code", { class: "sha", title: d.form_sha256 }, `${d.form_sha256.slice(0, 12)}…`),
+      L("記入前にサーバーが再照合", "re-checked on the server before any fill")),
+    tile(B("空欄候補", "Candidate cells", "stack"), String(cands.length), L(`第1段階で ${found} 個を検出`, `${found} found in stage 1`)),
+    tile(B("推奨の申請者欄", "Recommended applicant cells", "stack"), String(rec),
+      L(`事務局専用の ${office} 欄はロック`, `${office} office-only cell(s) locked`), "✓", "icon-good"),
+    tile(B("安全のため除外したセル", "Cells rejected for safety", "stack"), String(d.rejected.length),
+      L("計算式・結合セルの続きなどは記入対象にしない", "formulas, merged continuations … are never filled"), "🛡", "icon-good"));
+  $("#candRows").replaceChildren(...cands.map((c) => {
+    const locked = Boolean(c.office_only);
+    const cb = h("input", { type: "checkbox", value: c.candidate_id, disabled: locked,
+      "aria-label": `${c.candidate_id} ${c.slot_id}`, title: locked ? L("事務局専用欄は選べません", "Office-only cells can never be confirmed") : "" });
+    cb.checked = !locked && D.checked.has(c.candidate_id);
+    cb.addEventListener("change", () => {
+      if (locked) { cb.checked = false; return; }  // the server refuses office-only cells too
+      if (cb.checked) D.checked.add(c.candidate_id); else D.checked.delete(c.candidate_id);
+      updateDiscConfirm();
+    });
+    const [first, ...hints] = String(c.evidence_label || "").split("\n");
+    const ctx = [c.section, c.group_label].filter(Boolean).join(" › ");
+    return h("tr", { class: locked ? "locked" : c.recommended ? "rec" : "maybe" },
+      h("td", {}, cb),
+      h("td", { class: "mono" }, c.candidate_id),
+      h("td", { title: c.location, class: "nowrap" }, cellWhere(c)),
+      h("td", {}, h("div", { class: "f-label" }, first), hints.length ? h("div", { class: "f-ctx" }, hints.join(" ")) : null,
+        ctx ? h("div", { class: "f-ctx" }, ctx) : null, h("div", { class: "f-ctx mono" }, `→ ${c.slot_id}`)),
+      h("td", {}, ruleText(c)),
+      h("td", {}, roleBadge(c)),
+      h("td", { class: "f-ctx", title: c.reason }, reasonText(c.reason), (c.office_keywords || []).length
+        ? h("div", { class: "chips" }, c.office_keywords.map((k) => h("span", { class: "chip" }, k))) : null));
+  }));
+  fill($("#discRejected"),
+    h("div", { class: "card-h" }, B("除外したセル（第3段階）", "Rejected cells (stage 3)")),
+    d.rejected.length ? h("ul", { class: "rej" }, d.rejected.map((r) => h("li", {},
+      h("b", { class: "mono" }, r.cell || L(`表${r.table}・行${r.row}・列${r.col}`, `tbl ${r.table} · r${r.row} · c${r.col}`)),
+      ` ${String(r.evidence_label || "").split("\n")[0]}`, h("div", { class: "f-ctx", title: r.reason }, reasonText(r.reason)))))
+      : h("p", { class: "muted" }, L("なし", "none")));
+  if ($("#discMemo").value !== D.memo) $("#discMemo").value = D.memo;
+  updateDiscConfirm();
+}
+
+function updateDiscConfirm() {
+  const D = S.disc;
+  if (!D) return;
+  const n = D.checked.size;
+  const s4 = $("#discStage4");
+  if (s4) s4.textContent = L(`${n} 欄を選択中`, `${n} cell(s) selected`);
+  const msg = $("#discCount");
+  msg.className = `msg ${n ? "ok" : "err"}`;
+  msg.textContent = n ? L(`${n} 欄を確定して記入します（事務局専用欄は含められません）`, `${n} cell(s) will be filled (office-only cells can never be included)`)
+    : L("記入する空欄を1つ以上選んでください", "Select at least one cell to fill");
+  $("#fillConfirmed").disabled = !n;
+}
+
+async function onFillConfirmed() {
+  const D = S.disc;
+  if (!D) return;
+  const ids = D.d.candidates.filter((c) => D.checked.has(c.candidate_id) && !c.office_only).map((c) => c.candidate_id);
+  const memo = $("#discMemo").value;
+  if (!ids.length) { toast(L("記入する空欄を1つ以上選んでください。", "Confirm at least one cell first.")); return; }
+  if (!memo.trim()) { toast(L("入力メモを貼り付けてください。", "Paste the source memo first.")); return; }
+  busy(true, L("確定した空欄だけに外科的記入 → 21項目検査 → 見た目の比較", "Surgical fill of the confirmed cells → 21 checks → visual diff"));
+  try {
+    const run = await api("/api/runs/from-discovery", {
+      method: "POST", headers: JSON_HEADERS,
+      body: JSON.stringify({
+        discovery_id: D.d.discovery_id, confirmed_targets: ids, mode: mode(), model_tier: tier(),
+        // a built-in demo with its untouched sample memo lets the server use the memo it stored
+        memo_text: !D.d.uploaded && memo === D.memo0 ? null : memo,
+      }),
+    });
+    setRun(run, true);
+  } catch (e) {
+    toast(e.status === 404 ? L("発見結果の期限が切れました。もう一度空欄を発見してください。", "This discovery expired — run discovery again.")
+      : L(`記入を拒否しました: ${e.message}`, `Refused: ${e.message}`));
+  } finally { busy(false); }
 }
 
 /* ------------------------------------------------------------------ run */
@@ -184,16 +605,20 @@ function setRun(run, fresh) {
   S.run = run;
   S.checked = new Set(run.approval ? run.approval.checked : []);
   if (fresh) { S.sel = null; S.cmp = run.previews.naive ? "naive" : "blank"; }
-  $("#emptyState").hidden = true;
-  $("#runView").hidden = false;
+  showView("run");
+  renderRun();
+  if (S.sel) selectSlot(S.sel, false);
+  if (fresh) showTab("visual");
+}
+
+function renderRun() {
   renderHeader();
   renderKpis();
   renderVisual();
   renderFields();
   renderAudit();
   renderHitl();
-  if (S.sel) selectSlot(S.sel, false);
-  if (fresh) showTab("visual");
+  if (S.tab === "claude") renderClaudeTab();
 }
 
 function mapsById() {
@@ -201,9 +626,9 @@ function mapsById() {
 }
 
 function statusInfo(st) {
-  if (st === "PASS") return { cls: "st-pass", text: "✓ PASS — ready for human sign-off" };
-  if (st === "NEEDS_HUMAN_INPUT") return { cls: "st-need", text: "⚠ Needs human input" };
-  return { cls: "st-fail", text: "✗ FAIL — do not use" };
+  if (st === "PASS") return { cls: "st-pass", node: B("✓ 合格 — 人の最終確認へ", "✓ PASS — ready for human sign-off") };
+  if (st === "NEEDS_HUMAN_INPUT") return { cls: "st-need", node: B("⚠ 人の入力が必要", "⚠ Needs human input") };
+  return { cls: "st-fail", node: B("✗ 不合格 — 使用しないでください", "✗ FAIL — do not use") };
 }
 
 function renderHeader() {
@@ -211,16 +636,16 @@ function renderHeader() {
   const si = statusInfo(r.report.overall_status);
   const st = $("#runStatus");
   st.className = `status ${si.cls}`;
-  st.textContent = si.text;
+  fill(st, si.node);
   $("#runTitle").textContent = r.form.title;
   const eng = r.engine || {};
-  $("#runSub").textContent = `${r.form.title_en ? r.form.title_en + " · " : ""}${r.display_name} → ${r.filled.name} · engine: ${eng.label || "?"}`
-    + (eng.fallback_reason ? ` (fallback: ${eng.fallback_reason})` : "");
+  $("#runSub").textContent = `${r.form.title_en ? r.form.title_en + " · " : ""}${r.display_name} → ${r.filled.name} · ${L("エンジン", "engine")}: ${eng.label || "?"}`
+    + (eng.fallback_reason ? ` (fallback: ${eng.fallback_reason})` : "")
+    + (r.confirmed_candidates && r.confirmed_candidates.length ? ` · ${L("確定した空欄", "confirmed cells")}: ${r.confirmed_candidates.join(", ")}` : "");
   $("#reportLink").href = r.links.report;
   $("#auditLink").href = r.links.audit;
-  const b = $("#engineBadge");
-  b.textContent = eng.mode === "live" ? `Claude · ${eng.model === "auto" ? "auto model routing" : eng.model}` : "Offline demo engine";
-  b.className = `pill ${eng.mode === "live" ? "pill-live" : "pill-neutral"}`;
+  $("#backToDisc").hidden = !(S.disc && r.confirmed_candidates && r.confirmed_candidates.length);
+  renderEngineBadge();
   const pending = r.report.pending_slots.length;
   const hitlTab = $(".tabs button[data-tab=hitl]");
   hitlTab.querySelector(".badge-count")?.remove();
@@ -242,14 +667,20 @@ function renderKpis() {
   const untouched = rep.entry_hashes.filter((e) => e.role === "untouched" && e.identical && e.raw_identical).length;
   const vis = r.visual || {};
   $("#kpis").replaceChildren(
-    tile("Fields filled", `${filled}/${r.mappings.length}`, "記入済み（根拠付き）"),
-    tile("Awaiting human input", String(pending), pending ? "not in the memo — never guessed" : "none", pending ? "⚠" : "✓", pending ? "icon-warn" : "icon-good"),
-    tile("Checks passed", `${rep.passed_count}/${total}`, "structural + grounding", rep.failed_count ? "✗" : "✓", rep.failed_count ? "icon-bad" : "icon-good"),
-    tile("Parts byte-identical", untouched === untouchedAll ? String(untouched) : `${untouched}/${untouchedAll}`,
-      untouched === untouchedAll ? "ZIP entries copied verbatim" : `${untouchedAll - untouched} non-target part(s) changed`,
+    tile(B("記入済み", "Fields filled", "stack"), `${filled}/${r.mappings.length}`, L("すべて原文の根拠付き", "each with a verbatim source")),
+    tile(B("人の入力待ち", "Awaiting human input", "stack"), String(pending),
+      pending ? L("メモに無いので推測しない", "not in the memo — never guessed") : L("なし", "none"), pending ? "⚠" : "✓", pending ? "icon-warn" : "icon-good"),
+    tile(B("合格した検査", "Checks passed", "stack"), `${rep.passed_count}/${total}`, L("構造＋根拠の決定論的検査", "structural + grounding"),
+      rep.failed_count ? "✗" : "✓", rep.failed_count ? "icon-bad" : "icon-good"),
+    tile(B("無変更のパーツ", "Parts byte-identical", "stack"), untouched === untouchedAll ? String(untouched) : `${untouched}/${untouchedAll}`,
+      untouched === untouchedAll ? L("ZIP 内パーツをバイト単位で複製", "ZIP entries copied verbatim")
+        : L(`対象外パーツが ${untouchedAll - untouched} 個変化`, `${untouchedAll - untouched} non-target part(s) changed`),
       untouched === untouchedAll ? null : "✗", "icon-bad"),
-    tile("Layout drift outside fields", `${vis.max_shift_px ?? 0} px`, `${vis.boxes_compared ?? 0} boxes compared`, vis.identical_outside_slots ? "✓" : "✗", vis.identical_outside_slots ? "icon-good" : "icon-bad"),
-    tile("Ungrounded claims", String(rep.ungrounded_claims_count), "根拠のない記入", rep.ungrounded_claims_count ? "✗" : "✓", rep.ungrounded_claims_count ? "icon-bad" : "icon-good"),
+    tile(B("指定欄以外のずれ", "Layout drift outside fields", "stack"), `${vis.max_shift_px ?? 0} px`,
+      L(`${vis.boxes_compared ?? 0} 個の枠を比較`, `${vis.boxes_compared ?? 0} boxes compared`),
+      vis.identical_outside_slots ? "✓" : "✗", vis.identical_outside_slots ? "icon-good" : "icon-bad"),
+    tile(B("根拠のない記入", "Ungrounded claims", "stack"), String(rep.ungrounded_claims_count), L("メモに無い値", "values without evidence"),
+      rep.ungrounded_claims_count ? "✗" : "✓", rep.ungrounded_claims_count ? "icon-bad" : "icon-good"),
   );
 }
 
@@ -259,23 +690,25 @@ function captionNode(kind) {
   const r = S.run;
   if (kind === "naive") {
     const n = r.naive_report;
-    return [h("span", {}, "Naive AI regeneration (simulated) · 作り直し版"),
-      h("span", { class: "st st-pending", style: "background:var(--bad-soft);color:var(--bad-ink)" }, `✗ ${n ? n.failed_count : "?"} checks failed`)];
+    return [B("生成AIで作り直した版（再現）", "Naive AI regeneration (simulated)"),
+      h("span", { class: "st st-bad" }, L(`✗ ${n ? n.failed_count : "?"} 項目不合格`, `✗ ${n ? n.failed_count : "?"} checks failed`))];
   }
-  if (kind === "blank") return [h("span", {}, "Blank original · 原本"), h("span", { class: "st st-human" }, "▭ designated fields")];
+  if (kind === "blank") return [B("白紙の原本", "Blank original"), h("span", { class: "st st-human" }, L("▭ 指定欄", "▭ designated fields"))];
   const rep = r.report;
-  return [h("span", {}, "Form-Guard Agent · 指定欄だけ記入"),
-    h("span", { class: `st ${rep.failed_count ? "st-pending" : "st-filled"}` }, `${rep.failed_count ? "✗" : "✓"} ${rep.passed_count}/${rep.passed_count + rep.failed_count} checks`)];
+  return [B("Form-Guard（指定欄だけ記入）", "Form-Guard Agent — designated fields only"),
+    h("span", { class: `st ${rep.failed_count ? "st-pending" : "st-filled"}` },
+      `${rep.failed_count ? "✗" : "✓"} ${rep.passed_count}/${rep.passed_count + rep.failed_count} ${L("項目合格", "checks")}`)];
 }
 
 function renderVisual() {
   const r = S.run;
+  if (!r) return;
   const hasNaive = Boolean(r.previews.naive);
   if (!hasNaive && S.cmp === "naive") S.cmp = "blank";
   $$("#cmpMode button").forEach((b) => {
     b.classList.toggle("on", b.dataset.v === S.cmp);
     b.disabled = b.dataset.v === "naive" && !hasNaive;
-    b.title = b.disabled ? "No naive regeneration is available for uploaded forms" : "";
+    b.title = b.disabled ? L("この様式には作り直し版の比較がありません", "No naive regeneration is available for this form") : "";
   });
   $$("#cmpLayout button").forEach((b) => b.classList.toggle("on", b.dataset.v === S.layout));
   const leftKind = S.cmp;
@@ -290,7 +723,7 @@ function renderVisual() {
   } else {
     $("#sliderA").innerHTML = leftSvg;
     $("#sliderB").innerHTML = r.previews.filled;
-    $("#sliderCapA").textContent = leftKind === "naive" ? "◀ Naive AI regeneration" : "◀ Blank original";
+    $("#sliderCapA").textContent = leftKind === "naive" ? L("◀ 生成AIで作り直した版", "◀ Naive AI regeneration") : L("◀ 白紙の原本", "◀ Blank original");
     $("#sliderCapB").textContent = "Form-Guard ▶";
   }
   $$(".svg-box [data-slot-id], .slider-stage [data-slot-id]").forEach((el) => {
@@ -306,16 +739,17 @@ function renderVerdicts() {
   if (r.naive_report) {
     const fails = r.naive_report.checks.filter((c) => !c.passed);
     nv.hidden = false;
-    fill(nv, h("h3", {}, `✗ What a from-scratch regeneration broke (${fails.length})`),
+    fill(nv, h("h3", {}, B(`✗ 作り直しで壊れたもの（${fails.length}）`, `✗ What a from-scratch regeneration broke (${fails.length})`)),
       h("ul", {}, fails.map((c) => h("li", {}, h("span", { class: "bad-i" }, "✗ "), h("b", {}, c.description), ` — ${c.details}`))));
   } else {
     nv.hidden = false;
-    nv.replaceChildren(h("h3", {}, "No naive comparison for uploaded forms"),
-      h("p", { class: "muted" }, "Demo forms include a scripted naive regeneration that reproduces the usual failure modes."));
+    fill(nv, h("h3", {}, B("この様式には作り直し版の比較はありません", "No naive comparison for this form")),
+      h("p", { class: "muted" }, L("付属のマーカーありデモ3件には、よくある失敗を再現した作り直し版が付いています。",
+        "The three marked demo forms include a scripted naive regeneration that reproduces the usual failure modes.")));
   }
   const keep = ["ZIP-04", "XML-03", "LAYOUT-01", "LAYOUT-02", "TEXT-01", "GRD-01", "GRD-02", "CON-03"];
   const checks = r.report.checks.filter((c) => keep.includes(c.check_id) || !c.passed);
-  $("#fgVerdict").replaceChildren(h("h3", {}, "✓ What Form-Guard proved for this file"),
+  fill($("#fgVerdict"), h("h3", {}, B("✓ Form-Guard がこのファイルで証明したこと", "✓ What Form-Guard proved for this file")),
     h("ul", {}, checks.map((c) => h("li", {}, h("span", { class: c.passed ? "ok-i" : "bad-i" }, c.passed ? "✓ " : "✗ "),
       h("b", {}, c.description), ` — ${c.details}`))));
 }
@@ -340,13 +774,77 @@ function highlightSvg(id) {
   $$(`[data-slot-id="${CSS.escape(id)}"]`).forEach((el) => el.classList.add("is-active"));
 }
 
+/* ---------------------------------------------------------- model routing */
+// routed_model is the model id(s) that served the field (live), or "offline (<model> in live auto)" — a plan.
+
+const MODEL_ID = /claude-[a-z]+-\d+(?:-\d{1,2})?(?:-\d{8})?/g;
+
+function modelName(id) {  // claude-haiku-5-5 -> Haiku 5.5, claude-haiku-4-5-20251001 -> Haiku 4.5
+  const m = /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?$/.exec(id || "");
+  return m ? `${m[1][0].toUpperCase()}${m[1].slice(1)} ${m[2]}${m[3] ? `.${m[3]}` : ""}` : String(id || "");
+}
+
+function modelFamily(id) {
+  return (/claude-(haiku|sonnet|opus|fable)/.exec(id || "") || [])[1] || "other";
+}
+
+function routeInfo(m) {
+  const r = m.routed_model || "";
+  if (m.engine === "human" || r === "human reviewer") return { kind: "human", models: [] };
+  const models = r.match(MODEL_ID) || [];
+  return { kind: r.startsWith("offline (") ? "plan" : (models.length ? "live" : "other"), models, revised: /\(revision/.test(r) };
+}
+
+function modelChip(id, plan, alias) {
+  return h("span", { class: `mb mb-${modelFamily(alias ? `claude-${alias}-` : id)}${plan ? " mb-plan" : ""}`, title: id }, alias ? `${alias[0].toUpperCase()}${alias.slice(1)}` : modelName(id));
+}
+
+function modelBadge(m) {
+  const info = routeInfo(m);
+  const tip = [m.routed_model, m.route_reason].filter(Boolean).join("\n");
+  if (info.kind === "human") return h("span", { class: "mb mb-human", title: tip }, "✎ ", L("確認者", "reviewer"));
+  if (!info.models.length) return h("span", { class: "mb", title: tip }, m.routed_model || "—");
+  const parts = [];
+  info.models.forEach((id, i) => {
+    if (i) parts.push(h("span", { class: "mb-arrow" }, "→"));
+    parts.push(modelChip(id, info.kind === "plan"));
+  });
+  return h("span", { class: "mbs", title: tip }, ...parts,
+    info.revised ? h("span", { class: "mb-note" }, L("修正", "revision")) : null,
+    info.kind === "plan" ? h("span", { class: "mb-note" }, L("計画", "plan")) : null);
+}
+
+function routeBlock(m) {
+  const info = routeInfo(m);
+  const chain = info.models.join(" → ");
+  let what = m.routed_model || "—";
+  if (info.kind === "plan") {
+    what = L(`この欄はオフラインエンジンで処理しました（API 呼び出しなし）。ライブの auto モードでは ${chain} が担当します。`,
+      `Processed by the offline engine — no API call. In live auto mode ${chain} would handle this field.`);
+  } else if (info.kind === "live") {
+    what = L(`この欄は ${m.routed_model} が処理しました（API が返したモデル ID）。`, `Served by ${m.routed_model} (model id returned by the API).`);
+  } else if (info.kind === "human") {
+    what = L("確認者が入力した値です（モデルは関与していません）。", "Entered by the reviewer — no model involved.");
+  }
+  const usage = (S.run.engine && S.run.engine.usage) || {};
+  const thoughts = (usage.thinking_summaries || []).filter((t) => (t.slots || []).includes(m.slot_id));
+  return h("div", { class: "route-box" },
+    h("div", { class: "route-h" }, B(info.kind === "plan" ? "モデルの割り当て（ライブ auto の計画）" : "モデルの割り当て",
+      info.kind === "plan" ? "Model routing (live auto plan)" : "Model routing"), modelBadge(m)),
+    h("div", { class: "f-ctx" }, what),
+    m.route_reason ? h("div", { class: "f-ctx", title: m.route_reason }, `${L("理由", "Why")}: ${routeReasonText(m.route_reason)}`) : null,
+    ...thoughts.map((t) => h("details", { class: "thinking" },
+      h("summary", {}, `${L("API が返した思考の要約", "API-returned thinking summary")} · ${t.model} · ${t.task}`),
+      h("div", { class: "f-ctx" }, t.label), h("div", { class: "thinking-text" }, t.text))));
+}
+
 /* --------------------------------------------------------------- fields */
 
 function statusChip(m) {
-  if (m.status === "filled") return h("span", { class: "st st-filled" }, "✓ filled");
-  if (m.status === "human_entered") return h("span", { class: "st st-human" }, "✎ reviewer");
-  if (m.status === "recovered") return h("span", { class: "st st-pending" }, "? not verified");
-  return h("span", { class: "st st-pending" }, "⚠ needs input");
+  if (m.status === "filled") return h("span", { class: "st st-filled" }, L("✓ 記入済み", "✓ filled"));
+  if (m.status === "human_entered") return h("span", { class: "st st-human" }, L("✎ 確認者が入力", "✎ reviewer"));
+  if (m.status === "recovered") return h("span", { class: "st st-pending" }, L("? 根拠未検証", "? not verified"));
+  return h("span", { class: "st st-pending" }, L("⚠ 入力待ち", "⚠ needs input"));
 }
 
 function lineRef(m) {
@@ -360,7 +858,7 @@ function renderFields() {
   const maps = mapsById();
   $("#fieldRows").replaceChildren(...r.slots.map((s) => {
     const m = maps[s.slot_id];
-    const val = m.filled_value || (m.suggested_value ? `suggestion: ${m.suggested_value}` : "（未記入 — awaiting input）");
+    const val = m.filled_value || (m.suggested_value ? `${L("候補", "suggestion")}: ${m.suggested_value}` : L("（未記入 — 入力待ち）", "（未記入 — awaiting input）"));
     const n = cpLength(m.filled_value);
     const over = s.max_chars && n > s.max_chars;
     return h("tr", { dataset: { slot: s.slot_id }, onclick: () => selectSlot(s.slot_id, true) },
@@ -368,10 +866,11 @@ function renderFields() {
       h("td", { class: `f-value${m.filled_value ? "" : " pending"}` }, val),
       h("td", { class: `num${over ? " over" : ""}` }, s.max_chars ? `${n}/${s.max_chars}` : String(n || "")),
       h("td", {}, statusChip(m), ...m.normalizations.filter((f) => ATTENTION.has(f)).map((f) => h("div", { class: "f-ctx" }, `⚠ ${FLAG[f] || f}`))),
+      h("td", {}, modelBadge(m)),
       h("td", { class: "num" }, lineRef(m)));
   }));
   renderMemo();
-  if (!S.sel) fill($("#fieldDetail"), h("p", { class: "muted" }, "Select a field — or click a highlighted value in the preview."));
+  if (!S.sel) fill($("#fieldDetail"), h("p", { class: "muted" }, L("欄を選ぶか、プレビュー上の値をクリックしてください。", "Select a field — or click a highlighted value in the preview.")));
 }
 
 function renderMemo() {
@@ -415,12 +914,12 @@ function renderDetail(id) {
   const m = mapsById()[id];
   if (!s || !m) return;
   const cons = [];
-  if (s.required_format && s.required_format !== "text") cons.push(`format: ${s.required_format}`);
-  if (s.max_chars) cons.push(`≤ ${s.max_chars} chars`);
-  if (s.constraints.allowed_values) cons.push(`options: ${s.constraints.allowed_values.join("／")}`);
-  if (s.constraints.max_value) cons.push(`cap: ${Number(s.constraints.max_value).toLocaleString()}円`);
-  if (s.constraints.multiple_of) cons.push(`multiple of ${s.constraints.multiple_of}`);
-  if (s.constraints.pattern && s.required_format !== "choice") cons.push(`pattern: ${s.constraints.example || s.constraints.pattern}`);
+  if (s.required_format && s.required_format !== "text") cons.push(`${L("形式", "format")}: ${fmtLabel(s.required_format)}`);
+  if (s.max_chars) cons.push(L(`${s.max_chars}字以内`, `≤ ${s.max_chars} chars`));
+  if (s.constraints.allowed_values) cons.push(`${L("選択肢", "options")}: ${s.constraints.allowed_values.join("／")}`);
+  if (s.constraints.max_value) cons.push(`${L("上限", "cap")}: ${Number(s.constraints.max_value).toLocaleString()}円`);
+  if (s.constraints.multiple_of) cons.push(L(`${s.constraints.multiple_of} の倍数`, `multiple of ${s.constraints.multiple_of}`));
+  if (s.constraints.pattern && s.required_format !== "choice") cons.push(`${L("書式", "pattern")}: ${s.constraints.example || s.constraints.pattern}`);
   const quotes = (m.source_spans || []).map((sp) => h("div", { class: "quote" },
     h("b", {}, sp.line_start === sp.line_end ? `L${sp.line_start} ` : `L${sp.line_start}–${sp.line_end} `), `「${sp.text}」`));
   const attempts = (m.attempts || []).map((a) => h("li", { class: a.passed ? "ok" : "err" },
@@ -428,16 +927,19 @@ function renderDetail(id) {
     a.value ? h("div", { class: "tv" }, `→ ${a.value}`) : null,
     ...(a.issues || []).filter((i) => i.severity === "error").map((i) => h("div", { class: "ti" }, `✗ ${i.code}: ${i.message}`)),
     ...(a.issues || []).filter((i) => i.severity === "warning").map((i) => h("div", { class: "ti", style: "color:var(--warn-ink)" }, `⚠ ${i.message}`))));
-  fill($("#fieldDetail"), 
+  fill($("#fieldDetail"),
     h("div", { class: "card-h" }, s.label, h("span", {}, s.location_path)),
     h("div", {}, statusChip(m), " ", ...m.normalizations.map((f) => h("span", { class: "chip" }, FLAG[f] || f))),
-    h("div", { class: "detail-value" }, m.filled_value || (m.suggested_value ? `（unverified suggestion: ${m.suggested_value}）` : "（not stated in the memo — left for the reviewer）")),
-    cons.length ? h("div", { class: "f-ctx" }, `Printed rules found on the form: ${cons.join(" · ")}`) : null,
+    h("div", { class: "detail-value" }, m.filled_value || (m.suggested_value
+      ? L(`（未検証の候補: ${m.suggested_value}）`, `（unverified suggestion: ${m.suggested_value}）`)
+      : L("（メモに記載なし — 確認者が入力）", "（not stated in the memo — left for the reviewer）"))),
+    cons.length ? h("div", { class: "f-ctx" }, `${L("様式に印刷されたルール", "Printed rules found on the form")}: ${cons.join(" · ")}`) : null,
     ...(m.warnings || []).map((w) => h("div", { class: "f-ctx", style: "color:var(--warn-ink)" }, `⚠ ${w}`)),
     ...(m.errors || []).map((w) => h("div", { class: "f-ctx", style: "color:var(--bad-ink)" }, `✗ ${w}`)),
-    quotes.length ? h("div", { style: "margin-top:8px" }, h("b", {}, "Verbatim source · 根拠（原文そのまま）"), ...quotes) : null,
-    m.reasoning ? h("div", { class: "f-ctx" }, `Engine note: ${m.reasoning}`) : null,
-    attempts.length ? h("div", { style: "margin-top:8px" }, h("b", {}, "Self-correction history · 自己修正の履歴"), h("ol", { class: "timeline" }, attempts)) : null,
+    quotes.length ? h("div", { style: "margin-top:8px" }, h("b", {}, B("根拠（原文そのまま）", "Verbatim source")), ...quotes) : null,
+    m.reasoning ? h("div", { class: "f-ctx" }, `${L("エンジンのメモ", "Engine note")}: ${m.reasoning}`) : null,
+    routeBlock(m),
+    attempts.length ? h("div", { style: "margin-top:8px" }, h("b", {}, B("自己修正の履歴", "Self-correction history")), h("ol", { class: "timeline" }, attempts)) : null,
     editControl(s, m),
   );
 }
@@ -450,20 +952,20 @@ function editControl(s, m) {
   const count = h("span", { class: "f-ctx" });
   const update = () => {
     const n = cpLength(inp.value.trim());
-    count.textContent = s.max_chars ? `${n}/${s.max_chars}` : `${n} chars`;
+    count.textContent = s.max_chars ? `${n}/${s.max_chars}` : L(`${n} 字`, `${n} chars`);
     count.classList.toggle("over", Boolean(s.max_chars && n > s.max_chars));
   };
   inp.addEventListener("input", update);
   update();
   const save = () => {
     const v = inp.value.trim();
-    if (!v) { toast("Type a value first."); return; }
-    if (v === m.filled_value) { toast("Unchanged."); return; }
-    submitValues({ [s.slot_id]: v }, `Saved «${s.label}» — re-verified. Approval (if any) was cleared.`);
+    if (!v) { toast(L("値を入力してください。", "Type a value first.")); return; }
+    if (v === m.filled_value) { toast(L("変更はありません。", "Unchanged.")); return; }
+    submitValues({ [s.slot_id]: v }, L(`「${s.label}」を保存し再検査しました。承認は取り消されました。`, `Saved «${s.label}» — re-verified. Approval (if any) was cleared.`));
   };
   inp.addEventListener("keydown", (e) => { if (e.key === "Enter") save(); });
   return h("div", { class: "edit-row" },
-    h("label", { class: "f-ctx" }, m.status === "needs_human_input" ? "Enter value · 値を入力" : "Correct this value · 値を修正"),
+    h("label", { class: "f-ctx" }, m.status === "needs_human_input" ? L("値を入力 · Enter value", "Enter value · 値を入力") : L("値を修正 · Correct this value", "Correct this value · 値を修正")),
     inp, count, h("button", { class: "btn btn-ghost", type: "button", onclick: save }, "Save edit / 値を修正"));
 }
 
@@ -477,14 +979,14 @@ function renderAudit() {
     const items = byCat[k];
     const ok = items.filter((c) => c.passed).length;
     return h("div", { class: "ag" },
-      h("h3", {}, h("span", {}, `${en} · ${ja}`), h("span", { class: ok === items.length ? "ok-i" : "bad-i" }, `${ok === items.length ? "✓" : "✗"} ${ok}/${items.length}`)),
+      h("h3", {}, B(ja, en), h("span", { class: ok === items.length ? "ok-i" : "bad-i" }, `${ok === items.length ? "✓" : "✗"} ${ok}/${items.length}`)),
       ...items.map((c) => h("div", { class: "ck" }, h("span", { class: c.passed ? "ok-i" : "bad-i" }, c.passed ? "✓" : "✗"),
         h("span", {}, h("b", {}, `${c.check_id} `), c.description), h("span", { class: "d" }, c.details))));
   }));
   $("#entryRows").replaceChildren(...r.report.entry_hashes.map((e) => {
-    let res = h("span", { class: "res-bad" }, "✗ changed");
-    if (e.role === "target") res = h("span", { class: "res-target" }, e.identical ? "target · unchanged" : "target · slot text only");
-    else if (e.identical && e.raw_identical) res = h("span", { class: "res-ok" }, "✓ byte-identical");
+    let res = h("span", { class: "res-bad" }, L("✗ 変更あり", "✗ changed"));
+    if (e.role === "target") res = h("span", { class: "res-target" }, e.identical ? L("対象 · 変更なし", "target · unchanged") : L("対象 · 欄の文字のみ", "target · slot text only"));
+    else if (e.identical && e.raw_identical) res = h("span", { class: "res-ok" }, L("✓ バイト単位で同一", "✓ byte-identical"));
     return h("tr", {}, h("td", {}, e.name), h("td", {}, e.role), h("td", {}, `${e.original_sha256.slice(0, 20)}…`), h("td", {}, res));
   }));
   $("#patchRows").replaceChildren(...r.patches.map((p) => h("tr", {}, h("td", {}, p.part_name), h("td", {}, p.slot_id),
@@ -502,18 +1004,22 @@ function renderHitl() {
   if (pending.length) {
     const inputs = {};
     fill(box, h("div", { class: "card pending-card" },
-      h("div", { class: "card-h" }, `⚠ ${pending.length} field(s) need your input`, h("span", {}, "メモに根拠が無い項目は推測せず、人が入力します")),
+      h("div", { class: "card-h" }, B(`⚠ ${pending.length} 欄に人の入力が必要です`, `⚠ ${pending.length} field(s) need your input`),
+        h("span", {}, L("メモに根拠が無い項目は推測せず、人が入力します", "Facts missing from the memo are never guessed"))),
       ...pending.map((m) => {
         const s = r.slots.find((x) => x.slot_id === m.slot_id);
-        const inp = h("input", { type: "text", placeholder: m.suggested_value ? `suggestion: ${m.suggested_value}` : (s.constraints.example || "") });
+        const inp = h("input", { type: "text", placeholder: m.suggested_value ? `${L("候補", "suggestion")}: ${m.suggested_value}` : (s.constraints.example || "") });
         inputs[m.slot_id] = inp;
-        const why = m.errors && m.errors.length ? `Rejected by the form's rules: ${m.errors.join(" / ")}` : "Not stated in the memo, so Form-Guard did not guess it.";
+        const why = m.errors && m.errors.length
+          ? `${L("様式のルールで不合格", "Rejected by the form's rules")}: ${m.errors.join(" / ")}`
+          : L("メモに記載が無いため、Form-Guard は推測しませんでした。", "Not stated in the memo, so Form-Guard did not guess it.");
         return h("div", { class: "pending-item" }, h("b", {}, s.label), inp,
-          h("span", { class: "f-ctx" }, [s.constraints.digits ? `${s.constraints.digits}桁 digits` : s.required_format,
+          h("span", { class: "f-ctx" }, [s.constraints.digits ? L(`${s.constraints.digits}桁`, `${s.constraints.digits} digits`) : fmtLabel(s.required_format),
             s.max_chars ? `≤${s.max_chars}` : ""].filter(Boolean).join(" · ")),
           h("div", { class: "why" }, why));
       }),
-      h("div", { style: "margin-top:8px" }, h("button", { class: "btn btn-primary", type: "button", onclick: () => applyOverrides(inputs) }, "Apply & re-verify"))));
+      h("div", { style: "margin-top:8px" }, h("button", { class: "btn btn-primary", type: "button", onclick: () => applyOverrides(inputs) },
+        B("反映して再検査", "Apply & re-verify")))));
   } else {
     box.replaceChildren();
   }
@@ -528,11 +1034,11 @@ function renderHitl() {
     const slot = it.slot_id ? r.slots.find((x) => x.slot_id === it.slot_id) : null;
     return h("li", { class: `${it.kind === "global" ? "global" : ""}${blocked ? " blocked" : ""}` }, cb,
       h("div", {},
-        it.slot_id ? h("div", {}, h("b", {}, it.label), " ＝ ", h("span", { class: "f-value" }, it.value || "（未記入）")) : null,
+        it.slot_id ? h("div", {}, h("b", {}, it.label), " ＝ ", h("span", { class: "f-value" }, it.value || L("（未記入）", "（empty）"))) : null,
         h("div", { class: "q" }, it.prompt),
         it.source_quote ? h("div", { class: "quote" }, `「${it.source_quote}」`) : null,
         flags.length ? h("div", { class: "chips" }, flags) : null,
-        m && it.slot_id ? h("a", { href: "#", onclick: (e) => { e.preventDefault(); selectSlot(it.slot_id, true); showTab("fields"); } }, "show source →") : null,
+        m && it.slot_id ? h("a", { href: "#", onclick: (e) => { e.preventDefault(); selectSlot(it.slot_id, true); showTab("fields"); } }, L("根拠を見る →", "show source →")) : null,
         slot && m && it.kind === "field" ? h("details", { class: "edit-inline" }, h("summary", {}, "✎ 値を修正 / Edit value"), editControl(slot, m)) : null));
   }));
   renderApproval();
@@ -542,20 +1048,21 @@ function renderHitl() {
 async function applyOverrides(inputs) {
   const values = {};
   Object.entries(inputs).forEach(([k, el]) => { if (el.value.trim()) values[k] = el.value.trim(); });
-  if (!Object.keys(values).length) { toast("Type a value first."); return; }
+  if (!Object.keys(values).length) { toast(L("値を入力してください。", "Type a value first.")); return; }
   await submitValues(values);
 }
 
 async function submitValues(values, okMessage) {
-  busy(true, "Writing your values surgically and re-verifying…");
+  busy(true, L("入力値を外科的に書き込み、再検査しています…", "Writing your values surgically and re-verifying…"));
   try {
     const run = await api(`/api/runs/${S.run.run_id}/overrides`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ values }),
+      method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ values }),
     });
     setRun(run, false);
     const still = run.report.pending_slots;
-    toast(still.length ? `Still awaiting: ${still.join(", ")}` : (okMessage || "All fields filled — re-verified. Review the checklist."));
-  } catch (e) { toast(`Re-verify failed: ${e.message}`); } finally { busy(false); }
+    toast(still.length ? L(`まだ入力待ち: ${still.join(", ")}`, `Still awaiting: ${still.join(", ")}`)
+      : (okMessage || L("全欄を記入し再検査しました。チェックリストを確認してください。", "All fields filled — re-verified. Review the checklist.")));
+  } catch (e) { toast(L(`再検査に失敗: ${e.message}`, `Re-verify failed: ${e.message}`)); } finally { busy(false); }
 }
 
 function updateApprove() {
@@ -571,32 +1078,33 @@ function updateApprove() {
   if (!r.can_approve) {
     msg.className = "msg err";
     msg.textContent = r.report.pending_slots.length
-      ? `Download locked: ${r.report.pending_slots.length} field(s) still need your input.`
-      : "Download locked: verification did not pass.";
+      ? L(`ダウンロードはロック中: ${r.report.pending_slots.length} 欄がまだ入力待ちです。`, `Download locked: ${r.report.pending_slots.length} field(s) still need your input.`)
+      : L("ダウンロードはロック中: 検査に合格していません。", "Download locked: verification did not pass.");
   } else if (!allChecked) {
     msg.className = "msg";
-    msg.textContent = `${required.filter((i) => S.checked.has(i)).length}/${required.length} items confirmed.`;
+    msg.textContent = L(`${required.filter((i) => S.checked.has(i)).length}/${required.length} 項目を確認済み`,
+      `${required.filter((i) => S.checked.has(i)).length}/${required.length} items confirmed.`);
   } else if (!reviewer) {
-    msg.className = "msg"; msg.textContent = "Enter the reviewer's name to approve.";
+    msg.className = "msg"; msg.textContent = L("承認するには確認者名を入力してください。", "Enter the reviewer's name to approve.");
   } else {
-    msg.className = "msg ok"; msg.textContent = "Ready to approve.";
+    msg.className = "msg ok"; msg.textContent = L("承認できます。", "Ready to approve.");
   }
 }
 
 async function onApprove() {
   try {
     const res = await api(`/api/runs/${S.run.run_id}/approve`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
+      method: "POST", headers: JSON_HEADERS,
       // bind the approval to exactly what is on screen: the server refuses a stale revision or file hash
       body: JSON.stringify({ reviewer: $("#reviewerInput").value.trim(), checked: [...S.checked],
         filled_sha256: S.run.filled.sha256, revision: S.run.revision }),
     });
     S.run.approval = res;
     renderHitl();
-    toast("Approved — the verified file is unlocked.");
+    toast(L("承認しました — 検査済みファイルのロックを解除しました。", "Approved — the verified file is unlocked."));
   } catch (e) {
     const missing = e.body && e.body.detail && e.body.detail.missing;
-    toast(missing ? `Unchecked items: ${missing.length}` : `Approval refused: ${e.message}`);
+    toast(missing ? L(`未確認の項目: ${missing.length}`, `Unchecked items: ${missing.length}`) : L(`承認を拒否: ${e.message}`, `Approval refused: ${e.message}`));
     if (e.status === 409 && S.run) {  // stale view: reload the run so the reviewer sees the current state
       try { setRun(await api(`/api/runs/${S.run.run_id}`), false); } catch (_) { /* keep the old view */ }
     }
@@ -611,15 +1119,149 @@ function renderApproval() {
     dl.classList.remove("disabled");
     dl.removeAttribute("aria-disabled");
     dl.href = r.links.download;
-    dl.textContent = `⬇ Download verified .${r.form.file_type}`;
+    dl.textContent = L(`⬇ 検査済み .${r.form.file_type} をダウンロード`, `⬇ Download verified .${r.form.file_type}`);
     msg.className = "msg ok";
-    fill(msg, h("div", {}, `✓ Approved by ${r.approval.reviewer} at ${r.approval.approved_at}`),
+    fill(msg, h("div", {}, L(`✓ ${r.approval.reviewer} が ${r.approval.approved_at} に承認`, `✓ Approved by ${r.approval.reviewer} at ${r.approval.approved_at}`)),
       h("div", { class: "receipt" }, `SHA-256 ${r.approval.filled_sha256}`));
     $("#approveBtn").disabled = true;
   } else {
     dl.classList.add("disabled");
     dl.setAttribute("aria-disabled", "true");
     dl.removeAttribute("href");
-    dl.textContent = "⬇ Download verified file (locked)";
+    dl.textContent = L("⬇ 検査済みファイル（ロック中）", "⬇ Download verified file (locked)");
   }
+}
+
+/* ------------------------------------------------- Claude Code · Architecture */
+// GET /api/claude-suite reads .claude/skills, .claude/agents, .claude/settings.json and .mcp.json from the
+// repository, plus the routing policy and the measured workflow numbers; this run's routing comes from S.run.
+
+async function loadSuite() {
+  if (S.suite) return S.suite;
+  if (!S.suitePromise) {
+    S.suitePromise = api("/api/claude-suite").then((s) => { S.suite = s; return s; }).finally(() => { S.suitePromise = null; });
+  }
+  return S.suitePromise;
+}
+
+async function openSuite() {
+  if (S.run) { showView("run"); showTab("claude"); return; }
+  showView("suite");
+  renderSuiteInto($("#suiteStandalone"), null);
+}
+
+function renderClaudeTab() {
+  if (S.run) renderSuiteInto($("#tab-claude"), S.run);
+}
+
+function renderSuiteInto(el, run) {
+  if (!S.suite) {
+    fill(el, h("div", { class: "card" }, h("p", { class: "muted" },
+      L("Claude Code の構成ファイルを読み込み、5つの様式で作業量を計測しています…", "Reading the Claude Code assets and measuring the five sample forms…"))));
+    loadSuite().then(() => { if (!el.closest("[hidden]")) renderSuiteInto(el, run ? S.run : null); })
+      .catch((e) => fill(el, h("div", { class: "card" }, `✗ ${e.message}`)));
+    return;
+  }
+  fill(el, ...suiteSections(S.suite, run));
+}
+
+function section(ja, en, ...kids) {
+  return h("section", { class: "suite-sec" }, h("h2", { class: "suite-h" }, B(ja, en)), ...kids);
+}
+
+function runLanes(run) {
+  const lanes = { haiku: [], sonnet: [], opus: [], other: [] };
+  const planned = run.engine.mode !== "live";
+  run.mappings.forEach((m) => {
+    const info = routeInfo(m);
+    const fam = info.models.length ? modelFamily(info.models[0]) : "other";
+    (lanes[fam] || lanes.other).push({ m, info });
+  });
+  const models = S.suite.routing.models;
+  const usage = run.engine.usage || {};
+  const lane = (fam, title) => h("div", { class: `lane lane-${fam}` },
+    h("div", { class: "lane-h" }, fam === "other" ? h("span", { class: "mb" }, title) : modelChip(models[fam], planned),
+      h("span", { class: "mono f-ctx" }, fam === "other" ? "" : models[fam]), h("b", {}, String(lanes[fam].length))),
+    h("div", { class: "chips" }, lanes[fam].map(({ m, info }) => h("span", { class: "chip", title: m.route_reason },
+      run.slots.find((s) => s.slot_id === m.slot_id)?.label || m.slot_id,
+      info.revised ? h("b", { class: "rev" }, " → Opus") : null))));
+  return h("div", {},
+    h("p", { class: planned ? "plan-note" : "f-ctx" }, planned
+      ? L("このランはオフラインエンジンで実行しました — モデルは呼び出していません。下はライブの auto モードで各欄を担当するモデル（計画）です。",
+        "This run used the offline engine — no model was called. Below is where live auto mode would send each field (the plan).")
+      : L(`ライブ実行：${usage.requests || 0} 回の API 呼び出し · 入力 ${usage.input_tokens || 0} / 出力 ${usage.output_tokens || 0} トークン · 応答モデル ${(usage.models || []).join(", ")}`,
+        `Live run: ${usage.requests || 0} API calls · ${usage.input_tokens || 0} input / ${usage.output_tokens || 0} output tokens · served by ${(usage.models || []).join(", ")}`)),
+    h("div", { class: "lanes" }, lane("haiku"), lane("sonnet"), lane("opus"),
+      lanes.other.length ? lane("other", L("人・その他", "human / other")) : null));
+}
+
+function suiteSections(s, run) {
+  const out = [];
+  const nSkills = s.skills.length;
+  const nAgents = s.agents.length;
+  const nHooks = s.settings.hooks.length;
+  const nTools = s.mcp.tools.length;
+  out.push(h("div", { class: "suite-hero" },
+    h("div", { class: "pitch-card" }, h("div", { class: "pitch-h" }, B("開発：Claude Code が中心", "Development — built with Claude Code")),
+      h("p", {}, L(`設計・実装・テスト・ドキュメントを会期中に Claude Code で作成。リポジトリには Skills ${nSkills}・サブエージェント ${nAgents}・フック ${nHooks}・MCP ツール ${nTools} を同梱し、Claude Code から同じ検証エンジンを安全に使えます。`,
+        `Designed, implemented, tested and documented with Claude Code during the hackathon. The repository ships ${nSkills} skills, ${nAgents} subagents, ${nHooks} hook and ${nTools} MCP tools, so Claude Code can drive the same verifier safely.`))),
+    h("div", { class: "pitch-card" }, h("div", { class: "pitch-h" }, B("実行時：欄ごとにモデルを使い分け", "Runtime — per-field model routing")),
+      h("p", {}, L("定型の欄は Haiku、通常の文章・金額・氏名は Sonnet、長文の要約と検証器に差し戻された後の自己修正は Opus。どの欄をどのモデルが担当したかは、監査ログ・レポート・この画面に残ります。",
+        "Structured fields go to Haiku, standard text / amounts / names to Sonnet, long-text condensation and every self-correction after a validator rejection to Opus. Which model handled which field is kept in the audit log, the report and this screen.")))));
+  if (run) out.push(section("この実行のモデル割り当て", "This run's model routing", runLanes(run)));
+  out.push(section("ルーティング方針（--model-tier auto）", "Routing policy (--model-tier auto)",
+    h("div", { class: "card table-card" }, h("table", {},
+      h("thead", {}, h("tr", {}, h("th", {}, B("作業", "Task")), h("th", {}, B("モデル", "Model")), h("th", {}, B("理由", "Why")))),
+      h("tbody", {}, s.routing.policy.map((p) => h("tr", {}, h("td", {}, L(p.ja, p.en)),
+        h("td", {}, modelChip(p.model, false), h("div", { class: "f-ctx mono" }, p.model)), h("td", { class: "f-ctx" }, L(p.why_ja, p.why_en)))))))));
+  const KIND = { skill: ["Skill", "Skill"], agent: ["サブエージェント", "Subagent"], mcp: ["MCP", "MCP"], hook: ["フック", "Hook"], human: ["人", "Human"] };
+  out.push(section("Claude Code 拡張の連携", "How the Claude Code suite works together",
+    h("ol", { class: "flow" }, s.flow.map((f) => h("li", {},
+      h("div", {}, L(f.ja, f.en)),
+      h("div", { class: "chips" }, f.uses.map((u) => h("span", { class: `use use-${u.kind}${u.present ? "" : " missing"}` },
+        `${L(...KIND[u.kind])} · ${u.name}${u.present ? "" : " ✗"}`))))))));
+  const hook = s.settings.hooks[0];
+  out.push(section("リポジトリ同梱の Claude Code 資産（ファイルから読み込み）", "Claude Code assets in this repository (read from the files)",
+    h("div", { class: "suite-grid" },
+      h("div", { class: "card asset" }, h("div", { class: "card-h" }, "Skills", h("span", {}, ".claude/skills/")),
+        ...s.skills.map((x) => h("div", { class: "asset-item" }, h("b", { class: "mono" }, x.name), h("div", { class: "f-ctx" }, x.description)))),
+      h("div", { class: "card asset" }, h("div", { class: "card-h" }, L("サブエージェント", "Subagents"), h("span", {}, ".claude/agents/")),
+        ...s.agents.map((a) => h("div", { class: "asset-item" }, h("b", { class: "mono" }, a.name), " ",
+          a.model ? modelChip(a.model, false, a.model) : null,
+          h("div", { class: "chips" }, a.tools.map((t) => h("span", { class: "chip" }, t))), h("div", { class: "f-ctx" }, a.description)))),
+      h("div", { class: "card asset" }, h("div", { class: "card-h" }, L("フック", "Hook"), h("span", {}, s.settings.path)),
+        hook ? h("div", { class: "asset-item" }, h("b", { class: "mono" }, `${hook.event} · ${hook.matcher}`),
+          h("div", { class: "f-ctx" }, L(`${hook.runner} -c "…"（${hook.timeout}秒）— 編集のたびに自動実行${hook.feeds_back_to_claude ? "。指摘は終了コード 2 で Claude に返す" : ""}`,
+            `${hook.runner} -c "…" (${hook.timeout} s) — runs after every edit${hook.feeds_back_to_claude ? "; findings go back to Claude via exit code 2" : ""}`)),
+          h("div", { class: "chips" }, hook.checks.map((c) => h("span", { class: "chip" }, L(c.ja, c.en))))) : h("p", { class: "muted" }, L("未設定", "not installed")),
+        h("div", { class: "asset-item" }, h("b", {}, L("権限で読み取り禁止", "Denied reads")), h("div", { class: "chips" }, s.settings.deny.map((d) => h("span", { class: "chip mono" }, d))),
+          h("div", { class: "f-ctx" }, s.settings.bypass_permissions ? "⚠ bypassPermissions" : L("bypassPermissions は不使用", "no bypassPermissions")))),
+      h("div", { class: "card asset" }, h("div", { class: "card-h" }, L("MCP サーバー", "MCP server"), h("span", {}, s.mcp.path)),
+        ...s.mcp.servers.map((sv) => h("div", { class: "asset-item" }, h("b", { class: "mono" }, sv.name), h("div", { class: "f-ctx mono" }, `${sv.type}: ${sv.command} ${sv.args.join(" ")}`))),
+        ...s.mcp.tools.map((t) => h("div", { class: "asset-item" }, h("b", { class: "mono" }, t.name), h("div", { class: "f-ctx" }, t.description.split(". ")[0])))))));
+  const w = s.workflow;
+  if (w) {
+    const t = w.totals;
+    out.push(section("計測：5様式の作業量比較", "Measured workflow comparison (5 forms)",
+      h("div", { class: "kpis" },
+        tile(B("指定欄", "Designated fields", "stack"), String(t.fields), L(`${t.forms} 様式・${t.written} 件を記入`, `${t.forms} forms · ${t.written} values written`)),
+        tile(B("記入した文字", "Characters written", "stack"), t.chars.toLocaleString(), L("人が転記するはずだった量", "what a person would transcribe")),
+        tile(B("照合した XML タグ", "XML tags compared", "stack"), t.tags.toLocaleString(), L(`定型文 ${t.text_blocks} か所`, `${t.text_blocks} printed text blocks`)),
+        tile(B("結合セル・罫線", "Merged cells · borders", "stack"), `${t.merges} · ${t.borders}`, L("結合セル・範囲 · 罫線定義", "merged cells/ranges · border definitions")),
+        tile(B("1様式あたり", "Per form", "stack"), `${t.ms_min}–${t.ms_max} ms`, L(`全様式で ${t.checks_per_form.join("/")} 項目合格`, `${t.checks_per_form.join("/")} checks passed on every form`), t.all_checks_passed ? "✓" : "✗", t.all_checks_passed ? "icon-good" : "icon-bad"),
+        tile(B("人に残る作業", "Left for the human", "stack"), String(t.hitl), L(`確認項目 · 推測しない欄 ${t.pending}（${t.pending_slots.join(", ")}）`, `sign-off items · ${t.pending} unstated fact (${t.pending_slots.join(", ")})`))),
+      h("div", { class: "card table-card" }, h("table", {},
+        h("thead", {}, h("tr", {}, ...[["様式", "Form"], ["欄", "Fields"], ["文字", "Chars"], ["XML タグ", "XML tags"], ["定型文", "Text blocks"],
+          ["結合", "Merges"], ["罫線", "Borders"], ["時間", "Time"], ["検査", "Checks"], ["確認項目", "Sign-off"]].map(([ja, en]) => h("th", {}, B(ja, en))))),
+        h("tbody", {}, w.rows.map((r) => h("tr", {},
+          h("td", {}, h("b", {}, r.form), h("div", { class: "f-ctx mono" }, r.file)),
+          h("td", { class: "num" }, r.candidates ? `${r.fields} / ${r.candidates}` : String(r.fields)), h("td", { class: "num" }, String(r.chars)),
+          h("td", { class: "num" }, r.tags.toLocaleString()), h("td", { class: "num" }, String(r.text_blocks)), h("td", { class: "num" }, String(r.merges)),
+          h("td", { class: "num" }, String(r.borders)), h("td", { class: "num" }, `${r.ms} ms`),
+          h("td", {}, `${r.passed}/${r.total} `, h("span", { class: `st ${r.status === "PASS" ? "st-filled" : "st-pending"}` }, r.status)),
+          h("td", { class: "num" }, String(r.hitl) + (r.pending ? ` + ${r.pending}` : ""))))))),
+      h("p", { class: "f-ctx" }, L("オフラインエンジンでこの PC 上で計測（ネットワークなし）。手作業の列はファイルから数えた作業量で、人の作業時間を計ったものではありません。マーカーなし様式の「欄」は 確定した欄 / 空欄候補 です。",
+        "Measured on this machine with the offline engine (no network). The manual columns are counted from the files, not a timed study of a person. For unmarked forms “Fields” is confirmed cells / candidate cells."))));
+  }
+  return out;
 }

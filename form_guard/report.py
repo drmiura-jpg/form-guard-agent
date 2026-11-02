@@ -111,8 +111,10 @@ def build_report_html(d: dict[str, Any]) -> str:
                        + "</li>" for a in m["attempts"])
         status_cls = {"filled": "ok", "human_entered": "info", "needs_human_input": "warn"}.get(m["status"], "warn")
         warn = "".join(f"<div class='muted'>⚠ {E(w)}</div>" for w in m["warnings"][:3])
+        model = (f"<div class='mono muted' title='{E(m.get('route_reason', ''))}'>{E(m['routed_model'])}</div>"
+                 if m.get("routed_model") else "")
         rows.append(f"<tr><td><b>{E(s.get('label', m['slot_id']))}</b><div class='muted'>{E(s.get('context_label', ''))}</div></td>"
-                    f"<td class='v'>{E(val)}{warn}</td><td>{E(lim)}</td><td><span class='badge {status_cls}'>{E(m['status'])}</span>{flags}</td>"
+                    f"<td class='v'>{E(val)}{warn}</td><td>{E(lim)}</td><td><span class='badge {status_cls}'>{E(m['status'])}</span>{flags}{model}</td>"
                     f"<td>{quote}<details><summary>self-correction ({len(m['attempts'])})</summary><ol>{hist}</ol></details></td></tr>")
     entries = "".join(f"<tr><td class='mono'>{E(e['name'])}</td><td>{E(e['role'])}</td><td class='mono'>{E(e['original_sha256'][:16])}…</td>"
                       f"<td>{'✓ identical' if e['identical'] and e['raw_identical'] else ('modified (target)' if e['role'] == 'target' else '✗ changed')}</td></tr>"
@@ -130,11 +132,16 @@ def build_report_html(d: dict[str, Any]) -> str:
     fb = f" — <b>fallback:</b> {E(eng['fallback_reason'])}" if eng.get("fallback_reason") else ""
     routing = (eng.get("usage") or {}).get("routing") or []
     routing_html = ""
-    if routing:  # live mode: which model handled which field, and why
+    if routing:  # which model handled which field, and why (offline: the plan live auto mode would follow)
+        planned = all(r.get("planned_in_live_auto") for r in routing)
         trs = "".join(f"<tr><td>{E(r['task'])}</td><td class='mono'>{E(r['model'])}</td><td>{E('、'.join(r['slots']))}</td>"
                       f"<td class='muted'>{E(' / '.join(dict.fromkeys(r.get('reasons', {}).values())))}</td></tr>"
                       for r in routing)
-        routing_html = ("<h2>Model routing / モデルの使い分け</h2><div class='card'><table><tr><th>Task</th><th>Model</th>"
+        head = ("<h2>Planned model routing (live auto mode) / ライブ（auto）時のモデル割り当て計画</h2><p class='muted'>"
+                "This run used the offline engine — no model was called. The table shows where live <code>auto</code> "
+                "mode would send each field. ｜ この実行はオフラインエンジンで、モデルは呼び出していません。</p>"
+                if planned else "<h2>Model routing / モデルの使い分け</h2>")
+        routing_html = (f"{head}<div class='card'><table><tr><th>Task</th><th>Model</th>"
                         f"<th>Fields</th><th>Why</th></tr>{trs}</table></div>")
     # Never claim an uploaded form, an edited memo or reviewer-typed values are fictional.
     footer = ("This report is generated from the supplied form and memo. Reviewing the facts and deciding to submit "

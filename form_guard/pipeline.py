@@ -129,17 +129,25 @@ def _map(scan_r: ScanResult, memo: str, mode: str, model: Optional[str], client:
 
 
 def is_builtin_demo(demo_id: Optional[str], form_path: Path, memo_text: str, mappings: list[FieldMapping]) -> bool:
-    """True only for an unmodified built-in demo: its sample form, its sample memo, no reviewer-entered values."""
-    from .samples import MEMOS, demo_by_id
+    """True only for an unmodified built-in demo (marked, or unmarked with reviewer-confirmed cells): its sample
+    form, its sample memo, no reviewer-entered values."""
+    from .samples import MEMOS, demo_by_id, unmarked_by_id
 
     if not demo_id:
         return False
     try:
         demo = demo_by_id(demo_id)
     except KeyError:
-        return False
+        try:
+            demo = unmarked_by_id(demo_id)
+        except KeyError:
+            return False
     return (Path(form_path).name == demo["form"] and memo_text == MEMOS.get(demo["memo"])
             and not any(m.status == "human_entered" for m in mappings))
+
+
+VERIFY_ROUTE = ("verify (read back from the filled file)",
+                "no model: the file's value is checked against the memo evidence for this field")
 
 
 def reconstruct_mappings(scan_r: ScanResult, values: dict[str, str], memo: str,
@@ -177,7 +185,8 @@ def reconstruct_mappings(scan_r: ScanResult, values: dict[str, str], memo: str,
             continue
         if not memo.strip():
             out.append(FieldMapping(slot_id=sid, filled_value=v, status="recovered", char_count=len(v), engine="verify",
-                                    normalizations=["recovered_unverified"],
+                                    normalizations=["recovered_unverified"], routed_model=VERIFY_ROUTE[0],
+                                    route_reason="no model: read back from the filled file, no memo to check it against",
                                     reasoning="Read back from the filled file; no memo or audit log to check it against."))
             continue
         e = engine.get(sid)
@@ -192,6 +201,7 @@ def reconstruct_mappings(scan_r: ScanResult, values: dict[str, str], memo: str,
             spans = [make_span(memo, loc.start, loc.end)] if loc else []
         out.append(FieldMapping(
             slot_id=sid, filled_value=v, status="filled", source_spans=spans, char_count=len(v), engine="verify",
+            routed_model=VERIFY_ROUTE[0], route_reason=VERIFY_ROUTE[1],
             source_quote=" … ".join(sp.text for sp in spans),
             source_line_range=(min(sp.line_start for sp in spans), max(sp.line_end for sp in spans)) if spans else None,
             reasoning=(f"File value differs from what the memo supports for this field («{e.filled_value or e.suggested_value}»)"
