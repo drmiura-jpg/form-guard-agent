@@ -512,31 +512,45 @@ ROUTING_POLICY: list[dict[str, str]] = [
 ]
 _EFFORT_ORDER = ("low", "medium", "high", "xhigh", "max")
 _MODEL_ID_RE = re.compile(r"^claude-(?P<family>[a-z]+)-(?P<major>\d+)(?:-(?P<minor>\d{1,2}))?(?:-\d{8})?$")
+# The model ids this project knows, as (family, (major, minor)). Capability flags are only ever derived for these;
+# an unrecognised family (claude-unrecognized-5-5) or a version not listed (claude-opus-99-9) gets none of them.
+_TABLE_VERSIONS = frozenset({(4, 5), (4, 6), (4, 7), (5, 0), (5, 5)})
+KNOWN_MODEL_VERSIONS: dict[str, frozenset[tuple[int, int]]] = {
+    "opus": _TABLE_VERSIONS,
+    "sonnet": _TABLE_VERSIONS,
+    "haiku": _TABLE_VERSIONS,
+    "fable": frozenset({(5, 0), (5, 1)}),
+}
 
 
 def model_capabilities(model_id: str) -> dict[str, Any]:
-    """Request features a Claude model accepts, so a request never carries a parameter that would return a 400.
+    """Request features to send to a Claude model, from an explicit table of known model ids.
 
-    Adaptive thinking (``thinking={"type": "adaptive", "display": "summarized"}``) and ``output_config.effort`` exist
-    from the 4.6 generation on — the current 5.x models, ``claude-opus-4-6`` and ``claude-sonnet-4-6`` (effort also on
-    Opus 4.5). Legacy models such as ``claude-haiku-4-5*`` and ``claude-3*`` get neither; unknown ids are treated the
-    same conservative way (plain request).
+    Adaptive thinking (``thinking={"type": "adaptive", "display": "summarized"}``) and ``output_config.effort`` are
+    sent from the 4.6 generation on — the 5.x models, ``claude-opus-4-6`` and ``claude-sonnet-4-6`` (effort also on
+    Opus 4.5). Legacy models such as ``claude-haiku-4-5*`` and ``claude-3*`` get neither. An id outside
+    ``KNOWN_MODEL_VERSIONS`` — an unknown family or a future version — gets every capability flag ``False`` (a plain
+    request). This adapts the request format only: it is checked against mock / transport tests, while whether a model
+    is available, and which features it serves, depends on the caller's Anthropic account.
     """
     mid = (model_id or "").strip().lower()
     mid = re.sub(r"^(?:[a-z]{2,6}\.)?anthropic\.", "", mid)  # Bedrock-style prefixes
     mid = re.sub(r"(?:-v\d+(?::\d+)?|@\d{8})$", "", mid)       # -v1:0 / @20251001 suffixes
     caps: dict[str, Any] = {
-        "model": model_id, "family": None, "version": None, "legacy": True, "adaptive_thinking": False,
-        "effort": False, "effort_levels": (), "structured_outputs": False, "server_side_fallback": False,
-        "prompt_caching": False, "max_output_tokens": None,
+        "model": model_id, "family": None, "version": None, "known": False, "legacy": True,
+        "adaptive_thinking": False, "effort": False, "effort_levels": (), "structured_outputs": False,
+        "server_side_fallback": False, "prompt_caching": False, "max_output_tokens": None,
     }
     if mid.startswith("claude-3"):
-        caps.update(family="claude-3", max_output_tokens=4096)
+        caps.update(family="claude-3", known=True, max_output_tokens=4096)
         return caps
     m = _MODEL_ID_RE.match(mid)
     if not m:
         return caps
     family, v = m.group("family"), (int(m.group("major")), int(m.group("minor") or 0))
+    if v not in KNOWN_MODEL_VERSIONS.get(family, frozenset()):
+        return caps  # not in the table: never guess what an unknown id accepts
+    caps["known"] = True
     adaptive = v >= (4, 6)
     effort = adaptive or (family == "opus" and v == (4, 5))
     levels = (_EFFORT_ORDER if v >= (4, 7) else ("low", "medium", "high", "max") if v == (4, 6)
@@ -544,7 +558,7 @@ def model_capabilities(model_id: str) -> dict[str, Any]:
     caps.update(
         family=family, version=f"{v[0]}.{v[1]}", legacy=not adaptive, adaptive_thinking=adaptive, effort=effort,
         effort_levels=levels, structured_outputs=v >= (4, 5), prompt_caching=adaptive,
-        server_side_fallback=v >= (5, 5) or (family in ("opus", "fable") and v >= (5, 0)) or (family == "mythos" and v >= (5, 1)),
+        server_side_fallback=v >= (5, 5) or (family in ("opus", "fable") and v >= (5, 0)),
     )
     return caps
 
@@ -952,8 +966,11 @@ class ClaudeEngine:
             self.messages = thread
         return out
 
-    def classify_blank_cells(self, candidates: list[dict[str, Any]], form_title: str = "") -> dict[str, dict[str, Any]]:
-        """Stage 2 of blank-cell discovery: applicant field / office-only / not a field, per printed label."""
+    def classify_blank_cells(self, candidates: list[dict[str, Any]], form_title: str = "") -> list[dict[str, Any]]:
+        """Stage 2 of blank-cell discovery: applicant field / office-only / not a field, per printed label.
+
+        Returns the model's entries as given (duplicates and gaps included): the caller validates that every
+        candidate is classified exactly once and treats anything else as unclassified."""
         model = self.model_for("classify")
         thread: list[dict[str, Any]] = [{"role": "user", "content": (
             f"<form title=\"{html.escape(form_title, quote=True)}\">\n<candidates>\n"
@@ -964,8 +981,7 @@ class ClaudeEngine:
                                       "reasons": {cid: "blank-cell label classification" for cid in ids}})
         data = self._call(thread, model, task="classify", system=CLASSIFY_SYSTEM_PROMPT, schema=CLASSIFY_SCHEMA,
                           key="cells", slots=ids)
-        return {str(c.get("candidate_id")): c for c in data["cells"]
-                if isinstance(c, dict) and str(c.get("candidate_id")) in set(ids)}
+        return [c for c in data["cells"] if isinstance(c, dict)]
 
 
 # =========================================================== repair strategies

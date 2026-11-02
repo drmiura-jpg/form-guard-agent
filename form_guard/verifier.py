@@ -45,7 +45,9 @@ from .constraints import DATE_CODES, validate_value
 from .grounding import NUMBER_DATE_CODES, ground_value
 from .models import AuditCheckItem, EntryHash, FieldMapping, HITLItem, VerificationReport
 from .ooxml import (
+    S_NS,
     W_NS,
+    XML_NS,
     PartIndex,
     UnsafeXMLError,
     UnsupportedXMLError,
@@ -324,40 +326,95 @@ class SheetCellAudit:
     checked: int = 0
 
 
+_S_C, _S_IS, _S_T, _XML_SPACE = f"{{{S_NS}}}c", f"{{{S_NS}}}is", f"{{{S_NS}}}t", f"{{{XML_NS}}}space"
+
+
+def _sheet_cell_elements(data: bytes) -> dict[str, Any]:
+    """Worksheet cell elements by reference (namespace-aware lxml view; the first <c> per reference, as indexed)."""
+    out: dict[str, Any] = {}
+    for c in etree.fromstring(data, _PARSER).iter(_S_C):
+        parent = c.getparent()
+        if parent is not None and parent.tag == f"{{{S_NS}}}row":
+            out.setdefault((c.get("r") or "").replace("$", "").upper(), c)
+    return out
+
+
+def inline_string_issues(c_el: Any) -> list[str]:
+    """Why a written designated cell is not exactly ``<c …><is><t>value</t></is></c>`` (spreadsheetml namespace):
+    ``<is>`` must be the only child node of ``<c>``, ``<t>`` the only child node of ``<is>``, ``<t>`` may carry only
+    ``xml:space="preserve"``, and there is no text, tail, comment or processing instruction outside ``<t>``."""
+    if c_el is None:
+        return ["the <c> element cannot be located in the spreadsheetml namespace"]
+    kids = list(c_el)
+    if (c_el.text or "") != "" or len(kids) != 1 or kids[0].tag != _S_IS:
+        return [f"<c> must contain exactly one spreadsheetml <is> and nothing else (found "
+                f"{[etree.QName(k).text if isinstance(k.tag, str) else 'comment/PI' for k in kids]}"
+                f"{', loose text' if (c_el.text or '') else ''})"]
+    is_el = kids[0]
+    t_kids = list(is_el)
+    issues = []
+    if is_el.attrib:
+        issues.append(f"<is> carries attribute(s) {sorted(is_el.attrib)}")
+    if (is_el.text or "") != "" or (is_el.tail or "") != "" or len(t_kids) != 1 or t_kids[0].tag != _S_T:
+        issues.append(f"<is> must contain exactly one spreadsheetml <t> and nothing else (found "
+                      f"{[etree.QName(k).text if isinstance(k.tag, str) else 'comment/PI' for k in t_kids]})")
+        return issues
+    t_el = t_kids[0]
+    odd = sorted(k for k in t_el.attrib if k != _XML_SPACE)
+    if odd or t_el.get(_XML_SPACE) not in (None, "preserve"):
+        issues.append(f"<t> may carry only xml:space=\"preserve\" (found {sorted(t_el.attrib)})")
+    if len(t_el) or (t_el.tail or "") != "":
+        issues.append("<t> holds child elements or is followed by loose text")
+    return issues
+
+
 def audit_sheet_cells(part: str, oidx: PartIndex, data_f: bytes, cells: dict[str, str],
                       prepared: dict[str, str]) -> SheetCellAudit:
     """Check the designated cells (ref -> slot id) of a filled worksheet and revert them to the blank form's bytes.
 
-    A written cell must be ``<c …same attributes… t="inlineStr"><is><t>value</t></is></c>`` — style id ``s`` kept
-    (or, for a cell the blank form did not contain, the row / column style Excel shows there), no formula, no value
-    element, no rich text. The caller compares the reverted part with the blank one, so a change to any other cell,
-    formula or row shows up there.
+    A written cell must be ``<c …same attributes… t="inlineStr"><is><t>value</t></is></c>`` — in the spreadsheetml
+    namespace, ``<is>`` the only child of ``<c>`` and ``<t>`` the only child of ``<is>`` (only ``xml:space`` allowed on
+    it), style id ``s`` kept (or, for a cell the blank form did not contain, the row / column style Excel shows there),
+    no formula, no value element, no rich text. A designated cell left unfilled must still be absent, or byte-identical
+    to the blank form's cell. These structural findings (XML-03) are recorded *before* the designated cells are
+    reverted, so the caller's comparison of the reverted part with the blank one (any other cell, formula or row)
+    can never hide them.
     """
     fidx = index_part(part, data_f, "sheet")
     audit = SheetCellAudit(reverted=data_f)
     if fidx.implicit_refs:
         audit.struct.append(f"{part}: rows/cells without an r attribute — designated cells cannot be located")
         return audit
+    elements = _sheet_cell_elements(data_f)
     for ref, sid in sorted(cells.items()):
         oc, fc = oidx.cells.get(ref), fidx.cells.get(ref)
         exp = prepared.get(sid)
         audit.checked += 1
         if oc is None and fc is not None:
             audit.new_cells.add(ref)
+        if exp is None:  # unfilled (awaiting human input): absent, or exactly the blank form's cell
+            if fc is not None and (oc is None or fidx.data[fc.span[0] : fc.span[1]] != oidx.data[oc.span[0] : oc.span[1]]):
+                audit.struct.append(f"{sid}: {ref} was left unfilled but differs from the blank form's cell")
+                if fc.children:
+                    audit.text.append(f"{sid}: {ref} is awaiting human input but holds content")
+            if fc is not None and "f" in fc.children:
+                audit.formula.append(f"{sid}: a formula was written into designated cell {ref}")
+            continue
         if fc is None:
             if exp:
                 audit.text.append(f"{sid}: {ref} should hold «{exp}» but the cell is missing")
             continue
         if "f" in fc.children:
             audit.formula.append(f"{sid}: a formula was written into designated cell {ref}")
-        if exp is None:
-            if fc.children:
-                audit.text.append(f"{sid}: {ref} is awaiting human input but holds content")
-            continue
+        for issue in inline_string_issues(elements.get(ref)):  # namespace-aware, before anything is reverted
+            audit.struct.append(f"{sid}: {ref}: {issue}")
         if fc.children != ["is"]:
             audit.struct.append(f"{sid}: {ref} holds {fc.children} — only an inline string <is><t>…</t></is> may be "
                                 f"written into a designated cell")
-        elif fc.is_container is not None:
+        elif fc.is_container is None:
+            audit.struct.append(f"{sid}: {ref} holds no spreadsheetml inline string (<is> in another namespace?)")
+            audit.text.append(f"{sid}: {ref} expected «{exp}» but no inline-string text can be read")
+        else:
             ic = fidx.containers[fc.is_container]
             raw = fidx.data[ic.span[0] : ic.span[1]]
             if ic.runs or b"rPh" in raw or b"phoneticPr" in raw or len(fidx.container_nodes(ic)) != 1:
@@ -628,8 +685,29 @@ def verify(
 
     # ------------------------------------------------------- GRD / CON / APP
     _content_checks(scan, mappings, values, memo_text, checks, stats)
-    _app_check(scan.file_type, filled_blob, checks)
+    _app_check(scan.file_type, filled_blob, checks, expected_sheet_values(scan, prepared))
     return _finish(scan, checks, entry_hashes, mappings, pending, stats, subject)
+
+
+def expected_sheet_values(scan: ScanResult, prepared: dict[str, str]) -> list[tuple[str, str, Optional[str], str]]:
+    """(sheet name, cell, expected text, slot id) for every Excel slot cell: a designated empty cell holds its
+    value (None while it awaits human input); a cell with markers holds its printed text with the markers replaced."""
+    if scan.file_type != "xlsx":
+        return []
+    out: dict[tuple[str, str], tuple[str, str, Optional[str], str]] = {}
+    for s in scan.slots:
+        for o in s.occurrences:
+            if not o.cell_ref or not o.sheet_name:
+                continue
+            if o.marker_kind == "empty_cell":
+                exp: Optional[str] = prepared.get(s.slot_id)
+            else:
+                idx = scan.parts.get(o.part_name)
+                if idx is None or not 0 <= o.container_index < len(idx.containers):
+                    continue
+                exp = _expected_text(idx.container_text(idx.containers[o.container_index]), prepared)
+            out.setdefault((o.sheet_name, o.cell_ref), (o.sheet_name, o.cell_ref, exp, s.slot_id))
+    return list(out.values())
 
 
 def _raw_map(blob: bytes) -> dict[str, str]:
@@ -703,7 +781,12 @@ def _xlsx_layout_checks(orig_blob, filled_blob, checks, stats, scan=None, sheet_
         checks.append(_check("LAYOUT-01", "layout", "Sheet topology identical (sheets, merged ranges)", False,
                              f"not compared: {exc}", "critical"))
         return
-    so, sf = xlsx_structure(orig_blob), xlsx_structure(filled_blob)
+    try:
+        so, sf = xlsx_structure(orig_blob), xlsx_structure(filled_blob)
+    except Exception as exc:  # noqa: BLE001 - a hostile file fails the check; it never crashes the verifier
+        checks.append(_check("LAYOUT-01", "layout", "Sheet topology identical (sheets, merged ranges)", False,
+                             f"not compared: openpyxl cannot read the file ({type(exc).__name__}: {exc})", "critical"))
+        return
     sheet_audits = sheet_audits or {}
     cell_style = [i for a in sheet_audits.values() for i in a.style]
     cell_formula = [i for a in sheet_audits.values() for i in a.formula]
@@ -897,7 +980,10 @@ def _content_checks(scan, mappings, values, memo, checks, stats):
     stats["ungrounded"] = len(ungrounded)
 
 
-def _app_check(file_type, blob, checks):
+def _app_check(file_type, blob, checks, expected_cells=()):
+    """APP-01: an independent OOXML library opens the file; for .xlsx, openpyxl must also read every slot cell back as
+    exactly the expected text (a cell another reader sees differently fails here, whatever our own index says)."""
+    wrong: list[str] = []
     try:
         if file_type == "docx":
             import docx
@@ -908,11 +994,23 @@ def _app_check(file_type, blob, checks):
             import openpyxl
 
             wb = openpyxl.load_workbook(io.BytesIO(blob))
-            detail = f"openpyxl opened it: sheets {wb.sheetnames}"
-        ok = True
+
+            def norm(v):
+                return None if v is None or v == "" else v
+
+            for sheet, ref, exp, sid in expected_cells:
+                got = wb[sheet][ref].value if sheet in wb.sheetnames else None
+                if norm(got) != norm(exp):
+                    wrong.append(f"{sid}: openpyxl reads {sheet}!{ref} as «{got}», expected «{exp}»")
+            detail = f"openpyxl opened it: sheets {wb.sheetnames}" + (
+                f"; {len(expected_cells)} slot cell(s) read back as the approved text" if expected_cells else "")
+        ok = not wrong
+        if wrong:
+            detail = "; ".join(wrong[:6])
     except Exception as exc:  # noqa: BLE001 - any failure here is the finding
         ok, detail = False, f"failed to open: {exc}"
-    checks.append(_check("APP-01", "application", "File opens in an independent OOXML library", ok, detail, "critical"))
+    checks.append(_check("APP-01", "application", "File opens in an independent OOXML library", ok, detail, "critical",
+                         read_back=wrong[:20]))
 
 
 def _finish(scan, checks, entry_hashes, mappings, pending, stats, subject) -> VerificationReport:

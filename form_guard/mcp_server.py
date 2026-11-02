@@ -15,14 +15,21 @@ Human approval is never bypassed: ``form_guard_fill`` only writes an unapproved 
 ``UNAPPROVED_DRAFT_REQUIRES_HUMAN_SIGN_OFF`` in the tool result, in ``APPROVAL_STATUS.json`` and in
 ``audit_log.json``. The .docx/.xlsx itself is not watermarked: changing the document body would break the very
 proof that nothing but the designated fields changed. Values attributed to a human reviewer (``--set`` in the
-CLI) cannot be sent through MCP, and office-only cells cannot be confirmed. Paths are resolved against the server
-root (the working directory, or ``FORM_GUARD_MCP_ROOT``) and must stay inside it.
+CLI) cannot be sent through MCP, and office-only cells can be neither confirmed nor designated in a slot spec.
+The draft folder also holds ``web_handoff.json``: the result's ``review_url`` (``http://127.0.0.1:8000/?run_id=…``,
+web app started with ``python -m form_guard.cli --serve``) loads that exact file — re-verified, no model run — for
+the named reviewer's sign-off. Paths are resolved against the server root (the working directory, or
+``FORM_GUARD_MCP_ROOT``) and must stay inside it; ``.env`` files, ``.git``, ``.ssh`` and ``.claude-hackathon`` are
+refused in any path component. ``mode`` defaults to ``demo`` (offline, no network): ``live`` / ``auto`` send the
+memo to the Claude API and must be asked for explicitly.
 
 Transport hardening: stdout carries JSON-RPC only. On the real stdio, file descriptor 1 is pointed at stderr and
 protocol messages go to a private duplicate of the original stdout, so a stray print from any library — even a C
 extension — cannot corrupt the stream. Messages are UTF-8 bytes on the wire whatever the console code page
-(cp932, cp1252 …), and stderr is reconfigured to UTF-8. If this interpreter lacks the runtime dependencies, the
-server re-launches itself with the project's ``.venv``.
+(cp932, cp1252 …), and stderr is reconfigured to UTF-8. A message larger than 10 MB (a ``Content-Length`` or a
+newline-delimited line), a negative or malformed ``Content-Length`` and a body cut short by EOF are answered with a
+JSON-RPC parse error instead of being read. If this interpreter lacks the runtime dependencies, the server
+re-launches itself with the project's ``.venv``.
 """
 
 from __future__ import annotations
@@ -32,17 +39,24 @@ import contextlib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, BinaryIO, Optional
+from typing import Any, BinaryIO, Iterable, Optional
 
 from . import __version__
 
 PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 APPROVAL_STATUS = "UNAPPROVED_DRAFT_REQUIRES_HUMAN_SIGN_OFF"
 MAX_MEMO_CHARS = 60_000
+MAX_MCP_MESSAGE_BYTES = 10 * 1024 * 1024  # one JSON-RPC message (Content-Length body or newline-delimited line)
+MAX_HEADER_LINES = 32
+REVIEW_URL = "http://127.0.0.1:8000/?run_id={run_id}"
+PARSE_ERROR, INVALID_REQUEST = -32700, -32600
+# never readable or writable through a tool, in any path component (case-insensitive)
+FORBIDDEN_PATH_PARTS = frozenset({".git", ".ssh", ".claude-hackathon"})
 RUNTIME_DEPENDENCIES = ("pydantic", "lxml", "openpyxl", "docx")
 SERVER_INFO = {"name": "form-guard", "title": "Form-Guard Agent", "version": __version__}
 INSTRUCTIONS = (
@@ -50,8 +64,9 @@ INSTRUCTIONS = (
     "Use form_guard_list_demos to find the fictional demo forms and form_guard_scan to list slots; for an unmarked "
     "blank form use form_guard_discover_blank_cells, show the candidates to the user and let them choose; "
     "form_guard_fill writes an UNAPPROVED draft — tell the user that a named human reviewer must sign it off "
-    "(python -m form_guard.cli --serve) before it is used; form_guard_verify audits any filled copy against its blank "
-    "original. All sample forms are fictional; do not use real personal data."
+    "(python -m form_guard.cli --serve, then open the review_url from the result) before it is used; "
+    "form_guard_verify audits any filled copy against its blank original. mode defaults to demo (offline); use live "
+    "only when the user asks for Claude. All sample forms are fictional; do not use real personal data."
 )
 
 _MODE = {"type": "string", "enum": ["auto", "demo", "live"]}
@@ -60,6 +75,8 @@ _TIER = {"type": "string", "enum": ["auto", "opus", "sonnet", "haiku"],
                         "Opus for long text and every self-correction (a rejected Haiku/Sonnet draft escalates to Opus)"}
 _PATH = {"type": "string"}
 _READ_ONLY = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}
+# live / auto may send the memo and the printed labels to the Claude API (an external service)
+_READ_ONLY_OPEN = {**_READ_ONLY, "openWorldHint": True}
 
 TOOLS: list[dict[str, Any]] = [
     {
@@ -102,13 +119,15 @@ TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "form_path": {**_PATH, "description": "unmarked blank form, relative to the server root"},
                 "mode": {**_MODE, "default": "demo",
-                         "description": "demo = deterministic rules; live / auto = Claude also classifies the labels"},
+                         "description": "demo (default) = deterministic rules, offline; live / auto = Claude also "
+                                        "classifies the printed labels (sends them to the Claude API) — explicit "
+                                        "opt-in only"},
                 "model_tier": {**_TIER, "default": "auto"},
             },
             "required": ["form_path"],
             "additionalProperties": False,
         },
-        "annotations": _READ_ONLY,
+        "annotations": _READ_ONLY_OPEN,
     },
     {
         "name": "form_guard_fill",
@@ -117,9 +136,10 @@ TOOLS: list[dict[str, Any]] = [
                        "output/mcp_runs/<run id>/ (never inside samples/, never over the blank form). The result is an "
                        f"UNAPPROVED DRAFT (approval_status {APPROVAL_STATUS}, also recorded in audit_log.json and "
                        "APPROVAL_STATUS.json) with the verification report, the model that drafted every field and the "
-                       "HITL checklist; a named human reviewer must sign it off before use. For an unmarked form pass "
-                       "the discovery report and the candidate ids the user confirmed (office-only cells are always "
-                       "refused).",
+                       "HITL checklist; a named human reviewer must sign it off before use — the result's review_url "
+                       "opens this exact draft in the web app (python -m form_guard.cli --serve). For an unmarked form "
+                       "pass the discovery report and the candidate ids the user confirmed (office-only cells are "
+                       "always refused, also when a slot spec designates them).",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -131,14 +151,16 @@ TOOLS: list[dict[str, Any]] = [
                 "discovery_path": {**_PATH, "description": "discovery report saved as JSON (alternative to discovery)"},
                 "confirmed_ids": {"type": "array", "items": {"type": "string"},
                                   "description": "candidate ids the user confirmed, e.g. [\"c01\", \"c02\"]"},
-                "mode": {**_MODE, "default": "auto",
-                         "description": "auto = Claude if ANTHROPIC_API_KEY is set, else the offline engine"},
+                "mode": {**_MODE, "default": "demo",
+                         "description": "demo (default) = the offline engine, no network; live = Claude (sends the memo "
+                                        "to the Claude API); auto = Claude if ANTHROPIC_API_KEY is set, else offline — "
+                                        "live / auto are an explicit opt-in"},
                 "model_tier": {**_TIER, "default": "auto"},
             },
             "required": ["form_path"],
             "additionalProperties": False,
         },
-        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
     },
     {
         "name": "form_guard_verify",
@@ -266,13 +288,26 @@ class FormGuardMCP:
 
     # -------------------------------------------------------------------- helpers
 
+    @staticmethod
+    def _forbidden(parts: Iterable[str]) -> bool:
+        """.env / .env.* files, .git, .ssh and the .claude-hackathon config folder, in any path component."""
+        for part in parts:
+            low = part.strip().lower()
+            if low == ".env" or low.startswith(".env.") or low in FORBIDDEN_PATH_PARTS:
+                return True
+        return False
+
     def _path(self, value: Any, what: str) -> Path:
         if not isinstance(value, str) or not value.strip():
             raise ToolError(f"{what} is required")
         p = Path(value)
+        if self._forbidden(p.parts):
+            raise ToolError("access to .env or hidden credential files is forbidden")
         p = (p if p.is_absolute() else self.root / p).resolve()
         if not p.is_relative_to(self.root):
             raise ToolError(f"{what} must be inside the server root")
+        if self._forbidden(p.relative_to(self.root).parts):  # e.g. a link that resolves into .git/ or .env
+            raise ToolError("access to .env or hidden credential files is forbidden")
         if not p.is_file():
             raise ToolError(f"{what} not found: {value}")
         return p
@@ -380,13 +415,21 @@ class FormGuardMCP:
         return d
 
     def tool_fill(self, args: dict[str, Any]) -> dict[str, Any]:
-        from .pipeline import new_run_id, run_pipeline
-        from .scanner import build_confirmed_slot_spec
+        from .pipeline import new_run_id, run_pipeline, write_web_handoff
+        from .scanner import OFFICE_REASON, build_confirmed_slot_spec, office_only_targets
 
         form = self._path(args.get("form_path"), "form_path")
         memo = self._memo(args, required=True)
         spec = self._spec(args)
         selection = "slot spec" if spec else "markers / sidecar .slots.json"
+        if args.get("discovery") is None and not args.get("discovery_path") and args.get("confirmed_ids") is None:
+            try:  # an explicit or sidecar slot spec may designate any cell: office-only ones are refused here
+                office = office_only_targets(form, spec)
+            except ValueError as exc:
+                raise ToolError(f"refused before filling: {exc}") from exc
+            if office:
+                raise ToolError(f"refused before filling: the slot spec designates office-only cell(s) "
+                                f"{'; '.join(office)} — {OFFICE_REASON}")
         if args.get("discovery") is not None or args.get("discovery_path") or args.get("confirmed_ids") is not None:
             if spec is not None:
                 raise ToolError("send either slot_spec_path or discovery + confirmed_ids, not both")
@@ -407,8 +450,11 @@ class FormGuardMCP:
                          f"human reviewer checks them at sign-off")
         run_id = new_run_id()
         out_dir = self._run_dir(run_id)
-        r = run_pipeline(form, memo, out_dir, mode=str(args.get("mode") or "auto"), client=self.client,
-                         slot_spec=spec, run_id=run_id, model_tier=args.get("model_tier") or None)
+        try:
+            r = run_pipeline(form, memo, out_dir, mode=str(args.get("mode") or "demo"), client=self.client,
+                             slot_spec=spec, run_id=run_id, model_tier=args.get("model_tier") or None)
+        except ValueError as exc:  # a changed blank form, an office-only target, … — refused before anything is written
+            raise ToolError(f"refused before filling: {exc}") from exc
         if r.filled_path.resolve() == form.resolve():  # pragma: no cover - run_pipeline always writes a copy
             raise ToolError("refusing to overwrite the blank form")
         rep = r.report
@@ -417,12 +463,17 @@ class FormGuardMCP:
             sp = out_dir / "confirmed.slots.json"
             sp.write_text(json.dumps(spec, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
             spec_path = self._rel(sp)
+        review_url = REVIEW_URL.format(run_id=run_id)
         note = ("Draft written through MCP. It is not approved: a named human reviewer must confirm every HITL "
-                "checklist item (web app: python -m form_guard.cli --serve) before the file is used.")
+                f"checklist item before the file is used — start the web app (python -m form_guard.cli --serve) and "
+                f"open {review_url} to review, edit and sign off this exact draft.")
+        handoff = write_web_handoff(r, created_via="mcp:form_guard_fill", approval_status=APPROVAL_STATUS,
+                                    review_url=review_url)
         status = {
             "approval_status": APPROVAL_STATUS, "run_id": run_id, "draft": r.filled_path.name,
             "filled_sha256": r.verified_sha256, "verification": rep.overall_status, "cell_selection": selection,
             "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "note": note,
+            "review_url": review_url, "web_handoff": handoff.name,
         }
         (out_dir / "APPROVAL_STATUS.json").write_text(json.dumps(status, ensure_ascii=False, indent=2) + "\n",
                                                       encoding="utf-8", newline="\n")
@@ -439,6 +490,8 @@ class FormGuardMCP:
             "human_sign_off_required": True,
             "next_step": note,
             "run_id": run_id,
+            "review_url": review_url,
+            "web_handoff": self._rel(handoff),
             "out_dir": self._rel(out_dir),
             "draft_path": self._rel(r.filled_path),
             "report_html": self._rel(out_dir / "report.html"),
@@ -527,34 +580,79 @@ def _write(stdout, payload: Any, framed: bool) -> None:
     stdout.flush()
 
 
+_CHUNK = 64 * 1024
+
+
+def _skip_line(stdin) -> bool:
+    """Discard the rest of an over-long line in bounded chunks; False at EOF."""
+    while True:
+        chunk = stdin.readline(_CHUNK)
+        if not chunk:
+            return False
+        if chunk.endswith(b"\n"):
+            return True
+
+
+def _skip_bytes(stdin, n: int) -> bool:
+    """Discard the body of a refused message in bounded chunks (never buffered); False at EOF."""
+    while n > 0:
+        chunk = stdin.read(min(n, _CHUNK))
+        if not chunk:
+            return False
+        n -= len(chunk)
+    return True
+
+
 def serve(server: FormGuardMCP, stdin=None, stdout=None) -> None:
-    """Read JSON-RPC messages until EOF: newline-delimited JSON, or Content-Length framed (LSP style)."""
+    """Read JSON-RPC messages until EOF: newline-delimited JSON, or Content-Length framed (LSP style).
+
+    No message may exceed ``MAX_MCP_MESSAGE_BYTES``: a longer line, a larger / negative / malformed Content-Length and
+    a body cut short by EOF are answered with a JSON-RPC parse error, and nothing is buffered beyond the limit."""
     stdin = stdin or sys.stdin.buffer
     stdout = stdout or _protocol_stdout()
+    limit = MAX_MCP_MESSAGE_BYTES
     while True:
-        line = stdin.readline()
+        line = stdin.readline(limit + 1)
         if not line:
             break
+        if len(line) > limit and not line.endswith(b"\n"):  # a newline-delimited message larger than the limit
+            _write(stdout, _error(None, PARSE_ERROR, f"Parse error: message larger than {limit:,} bytes"), False)
+            if not _skip_line(stdin):
+                break
+            continue
         if not line.strip():
             continue
         framed = line.lstrip().lower().startswith(b"content-length:")
         if framed:
-            try:
-                length = int(line.split(b":", 1)[1].strip())
-            except ValueError:
-                _write(stdout, _error(None, -32700, "Parse error: bad Content-Length header"), True)
+            raw = line.split(b":", 1)[1].strip()
+            if re.fullmatch(rb"[+-]?\d{1,20}", raw) is None:
+                _write(stdout, _error(None, PARSE_ERROR, "Parse error: bad Content-Length header"), True)
                 continue
-            while True:  # further headers, up to the blank separator line
-                header = stdin.readline()
+            length = int(raw)
+            for _ in range(MAX_HEADER_LINES):  # further headers, up to the blank separator line
+                header = stdin.readline(_CHUNK)
                 if not header or not header.strip():
                     break
+            if length < 0:  # never handed to read(): read(-1) would block until EOF
+                _write(stdout, _error(None, INVALID_REQUEST, "Invalid Request: negative Content-Length"), True)
+                continue
+            if length > limit:
+                _write(stdout, _error(None, PARSE_ERROR, f"Parse error: Content-Length {length:,} exceeds the "
+                                                         f"{limit:,}-byte message limit"), True)
+                if not _skip_bytes(stdin, length):
+                    break
+                continue
             body = stdin.read(length)
+            if len(body) < length:  # the stream ended inside the message
+                _write(stdout, _error(None, PARSE_ERROR, f"Parse error: EOF after {len(body):,} of {length:,} bytes"),
+                       True)
+                break
         else:
             body = line
         try:
             payload = json.loads(body.decode("utf-8-sig"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            _write(stdout, _error(None, -32700, "Parse error"), framed)
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+            _write(stdout, _error(None, PARSE_ERROR, "Parse error"), framed)
             continue
         response = server.handle_payload(payload)
         if response is not None:
@@ -594,7 +692,7 @@ def build_fastmcp(server: FormGuardMCP):
     def form_guard_fill(form_path: str, memo_text: Optional[str] = None, memo_path: Optional[str] = None,
                         slot_spec_path: Optional[str] = None, discovery: Optional[dict] = None,
                         discovery_path: Optional[str] = None, confirmed_ids: Optional[list[str]] = None,
-                        mode: str = "auto", model_tier: str = "auto") -> dict:
+                        mode: str = "demo", model_tier: str = "auto") -> dict:
         return run("form_guard_fill", {
             "form_path": form_path, "memo_text": memo_text, "memo_path": memo_path, "slot_spec_path": slot_spec_path,
             "discovery": discovery, "discovery_path": discovery_path, "confirmed_ids": confirmed_ids, "mode": mode,

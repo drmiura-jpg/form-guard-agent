@@ -941,6 +941,7 @@ def discover_blank_cells(path: Union[str, Path], mode: str = "demo", client: Any
             "label_direction": c.direction, "location": c.location, **c.coords,
             "merged_range": c.merged_range, "office_only": bool(hits), "applicant_fillable": not hits,
             "recommended": not hits, "reason": OFFICE_REASON if hits else APPLICANT_REASON,
+            "category": "office_only" if hits else "applicant_fillable", "classified": True,
             "office_keywords": hits, "required_format": inferred["required_format"],
             "max_chars": inferred["max_chars"], "constraints": inferred["constraints"],
             "aliases": [a for a in dict.fromkeys(aliases) if a and a != sid],
@@ -976,10 +977,16 @@ def discover_blank_cells(path: Union[str, Path], mode: str = "demo", client: Any
     }
 
 
+UNCLASSIFIED_REASON = "not classified by the model (missing or duplicated in its answer) — never recommended"
+
+
 def _classify_with_claude(candidates: list[dict[str, Any]], title: str, mode: str, client: Any,
                           model_tier: Optional[str]) -> dict[str, Any]:
     """Stage 2 in live mode: Claude classifies each printed label. The rules always win towards safety —
-    Claude can mark a cell office-only or not-a-field, never turn an office cell into an applicant field."""
+    Claude can mark a cell office-only or not-a-field, never turn an office cell into an applicant field.
+
+    The answer must classify every candidate exactly once: a candidate the model left out, or listed more than once,
+    is marked ``classified: False`` and is neither applicant-fillable nor recommended."""
     rules = {"mode": "demo", "label": "deterministic rules (offline)", "model": None, "fallback_reason": None}
     requested = (mode or "demo").lower()
     if not candidates or requested == "demo":
@@ -993,24 +1000,39 @@ def _classify_with_claude(candidates: list[dict[str, Any]], title: str, mode: st
     brief = [{"candidate_id": c["candidate_id"], "printed_label": c["evidence_label"], "group_label": c["group_label"],
               "section": c["section"], "label_position": c["label_direction"]} for c in candidates]
     try:
-        verdicts = engine.classify_blank_cells(brief, title)
+        entries = engine.classify_blank_cells(brief, title)
     except LiveEngineError as exc:
         if requested == "live":
             raise
         return {**rules, "label": rules["label"] + " — live classification failed", "fallback_reason": str(exc)}
     model = engine.model_for("classify")
+    known = [c["candidate_id"] for c in candidates]
+    counts = Counter(str(e.get("candidate_id")) for e in entries)
+    verdicts = {str(e.get("candidate_id")): e for e in entries if counts[str(e.get("candidate_id"))] == 1}
+    issues = {"missing": [i for i in known if counts[i] == 0], "duplicated": [i for i in known if counts[i] > 1],
+              "unknown": sorted(i for i in counts if i not in set(known))}
     for c in candidates:
-        v = verdicts.get(c["candidate_id"]) or {}
-        role, why = v.get("role"), str(v.get("reason", ""))[:200]
         c["classified_by"] = f"rules + {model}"
+        v = verdicts.get(c["candidate_id"])
+        if v is None:  # left out or answered twice: never leave it recommended
+            c.update(classified=False, claude_role=None, applicant_fillable=False, recommended=False,
+                     category="office_only" if c["office_only"] else "unclassified",
+                     reason=OFFICE_REASON if c["office_only"] else UNCLASSIFIED_REASON)
+            continue
+        role, why = v.get("role"), str(v.get("reason", ""))[:200]
         c["claude_role"] = role
         if role == "office_only" and not c["office_only"]:
-            c.update(office_only=True, applicant_fillable=False, recommended=False,
+            c.update(office_only=True, applicant_fillable=False, recommended=False, category="office_only",
                      reason=f"{OFFICE_REASON} (Claude: {why})")
         elif role == "not_a_field" and not c["office_only"]:
-            c.update(applicant_fillable=False, recommended=False, reason=f"not an input field (Claude: {why})")
+            c.update(applicant_fillable=False, recommended=False, category="not_a_field",
+                     reason=f"not an input field (Claude: {why})")
+        elif role not in ("applicant_fillable", "office_only", "not_a_field"):
+            c.update(classified=False, applicant_fillable=False, recommended=False,
+                     category="office_only" if c["office_only"] else "unclassified",
+                     reason=OFFICE_REASON if c["office_only"] else UNCLASSIFIED_REASON)
     return {"mode": "live", "label": f"rules + Claude ({model})", "model": model, "fallback_reason": None,
-            "usage": engine.usage}
+            "usage": engine.usage, "classification_issues": {k: v for k, v in issues.items() if v}}
 
 
 def recommended_ids(discovery: dict[str, Any]) -> list[str]:
@@ -1018,26 +1040,75 @@ def recommended_ids(discovery: dict[str, Any]) -> list[str]:
     return [c["candidate_id"] for c in discovery.get("candidates", []) if c.get("recommended")]
 
 
-def build_confirmed_slot_spec(discovery: dict[str, Any], confirmed_ids: list[str], current_form_path: Union[str, Path],
+def _cand_key(c: dict[str, Any]) -> Optional[tuple]:
+    """Canonical coordinates of a discovery candidate: (part, table, row, grid col) / (sheet index, sheet name, cell)."""
+    try:
+        if c.get("file_type") == "docx":
+            return ("docx", str(c.get("part") or "word/document.xml"), int(c["table"]), int(c["row"]), int(c["col"]))
+        if c.get("file_type") == "xlsx":
+            return ("xlsx", int(c["sheet"]), str(c.get("sheet_name") or ""),
+                    str(c["cell"]).replace("$", "").strip().upper())
+    except (KeyError, TypeError, ValueError):
+        pass
+    return None
+
+
+def build_confirmed_slot_spec(discovery: dict[str, Any], confirmed_ids: list[str],
+                              current_form_path: Union[str, Path, None] = None,
                               allow_office_only: bool = False) -> dict[str, Any]:
-    """Stage 4: turn the cells a human confirmed into a .slots.json spec for run_pipeline(slot_spec=...)."""
+    """Stage 4: turn the cells a human confirmed into a .slots.json spec for run_pipeline(slot_spec=...).
+
+    The discovery report may come from a client (MCP, a saved JSON file), so nothing in it is trusted beyond the
+    candidate ids. The blank form must be byte-identical to the one discovery looked at (SHA-256), and a fresh
+    deterministic discovery of that very file decides: every confirmed candidate's coordinates must be a blank-cell
+    candidate of the form, an office-only cell (fresh rules or the report) needs ``allow_office_only`` (an internal
+    CLI override — MCP and the web app never pass it), and a ``not_a_field`` / non-applicant / unclassified cell is
+    never fillable. Targets, slot ids and printed rules are built from the fresh candidates, so tampered coordinates
+    or constraints in the report have no effect.
+    """
+    if current_form_path is None:
+        current_form_path = discovery.get("form_path")
+        if not current_form_path or not Path(str(current_form_path)).is_file():
+            raise ValueError("current_form_path is required — the blank form the discovery was made on")
     if sha256_file(current_form_path) != discovery.get("form_sha256"):
         raise ValueError("blank form changed after discovery — re-run discovery")
     ids = list(dict.fromkeys(str(i).strip() for i in (confirmed_ids or []) if str(i).strip()))
     if not ids:
         raise ValueError("no confirmed fillable slots — at least 1 slot must be confirmed by the human reviewer")
-    by_id = {c["candidate_id"]: c for c in discovery.get("candidates", [])}
+    by_id: dict[str, dict[str, Any]] = {}
+    for c in discovery.get("candidates", []) or []:
+        if isinstance(c, dict) and str(c.get("candidate_id")) not in by_id:
+            by_id[str(c.get("candidate_id"))] = c
     unknown = [i for i in ids if i not in by_id]
     if unknown:
         raise ValueError(f"unknown candidate id(s): {', '.join(unknown)} — rejected cells can never be confirmed")
-    office = [i for i in ids if by_id[i].get("office_only")]
-    if office and not allow_office_only:
-        raise ValueError(f"{', '.join(office)}: {OFFICE_REASON} — confirming it needs an explicit reviewer override")
-    order = {c["candidate_id"]: n for n, c in enumerate(discovery.get("candidates", []))}
+    fresh = discover_blank_cells(current_form_path, mode="demo")  # deterministic rules on the actual file
+    canon = {_cand_key(f): f for f in fresh["candidates"]}
+    order = {f["candidate_id"]: n for n, f in enumerate(fresh["candidates"])}
+    chosen: dict[str, dict[str, Any]] = {}
+    office: list[str] = []
+    for cid in ids:
+        client = by_id[cid]
+        f = canon.get(_cand_key(client))
+        if f is None:
+            raise ValueError(f"{cid}: its coordinates are not a blank-cell candidate of the current form — re-run "
+                             f"discovery (the report was edited or belongs to another form)")
+        is_office = bool(f.get("office_only")) or bool(client.get("office_only")) or \
+            "office_only" in (f.get("category"), client.get("category"))
+        if is_office:
+            if not allow_office_only:
+                raise ValueError(f"{cid}: {OFFICE_REASON} — confirming it needs an explicit reviewer override")
+            office.append(f["candidate_id"])
+        if "not_a_field" in (client.get("category"), f.get("category"), client.get("claude_role")):
+            raise ValueError(f"{cid}: not an input field (not_a_field) — never fillable, not even with an override")
+        if not is_office and (client.get("applicant_fillable") is False or f.get("applicant_fillable") is False
+                              or client.get("classified") is False):
+            raise ValueError(f"{cid}: not classified as an applicant field — never fillable")
+        chosen[f["candidate_id"]] = f
     targets: list[dict[str, Any]] = []
     slots: dict[str, Any] = {}
-    for cid in sorted(ids, key=lambda i: order[i]):
-        c = by_id[cid]
+    for fid in sorted(chosen, key=lambda i: order[i]):
+        c = chosen[fid]  # canonical coordinates, slot id and printed rules from the fresh discovery
         if c["file_type"] == "docx":
             targets.append({"slot_id": c["slot_id"], "part": c.get("part", "word/document.xml"), "table": c["table"],
                             "row": c["row"], "col": c["col"], "label": c["label"]})
@@ -1051,11 +1122,140 @@ def build_confirmed_slot_spec(discovery: dict[str, Any], confirmed_ids: list[str
             "constraints": dict(c.get("constraints") or {}),
         }
     return {
-        "form_title": discovery.get("form_title", ""),
-        "form_sha256": discovery["form_sha256"],
+        "form_title": fresh.get("form_title", ""),
+        "form_sha256": fresh["form_sha256"],
         "source": "blank-cell discovery confirmed by a human reviewer",
-        "confirmed_candidates": sorted(ids, key=lambda i: order[i]),
+        "confirmed_candidates": sorted(chosen, key=lambda i: order[i]),
         "office_only_override": bool(office),
         "targets": targets,
         "slots": slots,
     }
+
+
+# ------------------------------------------------- office-only guard for any slot spec with coordinate targets
+
+
+def _docx_context_texts(idx: PartIndex, table: TableInfo, cell: CellInfo) -> list[str]:
+    """Printed text around a Word cell discovery does not list: nearest text on its left, nearest text above it in
+    the same grid column, and the section banner above."""
+    texts: list[str] = []
+    for other in sorted((c for c in table.rows[cell.row_idx] if c.col_idx < cell.col_idx), key=lambda c: -c.col_idx):
+        txt = _cell_text(idx, _resolve_vmerge(table, other))
+        if txt:
+            texts.append(txt)
+            break
+    width, header = _grid_width(table), False
+    for r in range(cell.row_idx - 1, -1, -1):
+        cells = table.rows[r]
+        if len(cells) == 1 and cells[0].grid_span >= width:
+            texts.append(_cell_text(idx, cells[0]))
+            break
+        above = _cell_at(table, r, cell.col_idx)
+        txt = _cell_text(idx, _resolve_vmerge(table, above)) if above is not None and not header else ""
+        if txt:
+            texts.append(txt)
+            header = True
+    return texts
+
+
+def _xlsx_context_texts(ws, r: int, c: int) -> list[str]:
+    """Printed text around an Excel cell discovery does not list: nearest text on its left, nearest text above it,
+    and the section banner above (a column-A label merged across most of the sheet)."""
+    boxes: dict[tuple[int, int], tuple[int, int, int, int]] = {}
+    for rng in ws.merged_cells.ranges:
+        b = (rng.min_row, rng.min_col, rng.max_row, rng.max_col)
+        if b[0] <= r and b[1] <= c + 1:
+            for rr in range(rng.min_row, min(rng.max_row, r) + 1):
+                for cc in range(rng.min_col, min(rng.max_col, c) + 1):
+                    boxes[(rr, cc)] = b
+
+    def box(rr: int, cc: int) -> tuple[int, int, int, int]:
+        return boxes.get((rr, cc), (rr, cc, rr, cc))
+
+    def literal(rr: int, cc: int) -> str:
+        b = box(rr, cc)
+        x = ws._cells.get((b[0], b[1]))  # read-only lookup
+        return "" if x is None or x.value is None or x.data_type == "f" else str(x.value).strip()
+
+    r0, c0 = box(r, c)[:2]
+    texts: list[str] = []
+    cc = c0 - 1
+    while cc >= 1:
+        if literal(r0, cc):
+            texts.append(literal(r0, cc))
+            break
+        cc = box(r0, cc)[1] - 1
+    width = min(ws.max_column, MAX_XLSX_COL)
+    header = False
+    for rr in range(r0 - 1, 0, -1):
+        b = box(rr, 1)
+        if literal(rr, 1) and b[3] - b[1] + 1 >= max(2, int(width * 0.75)):
+            texts.append(literal(rr, 1))  # section banner
+            break
+        if not header and literal(rr, c0):
+            texts.append(literal(rr, c0))
+            header = True
+    return texts
+
+
+def office_only_targets(form_path: Union[str, Path], spec: Union[dict, str, Path, None] = None) -> list[str]:
+    """Coordinate targets of a slot spec (``empty_cell``) that point at an office-only cell of the blank form.
+
+    The spec — explicit, or the form's sidecar .slots.json — may come from anyone, so each target is checked against
+    a fresh deterministic discovery of the form: a candidate's printed label, group and section; a cell discovery
+    does not list is checked through the nearest printed text on its left, above it and its section banner. Any
+    office keyword (事務局・受付印・受付番号・受付日・審査欄・決裁・検印 …) makes the target office-only.
+    Returns ``"<slot id> → <location> (<keywords>)"`` per office-only target; an empty list means none.
+    """
+    path = Path(form_path)
+    spec_d = load_spec(path, spec)
+    targets = [t for t in (spec_d.get("targets") or []) if isinstance(t, dict)]
+    if not targets:
+        return []
+    file_type = detect_file_type(path)
+    found, _ = _docx_blank_candidates(path) if file_type == "docx" else _xlsx_blank_candidates(path)
+    known = {_cand_key({"file_type": c.file_type, **c.coords}): c for c in found}
+    out: list[str] = []
+    if file_type == "docx":
+        with zipfile.ZipFile(path) as zf:
+            names = set(zf.namelist())
+            parts = {p: index_part(p, zf.read(p), "word") for p in
+                     {str(t.get("part") or "word/document.xml") for t in targets} if p in names}
+        for tgt in targets:
+            idx = parts.get(str(tgt.get("part") or "word/document.xml"))
+            try:
+                table = idx.tables[int(tgt["table"])]  # type: ignore[union-attr]
+                cell = _cell_at(table, int(tgt["row"]), int(tgt["col"]))
+            except (AttributeError, KeyError, IndexError, TypeError, ValueError):
+                continue  # scan() reports a cell it cannot find and never fills it
+            if cell is None:
+                continue
+            c = known.get(("docx", idx.part_name, table.table_idx, cell.row_idx, cell.col_idx))  # type: ignore[union-attr]
+            texts = [c.label_text, c.section, c.group, *c.hints] if c else _docx_context_texts(idx, table, cell)  # type: ignore[arg-type]
+            hits = _office_hits(*texts)
+            if hits:
+                out.append(f"{tgt.get('slot_id')} → table {table.table_idx} row {cell.row_idx} col {cell.col_idx} "
+                           f"({', '.join(hits)})")
+        return out
+    import openpyxl
+
+    with zipfile.ZipFile(path) as zf:
+        sheets = xlsx_sheet_parts(zf)
+        check_xlsx_limits(zf, sheets)
+    wb = None
+    for tgt in targets:
+        sheet = _resolve_sheet(sheets, tgt.get("sheet", 0))
+        ref = str(tgt.get("cell") or "").replace("$", "").strip().upper()
+        rc = split_cell_ref(ref) if ref else None
+        if sheet is None or rc is None or rc[0] > MAX_XLSX_ROW or rc[1] > MAX_XLSX_COL:
+            continue  # scan() reports it and never fills it
+        c = known.get(("xlsx", sheet[0], sheet[1], ref))
+        if c is not None:
+            texts = [c.label_text, c.section, c.group, *c.hints]
+        else:
+            wb = wb or openpyxl.load_workbook(path, data_only=False)
+            texts = _xlsx_context_texts(wb[sheet[1]], *rc)
+        hits = _office_hits(*texts)
+        if hits:
+            out.append(f"{tgt.get('slot_id')} → sheet '{sheet[1]}' {ref} ({', '.join(hits)})")
+    return out

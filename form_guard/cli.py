@@ -303,8 +303,12 @@ def main(argv: Optional[list[str]] = None) -> int:
             sp = a.out_dir / f"{a.form.stem}.confirmed.slots.json"
             sp.write_text(json.dumps(spec, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
             print(f"Confirmed {len(spec['targets'])} cell(s): {', '.join(t['slot_id'] for t in spec['targets'])} → {sp}")
-        r = run_pipeline(a.form, read_memo(a.memo), a.out_dir, mode=a.mode, model=a.model, naive_path=a.naive,
-                         overrides=_parse_sets(a.set), slot_spec=spec, png=a.png, model_tier=a.model_tier)
+        try:  # a changed blank form or a slot spec designating an office-only cell is refused before writing
+            r = run_pipeline(a.form, read_memo(a.memo), a.out_dir, mode=a.mode, model=a.model, naive_path=a.naive,
+                             overrides=_parse_sets(a.set), slot_spec=spec, png=a.png, model_tier=a.model_tier)
+        except ValueError as exc:
+            print(f"refused before filling: {exc}", file=sys.stderr)
+            return 2
         print(f"Engine: {r.engine.get('label')}")
         _print_result(r)
         print(f"   filled file: {r.filled_path}")

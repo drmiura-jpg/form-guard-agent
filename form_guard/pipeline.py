@@ -5,6 +5,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
+import re
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -23,7 +24,7 @@ from .mapper import (
     map_fields,
     resolve_mode,
 )
-from .models import FieldMapping, VerificationReport
+from .models import FieldMapping, PatchRecord, VerificationReport
 from .scanner import ScanResult, find_markers, scan
 from .verifier import compare_naive, verify
 from .visual_diff import (
@@ -479,19 +480,29 @@ def run_pipeline(
     png: bool = False,
     write_outputs: bool = True,
     model_tier: Optional[str] = None,
+    allow_office_only: bool = False,
 ) -> PipelineResult:
     """Scan -> map & self-correct -> surgical write -> verify -> visual diff, for one blank form and memo.
 
     ``model_tier`` (auto | opus | sonnet | haiku; None = ``FORM_GUARD_MODEL_TIER`` or auto) selects the Claude
     model(s) in live mode; ``slot_spec`` may be a spec built by ``build_confirmed_slot_spec`` for an unmarked form.
+    A coordinate target (explicit spec or sidecar .slots.json) that points at an office-only cell of the blank form
+    (受付番号・受付印・審査欄・決裁・検印・事務局 …) is refused before anything is written, unless the internal
+    ``allow_office_only`` override is passed (MCP and the web app never do).
     """
+    from .scanner import OFFICE_REASON, office_only_targets
+
     timings: dict[str, float] = {}
     t = time.perf_counter()
     form_path = Path(form_path)
     out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
     memo_text = memo_text.replace("\r\n", "\n").replace("\r", "\n")
     scan_r = scan(form_path, slot_spec)
+    office = [] if allow_office_only else office_only_targets(form_path, scan_r.spec)
+    if office:
+        raise ValueError(f"refused before filling — the slot spec designates office-only cell(s): {'; '.join(office)} "
+                         f"({OFFICE_REASON})")
+    out_dir.mkdir(parents=True, exist_ok=True)
     timings["scan"] = time.perf_counter() - t
 
     t = time.perf_counter()
@@ -573,3 +584,163 @@ def write_run_outputs(result: PipelineResult) -> dict[str, Path]:
     rp.write_text(build_report_html(result.to_dict()), encoding="utf-8", newline="\n")
     paths["report"] = rp
     return paths
+
+
+# ---------------------------------------------------------- web hand-off (MCP draft -> web sign-off)
+#
+# form_guard_fill (MCP) writes an unapproved draft. web_handoff.json lets the web app load that exact file for the
+# human sign-off: a byte copy of the blank form the draft was verified against, the memo, the effective slot spec
+# and the mappings. The web app never re-runs a model on import; it re-verifies the bytes and refuses anything that
+# no longer matches the audit log.
+
+HANDOFF_NAME = "web_handoff.json"
+HANDOFF_SCHEMA = "form-guard/web-handoff@1"
+HANDOFF_BLANK_DIR = "_blank"
+_PLAIN_NAME = re.compile(r"^[^\\/:*?\"<>|\x00-\x1f]{1,200}\.(?:docx|xlsx)$", re.I)
+
+
+class HandoffError(ValueError):
+    """A hand-off draft that cannot be loaded for sign-off; ``status`` is the HTTP status the web app answers."""
+
+    def __init__(self, message: str, status: int = 422):
+        super().__init__(message)
+        self.status = status
+
+
+def write_web_handoff(result: PipelineResult, *, created_via: str, approval_status: str,
+                      form_display: str = "", review_url: str = "") -> Path:
+    """Write web_handoff.json (and a byte copy of the blank form) next to a draft written by ``run_pipeline``."""
+    out = result.out_dir or result.filled_path.parent
+    blank_dir = out / HANDOFF_BLANK_DIR
+    blank_dir.mkdir(parents=True, exist_ok=True)
+    blank_blob = result.form_path.read_bytes()
+    (blank_dir / result.form_path.name).write_bytes(blank_blob)
+    data = {
+        "schema": HANDOFF_SCHEMA,
+        "run_id": result.run_id,
+        "created_via": created_via,
+        "created_at": result.created_at,
+        "approval_status": approval_status,
+        "human_sign_off_required": True,
+        "review_url": review_url,
+        "form": {"name": result.form_path.name, "display_name": form_display or result.form_path.name,
+                 "blank_copy": f"{HANDOFF_BLANK_DIR}/{result.form_path.name}",
+                 "sha256": hashlib.sha256(blank_blob).hexdigest(), "file_type": result.scan.file_type},
+        "filled": {"name": result.filled_path.name, "sha256": result.verified_sha256},
+        "filled_sha256": result.verified_sha256,
+        "memo": {"text": result.memo_text, "sha256": hashlib.sha256(result.memo_text.encode()).hexdigest()},
+        "slot_spec": result.scan.spec,  # the effective spec (a sidecar .slots.json included): never re-read on import
+        "mappings": [m.model_dump() for m in result.mappings],
+        "patches": [p.model_dump() for p in result.write.patches],
+        "modified_parts": list(result.write.modified_parts),
+        "report": {"overall_status": result.report.overall_status, "passed": result.report.passed_count,
+                   "failed": result.report.failed_count, "pending_slots": list(result.report.pending_slots)},
+        "engine": result.engine,
+        "demo_id": result.demo_id,
+    }
+    p = out / HANDOFF_NAME
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8", newline="\n")
+    return p
+
+
+def _read_json(path: Path, what: str) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise HandoffError(f"{what} is missing — this folder holds no Form-Guard draft for sign-off", 404) from exc
+    except (OSError, ValueError) as exc:
+        raise HandoffError(f"{what} is unreadable: {exc}") from exc
+    if not isinstance(data, dict):
+        raise HandoffError(f"{what} is not a JSON object")
+    return data
+
+
+def load_handoff_draft(run_dir: Union[str, Path], out_dir: Union[str, Path]) -> tuple[PipelineResult, dict[str, Any]]:
+    """Load the unapproved draft in ``run_dir`` for the web sign-off, without running any model.
+
+    The blank form copy and the draft must match the SHA-256 values in web_handoff.json *and* audit_log.json; both
+    files are copied into ``out_dir`` (the web run folder) and the copy is verified again from scratch — the 21
+    deterministic checks plus VIS-01. Returns (result, hand-off record); a tampered or failing draft raises
+    ``HandoffError``.
+    """
+    from .ziputil import ZipSurgeryError, check_archive
+
+    run_dir, out_dir = Path(run_dir), Path(out_dir)
+    handoff = _read_json(run_dir / HANDOFF_NAME, HANDOFF_NAME)
+    audit = _read_json(run_dir / "audit_log.json", "audit_log.json")
+    if handoff.get("schema") != HANDOFF_SCHEMA:
+        raise HandoffError(f"{HANDOFF_NAME}: unknown schema {handoff.get('schema')!r}")
+    run_id = str(handoff.get("run_id") or "")
+    if not run_id or run_id != str(audit.get("run_id") or "") or run_dir.name != run_id:
+        raise HandoffError("run id mismatch between the folder, web_handoff.json and audit_log.json", 409)
+    form, filled = handoff.get("form") or {}, handoff.get("filled") or {}
+    blank_rel, filled_name = str(form.get("blank_copy") or ""), str(filled.get("name") or "")
+    blank_name = blank_rel.removeprefix(f"{HANDOFF_BLANK_DIR}/")
+    if not (_PLAIN_NAME.match(blank_name) and _PLAIN_NAME.match(filled_name)) or \
+            blank_rel != f"{HANDOFF_BLANK_DIR}/{blank_name}":
+        raise HandoffError("web_handoff.json names a file outside its run folder")
+    blank_src, filled_src = run_dir / HANDOFF_BLANK_DIR / blank_name, run_dir / filled_name
+    try:
+        blank_blob, filled_blob = blank_src.read_bytes(), filled_src.read_bytes()
+    except OSError as exc:
+        raise HandoffError(f"the draft or its blank form is missing: {exc.filename and Path(exc.filename).name}", 409) from exc
+    blank_sha, filled_sha = hashlib.sha256(blank_blob).hexdigest(), hashlib.sha256(filled_blob).hexdigest()
+    if not blank_sha == form.get("sha256") == (audit.get("form") or {}).get("sha256"):
+        raise HandoffError("the blank form copy does not match the SHA-256 recorded for this draft — refused", 409)
+    recorded = handoff.get("filled_sha256")
+    if not filled_sha == recorded == filled.get("sha256") == (audit.get("filled") or {}).get("sha256"):
+        raise HandoffError("the draft was modified after it was written (SHA-256 differs from audit_log.json) — "
+                           "refused; run form_guard_fill again", 409)
+    memo = str((handoff.get("memo") or {}).get("text") or "")
+    if memo != str((audit.get("memo") or {}).get("text") or ""):
+        raise HandoffError("the memo in web_handoff.json differs from the one in audit_log.json — refused", 409)
+    spec = handoff.get("slot_spec") if isinstance(handoff.get("slot_spec"), dict) else {}
+    try:
+        mappings = [FieldMapping.model_validate(m) for m in handoff.get("mappings") or []]
+        patches = [PatchRecord.model_validate(p) for p in handoff.get("patches") or []]
+    except Exception as exc:  # noqa: BLE001 - pydantic ValidationError: a malformed hand-off
+        raise HandoffError(f"web_handoff.json mappings are malformed: {exc}") from exc
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / HANDOFF_BLANK_DIR).mkdir(exist_ok=True)
+    form_path, filled_path = out_dir / HANDOFF_BLANK_DIR / blank_name, out_dir / filled_name
+    form_path.write_bytes(blank_blob)
+    filled_path.write_bytes(filled_blob)
+    try:
+        check_archive(form_path)
+        check_archive(filled_path)
+        scan_r = scan(form_path, spec)
+    except (ZipSurgeryError, ValueError) as exc:
+        raise HandoffError(f"the draft cannot be re-verified: {exc}") from exc
+    if filled_path.suffix.lower() != f".{scan_r.file_type}":
+        raise HandoffError("the draft and its blank form are not the same file type")
+    t = time.perf_counter()
+    values = {m.slot_id: m.filled_value for m in mappings if m.is_written}
+    prepared = {k: prepare_value(v, scan_r.file_type) for k, v in values.items()}
+    try:
+        report = verify(scan_r, filled_path, mappings, memo)
+        previews, visual = build_previews(scan_r, filled_path, prepared, None, None)
+    except Exception as exc:  # noqa: BLE001 - a file the verifier or the layout engine cannot read is refused
+        raise HandoffError(f"the draft cannot be re-verified: {type(exc).__name__}: {exc}") from exc
+    report.visual_diff_summary = visual
+    if not visual.get("identical_outside_slots", True):
+        report.checks.append(_drift_check(visual))
+        report.failed_count += 1
+        report.overall_status = "FAIL"
+    if report.stats.get("filled_sha256") != filled_sha:
+        raise HandoffError("the draft changed while it was being verified — refused", 409)
+    if report.overall_status == "FAIL":
+        failed = ", ".join(c.check_id for c in report.checks if not c.passed)
+        raise HandoffError(f"the draft fails re-verification against its blank form ({failed}) — refused")
+    write = WriteResult(out_path=filled_path, patches=patches, modified_parts=list(handoff.get("modified_parts") or []),
+                        written_slots=sorted(values), values=prepared,
+                        pending_slots=[s.slot_id for s in scan_r.slots if s.slot_id not in values])
+    engine = handoff.get("engine") if isinstance(handoff.get("engine"), dict) else {}
+    result = PipelineResult(
+        run_id=run_id, form_path=form_path, filled_path=filled_path, memo_text=memo, scan=scan_r, mappings=mappings,
+        write=write, report=report, naive_report=None, previews=previews, visual=visual, engine=engine,
+        timings={"verify": time.perf_counter() - t}, demo_id=handoff.get("demo_id"), out_dir=out_dir,
+        created_at=str(handoff.get("created_at") or datetime.now(timezone.utc).isoformat(timespec="seconds")),
+        builtin_demo=is_builtin_demo(handoff.get("demo_id"), form_path, memo, mappings),
+    )
+    write_run_outputs(result)
+    return result, handoff

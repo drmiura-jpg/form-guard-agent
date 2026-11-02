@@ -3,8 +3,19 @@
 The Human-in-the-Loop gate is enforced on the server: the filled file can only be
 downloaded after a named reviewer has confirmed every required checklist item and
 the verifier reports PASS. The approval is bound to the revision the reviewer saw and
-to the SHA-256 of the exact bytes the verifier checked; the download serves those
-bytes from memory after re-checking the file, under a per-run lock.
+to the SHA-256 of the exact bytes the verifier checked: ``POST /api/runs/{id}/approve``
+and ``GET /api/runs/{id}/download`` both *require* ``filled_sha256`` (64 hex digits) and
+``revision`` (422 if missing or malformed, 409 if stale). The download serves those
+bytes from memory after re-checking the file. Every read and write of a run's state
+(values, previews, approval, revision, SHA-256) happens under the run's re-entrant lock,
+so a response is always one consistent snapshot.
+
+MCP drafts: ``form_guard_fill`` leaves ``web_handoff.json`` next to its unapproved draft in
+``output/mcp_runs/<run id>/``. ``POST /api/runs/import`` (``{"run_id": …}`` or
+``{"run_dir": …}``) — or simply ``GET /api/runs/<run id>`` / ``/?run_id=<run id>``, which
+import it on first use — loads that exact file without running any model, re-runs the
+21 deterministic checks and VIS-01 against the blank form recorded in the handoff, and
+refuses a draft whose SHA-256 no longer matches its audit log or that fails verification.
 
 The server is meant for 127.0.0.1 only: requests with any other Host header (DNS
 rebinding) and state-changing requests from another Origin (cross-site forms) are refused.
@@ -48,7 +59,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, Optional, Union
 from urllib.parse import quote, urlsplit
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
@@ -58,7 +69,7 @@ from .claude_suite import PROJECT_ROOT, describe_suite
 from .mapper import MODEL_TIERS, DemoEngine, live_credentials_present, load_dotenv
 from .measure import measure, totals
 from .models import FieldMapping
-from .pipeline import PipelineResult, new_run_id, run_pipeline
+from .pipeline import HANDOFF_NAME, HandoffError, PipelineResult, load_handoff_draft, new_run_id, run_pipeline
 from .samples import (
     DEMOS,
     UNMARKED_FORMS,
@@ -78,6 +89,7 @@ MAX_MEMO_CHARS = 60_000
 MAX_VALUE_CHARS = 1_000
 _RUN_ID = re.compile(r"^[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$")
 _DISCOVERY_ID = re.compile(r"^[0-9a-f]{24}$")
+SHA256_HEX = r"^[0-9a-fA-F]{64}$"
 ModelTier = Literal["auto", "opus", "sonnet", "haiku"]
 MEDIA = {".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
          ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}
@@ -99,9 +111,17 @@ class OverrideRequest(BaseModel):
 class ApproveRequest(BaseModel):
     reviewer: str = Field(max_length=120)
     checked: list[str]
-    # What the reviewer was looking at: approval is refused if the run changed since (stale view).
-    filled_sha256: Optional[str] = Field(default=None, max_length=64)
-    revision: Optional[int] = None
+    # What the reviewer was looking at — both required: approval is refused if the run changed since (stale view).
+    filled_sha256: str = Field(..., pattern=SHA256_HEX)
+    revision: int = Field(..., ge=0, strict=True)
+
+
+class ImportRequest(BaseModel):
+    """POST /api/runs/import: an unapproved draft written by form_guard_fill (MCP), by run id or run folder."""
+
+    model_config = ConfigDict(extra="forbid")
+    run_id: Optional[str] = Field(default=None, max_length=32)
+    run_dir: Optional[str] = Field(default=None, max_length=1024)
 
 
 class RunDemoRequest(BaseModel):
@@ -153,12 +173,13 @@ class RunState:
     verified_sha256: str = ""       # SHA-256 of those bytes; approve() and download() refuse any other file
     revision: int = 0               # +1 on every reviewer edit; approval must name the revision it saw
     auto_preview: bool = False      # cells picked by the server (recommended), not confirmed by a reviewer
-    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    imported_from: str = ""         # an MCP draft loaded for sign-off (web_handoff.json): its run folder
+    # re-entrant: _payload() takes it too, also when called from overrides() / approve() that already hold it
+    lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
-    def stale(self, filled_sha256: Optional[str], revision: Optional[int]) -> bool:
-        """True if the client looked at another revision or another file than the verified one."""
-        return (revision is not None and revision != self.revision) or \
-            (filled_sha256 is not None and filled_sha256 != self.verified_sha256)
+    def stale(self, filled_sha256: str, revision: int) -> bool:
+        """True if the client looked at another revision or another file than the verified one (both are required)."""
+        return str(filled_sha256).lower() != str(self.verified_sha256).lower() or int(revision) != int(self.revision)
 
     def on_disk_sha256(self) -> str:
         try:
@@ -168,11 +189,13 @@ class RunState:
 
 
 class RunStore:
-    def __init__(self, root: Path, limit: int = 60):
+    def __init__(self, root: Path, limit: int = 60, loader: Any = None):
         self.root = root
         self.limit = limit
         self.runs: "OrderedDict[str, RunState]" = OrderedDict()
         self.lock = threading.Lock()
+        self.loader = loader  # run id -> RunState | None: imports an MCP draft (web_handoff.json) on first use
+        self.load_lock = threading.Lock()
 
     def put(self, run_id: str, st: RunState) -> None:
         with self.lock:
@@ -186,6 +209,14 @@ class RunStore:
             raise HTTPException(404, "unknown run")
         with self.lock:
             st = self.runs.get(run_id)
+        if st is None and self.loader is not None:
+            with self.load_lock:  # one import at a time; a second request for the same id finds it stored
+                with self.lock:
+                    st = self.runs.get(run_id)
+                if st is None:
+                    st = self.loader(run_id)
+                    if st is not None:
+                        self.put(run_id, st)
         if st is None:
             raise HTTPException(404, "unknown run")
         return st
@@ -282,25 +313,33 @@ def _safe_stem(name: str) -> str:
     return (stem or "form")[:60]
 
 
+def download_url(run_id: str, filled_sha256: str, revision: int) -> str:
+    """The download link names the exact file and revision it is for; the server refuses any other."""
+    return f"/api/runs/{run_id}/download?filled_sha256={quote(filled_sha256)}&revision={int(revision)}"
+
+
 def _payload(run_id: str, st: RunState) -> dict[str, Any]:
-    d = st.result.to_dict(include_previews=True)
-    rep = st.result.report
-    d["display_name"] = st.display_name
-    d["approval"] = st.approval
-    d["overrides"] = st.overrides
-    d["revision"] = st.revision
-    d["filled"]["sha256"] = st.verified_sha256 or d["filled"]["sha256"]
-    d["can_approve"] = rep.overall_status == "PASS"
-    confirmed = st.spec.get("confirmed_candidates") if isinstance(st.spec, dict) else None
-    d["confirmed_candidates"] = [str(c) for c in confirmed] if isinstance(confirmed, list) else []  # unmarked forms
-    d["auto_preview"] = st.auto_preview
-    if st.auto_preview:
-        d["can_approve"] = False
-        d["cell_selection"] = ("auto-preview: the recommended applicant cells were filled by the server — confirm the "
-                               "detected cells to get a run a reviewer can sign off")
-    d["links"] = {"report": f"/api/runs/{run_id}/report", "audit": f"/api/runs/{run_id}/audit",
-                  "download": f"/api/runs/{run_id}/download"}
-    return d
+    with st.lock:  # one snapshot: values, previews, approval, revision and SHA-256 belong to the same revision
+        d = st.result.to_dict(include_previews=True)
+        rep = st.result.report
+        d["display_name"] = st.display_name
+        d["approval"] = dict(st.approval) if st.approval else None
+        d["overrides"] = dict(st.overrides)
+        d["revision"] = st.revision
+        d["filled"]["sha256"] = st.verified_sha256 or d["filled"]["sha256"]
+        d["can_approve"] = rep.overall_status == "PASS"
+        confirmed = st.spec.get("confirmed_candidates") if isinstance(st.spec, dict) else None
+        d["confirmed_candidates"] = [str(c) for c in confirmed] if isinstance(confirmed, list) else []  # unmarked forms
+        d["auto_preview"] = st.auto_preview
+        if st.auto_preview:
+            d["can_approve"] = False
+            d["cell_selection"] = ("auto-preview: the recommended applicant cells were filled by the server — confirm "
+                                   "the detected cells to get a run a reviewer can sign off")
+        if st.imported_from:
+            d["imported_from"] = st.imported_from
+        d["links"] = {"report": f"/api/runs/{run_id}/report", "audit": f"/api/runs/{run_id}/audit",
+                      "download": download_url(run_id, d["filled"]["sha256"], st.revision)}
+        return d
 
 
 def _check_package(path: Path) -> str:
@@ -315,8 +354,23 @@ def _check_package(path: Path) -> str:
         raise HTTPException(400, str(exc)) from exc
 
 
+def default_import_roots(project_root: Path) -> list[Path]:
+    """Where MCP drafts can be imported from: output/mcp_runs/<run id> and output/<run id>, under the working
+    directory, the MCP server root (FORM_GUARD_MCP_ROOT) and the project root."""
+    bases = [Path.cwd(), Path(project_root)]
+    if os.environ.get("FORM_GUARD_MCP_ROOT"):
+        bases.insert(1, Path(os.environ["FORM_GUARD_MCP_ROOT"]))
+    roots: list[Path] = []
+    for base in bases:
+        for sub in (Path("output") / "mcp_runs", Path("output")):
+            p = (base / sub).resolve()
+            if p not in roots:
+                roots.append(p)
+    return roots
+
+
 def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = None, client: Any = None,
-               project_root: Optional[Path] = None) -> FastAPI:
+               project_root: Optional[Path] = None, import_roots: Optional[list[Path]] = None) -> FastAPI:
     load_dotenv()
     app = FastAPI(title="Form-Guard Agent", version=__version__, docs_url="/api/docs", redoc_url=None)
     store = RunStore(Path(run_root or os.environ.get("FORM_GUARD_RUN_DIR") or Path.cwd() / "output" / "web_runs"))
@@ -324,6 +378,8 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
     app.state.client = client
     app.state.samples_dir = samples_dir
     app.state.project_root = Path(project_root or PROJECT_ROOT)  # where .claude/ and .mcp.json live
+    app.state.import_roots = [Path(p).resolve() for p in (import_roots if import_roots is not None
+                                                          else default_import_roots(app.state.project_root))]
     app.state.workflow = None  # measured once per process (GET /api/claude-suite)
     workflow_lock = threading.Lock()
 
@@ -393,6 +449,56 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
                       verified_bytes=blob, verified_sha256=sha, auto_preview=auto_preview)
         store.put(run_id, st)
         return run_id, st
+
+    # ------------------------------------------------ MCP drafts: web_handoff.json -> human sign-off
+
+    def _shown(p: Path) -> str:
+        for base in (app.state.project_root, Path.cwd()):
+            try:
+                return p.resolve().relative_to(Path(base).resolve()).as_posix()
+            except ValueError:
+                continue
+        return p.name
+
+    def _handoff_dir(run_id: str) -> Optional[Path]:
+        """output/mcp_runs/<run id> or output/<run id> (under an import root) holding web_handoff.json."""
+        for root in app.state.import_roots:
+            d = root / run_id
+            if (d / HANDOFF_NAME).is_file():
+                return d
+        return None
+
+    def _import_dir(run_dir: Path) -> RunState:
+        """Load the exact draft bytes for sign-off: no model runs; the copy is re-verified (21 checks + VIS-01)."""
+        try:
+            result, handoff = load_handoff_draft(run_dir, store.root / run_dir.name)
+        except HandoffError as exc:
+            raise HTTPException(exc.status, str(exc)) from exc
+        blob, sha = _verified_copy(result)
+        form = handoff.get("form") or {}
+        return RunState(result=result, ai_mappings=[m.model_copy(deep=True) for m in result.mappings],
+                        form_path=result.form_path, memo_text=result.memo_text, naive_path=None,
+                        spec=result.scan.spec if isinstance(result.scan.spec, dict) else {},
+                        display_name=str(form.get("display_name") or form.get("name") or result.form_path.name),
+                        verified_bytes=blob, verified_sha256=sha, revision=0, imported_from=_shown(run_dir))
+
+    def _load_run(run_id: str) -> Optional[RunState]:
+        run_dir = _handoff_dir(run_id)
+        return _import_dir(run_dir) if run_dir is not None else None
+
+    store.loader = _load_run  # GET /api/runs/<run id> (and /?run_id=<run id> in the UI) imports a draft on first use
+
+    def _resolve_run_dir(raw: str) -> Path:
+        p = Path(raw)
+        for cand in ([p] if p.is_absolute() else [Path.cwd() / p, app.state.project_root / p]):
+            try:
+                cand = cand.resolve()
+            except OSError:
+                continue
+            if cand.parent in app.state.import_roots and _RUN_ID.match(cand.name):
+                return cand
+        raise HTTPException(400, "run_dir must be output/mcp_runs/<run id> or output/<run id> (a draft written by "
+                                 "form_guard_fill)")
 
     @app.get("/", response_class=HTMLResponse)
     def index():
@@ -591,9 +697,33 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
                           display=file.filename or form_path.name, model_tier=tier)
         return _payload(run_id, st)
 
+    @app.post("/api/runs/import")
+    def import_run(req: ImportRequest):
+        """Load an unapproved MCP draft (web_handoff.json) for human sign-off: the exact file, re-verified."""
+        if bool(req.run_id) == bool(req.run_dir):
+            raise HTTPException(400, "send either run_id or run_dir")
+        if req.run_id:
+            if not _RUN_ID.match(req.run_id):
+                raise HTTPException(400, "run_id must look like 20261103-101500-a1b2c3")
+            run_id, run_dir = req.run_id, _handoff_dir(req.run_id)
+        else:
+            run_dir = _resolve_run_dir(req.run_dir or "")
+            run_id = run_dir.name
+        with store.load_lock:
+            with store.lock:
+                st = store.runs.get(run_id)
+            if st is None:
+                if run_dir is None or not (run_dir / HANDOFF_NAME).is_file():
+                    raise HTTPException(404, f"no draft with {HANDOFF_NAME} for run {run_id}")
+                st = _import_dir(run_dir)
+                store.put(run_id, st)
+        return _payload(run_id, st)
+
     @app.get("/api/runs/{run_id}")
     def get_run(run_id: str):
-        return _payload(run_id, store.get(run_id))
+        st = store.get(run_id)  # an MCP draft is imported (and re-verified) on first use
+        with st.lock:
+            return _payload(run_id, st)
 
     @app.post("/api/runs/{run_id}/overrides")
     def overrides(run_id: str, req: OverrideRequest):
@@ -653,17 +783,23 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
                 "report_status": rep.overall_status,
                 "engine": st.result.engine.get("label"),
             }
+            if st.imported_from:
+                st.approval["source_draft"] = st.imported_from  # the MCP draft folder this exact file came from
             (st.result.out_dir or store.root / run_id).joinpath("approval.json").write_text(
                 json.dumps(st.approval, ensure_ascii=False, indent=2), encoding="utf-8")
-            return {"approved": True, "download_url": f"/api/runs/{run_id}/download", **st.approval}
+            return {"approved": True, "download_url": download_url(run_id, st.verified_sha256, st.revision),
+                    **st.approval}
 
     @app.get("/api/runs/{run_id}/download")
-    def download(run_id: str, filled_sha256: Optional[str] = None, revision: Optional[int] = None):
+    def download(run_id: str, filled_sha256: Annotated[str, Query(pattern=SHA256_HEX)],
+                 revision: Annotated[int, Query(ge=0)]):
+        """Both query parameters are required (422 without them): the link names the exact approved file."""
         st = store.get(run_id)
         with st.lock:
             if not st.approval:
                 raise HTTPException(403, "human-in-the-loop approval is required before download")
-            if st.stale(filled_sha256, revision) or st.approval.get("revision") != st.revision:
+            if st.stale(filled_sha256, revision) or st.approval.get("revision") != st.revision or \
+                    str(st.approval.get("filled_sha256", "")).lower() != filled_sha256.lower():
                 raise HTTPException(409, {"message": "stale view — the approved revision / file is not the current one",
                                           "revision": st.revision, "filled_sha256": st.verified_sha256})
             path = st.result.filled_path

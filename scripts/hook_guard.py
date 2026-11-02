@@ -17,9 +17,12 @@ Stage 1 — PreToolUse, BEFORE anything reaches the disk (a violation exits with
 * Secret & hygiene guard. The text a Write / Edit / MultiEdit / NotebookEdit is about to put into a project file
   (``content``, ``new_string``, ``edits[].new_string``, ``new_source``) is scanned for an Anthropic API key, a
   literal ``ANTHROPIC_API_KEY = "sk-…"`` assignment, a personal user-profile path (C:\\Users\\<user>,
-  /Users/<user>, /home/<user> — generic placeholders such as <user> are fine) and e-mail addresses outside the
-  reserved example domains. Shell commands are checked for API keys only. The git-ignored .env file is where the
-  key belongs and is exempt; files outside the project are not inspected.
+  /Users/<user>, /home/<user> with any user name, Japanese or other non-ASCII names included, also right after
+  Japanese text — generic placeholders such as <user>, user, runner, root, ubuntu or container are fine) and
+  e-mail addresses outside the reserved example domains (example.com / example.jp / example.org and their
+  subdomains, users.noreply.github.com; the only other address allowed is noreply@anthropic.com). Shell commands
+  are checked for API keys only. The git-ignored .env file is where the key belongs and is exempt; files outside
+  the project are not inspected.
 
 Stage 2 — PostToolUse, AFTER the write (findings go back to Claude as ``decision: "block"`` so they are fixed at
 once):
@@ -28,6 +31,12 @@ once):
   module with the project's interpreter (.venv), within a 1.8 s budget;
 * .json files: ``json.loads`` validity (a UTF-8 BOM is reported too — Claude Code cannot read it);
 * every text file written inside the project is re-scanned with the hygiene rules above.
+
+Extensions are compared case-insensitively (``x.PY`` and ``x.JSON`` are checked like ``x.py`` / ``x.json`` on
+Windows). The hook is run as ``python scripts/hook_guard.py …`` from .claude/settings.json and needs nothing but the
+standard library: any Python 3.9+ on PATH works (activate the project's .venv before starting Claude Code — on
+Windows ``.venv\\Scripts\\Activate.ps1``, elsewhere ``source .venv/bin/activate``); the import smoke test always
+prefers the project's .venv interpreter (or FORM_GUARD_HOOK_PYTHON) whichever ``python`` started the hook.
 
 The hook never blocks because of its own failure: odd payloads, missing optional dependencies, timeouts and
 internal errors only produce a note on stderr and exit code 0. Findings never echo the matched secret, path or
@@ -65,14 +74,24 @@ _SK = "sk-" + "ant-"
 API_KEY_RE = re.compile(re.escape(_SK) + r"[A-Za-z0-9_\-]{16,}")
 KEY_ASSIGN_RE = re.compile(r"(?i)\b(?:ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|api[_-]?key)\b[\"']?\s*[:=]\s*[\"']?"
                            r"sk-[A-Za-z0-9_\-]{6,}")
-WIN_PROFILE_RE = re.compile(r"(?i)(?<![A-Za-z0-9])[A-Z]:(?:\\\\|\\|/)+Users(?:\\\\|\\|/)+(?P<name>[^\\/\s\"'<>|:*?`,;)\]]+)")
-POSIX_PROFILE_RE = re.compile(r"(?<![\w.~-])(?:/[A-Za-z])?/(?:Users|home)/(?P<name>[^/\s\"'<>|:*?`,;)\]]+)")
+# The profile folder names are assembled from fragments, so these patterns never match this file's own source.
+_USERS, _HOME = "Us" + "ers", "ho" + "me"
+_SEP = r"(?:\\\\|\\|/)+"
+# A user name is any run of non-separator characters — Japanese and other non-ASCII names included.
+_NAME = r"(?P<name>[^\\/\s\"'<>|:*?`,;)\]]+)"
+# Only an ASCII letter / digit right before the drive letter or slash means "not a path start": a path written
+# straight after Japanese text (e.g. 保存先 directly followed by the profile path) is still found.
+WIN_PROFILE_RE = re.compile(r"(?i)(?<![A-Za-z0-9])[A-Z]:" + _SEP + _USERS + _SEP + _NAME)
+POSIX_PROFILE_RE = re.compile(r"(?<![A-Za-z0-9_.~-])(?:/[A-Za-z])?/(?:" + _USERS + "|" + _HOME + ")/" + _NAME)
 EMAIL_RE = re.compile(r"(?<![\w.%+-])(?P<local>[A-Za-z0-9._%+-]+)@(?P<domain>[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)")
-EXAMPLE_MAIL_DOMAINS = ("example.com", "example.jp", "example.org", "example.net", "users.noreply.github.com",
-                        "anthropic.com")
+# Reserved example domains (and their subdomains) and GitHub's no-reply domain; nothing else, compared label-wise:
+# "notexample.com" or "example.com.evil.org" never pass. Other addresses only when listed exactly.
+EXAMPLE_MAIL_DOMAINS = ("example.com", "example.jp", "example.org", "users.noreply.github.com")
+EXACT_MAIL_ALLOW = frozenset({"noreply@" + "anthropic.com"})  # the Co-Authored-By trailer of a commit
 PLACEHOLDER_USERS = frozenset({"user", "username", "user-name", "user_name", "you", "yourname", "your-name",
                                "your_name", "yourusername", "name", "me", "public", "default", "default user",
-                               "all users", "example", "xxx", "..."})
+                               "all users", "example", "xxx", "...", "…", "runner", "root", "ubuntu",
+                               "container"})
 
 
 def _placeholder(name: str) -> bool:
@@ -86,7 +105,14 @@ def _mail_ok(local: str, domain: str) -> bool:
         return True
     if not re.fullmatch(r"[a-z]{2,}", d.rsplit(".", 1)[-1]):
         return True  # a last label with digits (a version suffix) is not a mail domain
-    return any(d == ok or d.endswith("." + ok) for ok in EXAMPLE_MAIL_DOMAINS)
+    if f"{local.lower()}@{d}" in EXACT_MAIL_ALLOW:
+        return True
+    return any(d == base or d.endswith("." + base) for base in EXAMPLE_MAIL_DOMAINS)
+
+
+def _ext(path: Path, *exts: str) -> bool:
+    """Case-insensitive extension test: x.PY is a Python file and x.JSON a JSON file, as on Windows."""
+    return path.name.lower().endswith(tuple(e.lower() for e in exts))
 
 
 def hygiene_findings(text: str, secrets_only: bool = False) -> List[Tuple[int, str]]:
@@ -451,12 +477,12 @@ def _interpreter(root: Path) -> str:
 
 
 def _module_name(rel: Path) -> str:
-    if rel.parts[0] != "form_guard":
+    if rel.parts[0].lower() != "form_guard":
         return "form_guard"  # tests/…: the package they exercise must still import
-    if rel.name == "__main__.py":
+    if rel.name.lower() == "__main__.py":
         return "form_guard.cli"  # importing __main__ would run the CLI
     mod = ".".join(rel.with_suffix("").parts)
-    return mod[: -len(".__init__")] if mod.endswith(".__init__") else mod
+    return mod[: -len(".__init__")] if mod.lower().endswith(".__init__") else mod
 
 
 _IMPORT_PROBE = """import importlib, sys
@@ -505,7 +531,7 @@ def _python_checks(path: Path, shown: str, started: float) -> Tuple[List[str], L
     if root is None:
         return problems, notes
     rel = path.relative_to(root)
-    if rel.parts[0] not in ("form_guard", "tests"):
+    if rel.parts[0].lower() not in ("form_guard", "tests"):
         return problems, notes
     module = _module_name(rel)
     status, detail = _import_check(_interpreter(root), module, root, POST_BUDGET_S - (time.perf_counter() - started))
@@ -542,23 +568,22 @@ def post_tool_use(payload: dict) -> int:
     if root is None or not path.is_file():
         return 0
     shown = path.relative_to(root).as_posix()
-    suffix = path.suffix.lower()
     problems: List[str] = []
     notes: List[str] = []
     data = b""
     if path.stat().st_size <= MAX_SCAN_BYTES:
         data = path.read_bytes()
-    if suffix == ".py":
+    if _ext(path, ".py"):  # case-insensitive: x.PY too
         p, n = _python_checks(path, shown, started)
         problems += p
         notes += n
-    elif suffix == ".json" and data:
+    elif _ext(path, ".json") and data:  # x.JSON too
         bad = _json_check(data, shown)
         if bad:
             problems.append(bad)
         else:
             notes.append("JSON OK")
-    if data and not _hygiene_exempt(path) and (suffix in TEXT_EXTS or path.name.startswith(".")):
+    if data and not _hygiene_exempt(path) and (_ext(path, *TEXT_EXTS) or path.name.startswith(".")):
         text = data.decode("utf-8", "replace")
         found = hygiene_findings(text)
         if found:

@@ -228,9 +228,30 @@ document.addEventListener("DOMContentLoaded", async () => {
     S.unmarked = all.filter((d) => d.unmarked);
     renderDemos();
   } catch (e) { toast(L(`デモを読み込めません: ${e.message}`, `Could not load demos: ${e.message}`)); }
-  await handleDeepLink();
+  if (!(await openRunFromQuery())) await handleDeepLink();
   window.addEventListener("hashchange", handleDeepLink);  // editing the hash while recording also works
 });
+
+// /?run_id=<run id>: an unapproved draft written by form_guard_fill (MCP, its review_url). GET /api/runs/<run id>
+// imports it on first use — the exact file, re-verified on the server against its blank form, no model run — so
+// the reviewer inspects, edits, approves and downloads that very file here.
+async function openRunFromQuery() {
+  const id = new URLSearchParams(location.search).get("run_id");
+  if (!id) return false;
+  if (!/^[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$/.test(id)) {
+    toast(L(`run_id の形式が正しくありません: ${id}`, `Not a run id: ${id}`));
+    return true;
+  }
+  busy(true, L("MCP の下書きを読み込み、サーバーで再検査しています…", "Loading the MCP draft and re-verifying it on the server…"));
+  try {
+    setRun(await api(`/api/runs/${encodeURIComponent(id)}`), true);
+    showTab("hitl");
+    toast(L("MCP の下書きを読み込みました（未承認）。確認して承認してください。", "MCP draft loaded (unapproved) — review it and sign off."));
+  } catch (e) {
+    toast(L(`下書き ${id} を読み込めません: ${e.message}`, `Could not load draft ${id}: ${e.message}`));
+  } finally { busy(false); }
+  return true;
+}
 
 // Deep links for demos / recordings: /#demo=form2&tab=hitl&slot=法人番号&layout=slider, #unmarked=form4,
 // #tour=3, #view=claude, #lang=en
@@ -690,6 +711,7 @@ function renderHeader() {
   $("#runSub").textContent = `${r.form.title_en ? r.form.title_en + " · " : ""}${r.display_name} → ${r.filled.name} · ${L("エンジン", "engine")}: ${eng.label || "?"}`
     + (eng.fallback_reason ? ` (fallback: ${eng.fallback_reason})` : "")
     + (r.confirmed_candidates && r.confirmed_candidates.length ? ` · ${L("確定した空欄", "confirmed cells")}: ${r.confirmed_candidates.join(", ")}` : "")
+    + (r.imported_from ? ` · ${L("MCP の下書き（再検査済み・未承認）", "MCP draft (re-verified, unapproved)")}: ${r.imported_from}` : "")
     + (r.auto_preview ? ` · ⚠ ${L("自動プレビュー（推奨の空欄で仮記入）— 承認するには空欄を確定してください", "auto-preview of the recommended cells — confirm the cells to sign off")}` : "");
   $("#reportLink").href = r.links.report;
   $("#auditLink").href = r.links.audit;
@@ -1165,6 +1187,15 @@ async function onApprove() {
   }
 }
 
+// The download link always names the approved file and revision (filled_sha256 + revision are required query
+// parameters: the server answers 422 without them and 409 for any other file or revision).
+function downloadHref(r) {
+  const a = r.approval;
+  if (a.download_url) return a.download_url;
+  return `/api/runs/${encodeURIComponent(r.run_id)}/download?filled_sha256=${encodeURIComponent(a.filled_sha256)}`
+    + `&revision=${encodeURIComponent(a.revision)}`;
+}
+
 function renderApproval() {
   const r = S.run;
   const dl = $("#downloadBtn");
@@ -1172,7 +1203,7 @@ function renderApproval() {
   if (r.approval) {
     dl.classList.remove("disabled");
     dl.removeAttribute("aria-disabled");
-    dl.href = r.links.download;
+    dl.href = downloadHref(r);
     dl.textContent = L(`⬇ 検査済み .${r.form.file_type} をダウンロード`, `⬇ Download verified .${r.form.file_type}`);
     msg.className = "msg ok";
     fill(msg, h("div", {}, L(`✓ ${r.approval.reviewer} が ${r.approval.approved_at} に承認`, `✓ Approved by ${r.approval.reviewer} at ${r.approval.approved_at}`)),

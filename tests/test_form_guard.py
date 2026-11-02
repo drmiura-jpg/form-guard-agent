@@ -45,7 +45,14 @@ from form_guard.ooxml import S_NS, UnsafeXMLError, UnsupportedXMLError, add_pres
 from form_guard.pipeline import run_pipeline
 from form_guard.report import build_report_html
 from form_guard.samples import DEMOS, UNMARKED_FORMS, demo_paths, generate_samples, read_memo, unmarked_paths
-from form_guard.scanner import build_confirmed_slot_spec, discover_blank_cells, find_markers, scan
+from form_guard.scanner import (
+    build_confirmed_slot_spec,
+    discover_blank_cells,
+    find_markers,
+    office_only_targets,
+    recommended_ids,
+    scan,
+)
 from form_guard.textnorm import (
     check_wareki,
     condense_extractive,
@@ -627,22 +634,27 @@ def api(samples_dir, tmp_path):
     return TestClient(create_app(run_root=tmp_path / "web_runs", samples_dir=samples_dir))
 
 
+def _seen(run):
+    """What the reviewer is looking at: approval and download must name both."""
+    return {"filled_sha256": run["filled"]["sha256"], "revision": run["revision"]}
+
+
 def test_api_hitl_gate_blocks_download_until_full_human_approval(api):
     run = api.post("/api/runs", json={"demo_id": "form2", "mode": "demo"}).json()
     rid = run["run_id"]
     assert run["report"]["pending_slots"] == ["法人番号"] and run["can_approve"] is False
-    assert api.get(f"/api/runs/{rid}/download").status_code == 403
-    assert api.post(f"/api/runs/{rid}/approve", json={"reviewer": "x", "checked": []}).status_code == 409
+    assert api.get(run["links"]["download"]).status_code == 403
+    assert api.post(f"/api/runs/{rid}/approve", json={"reviewer": "x", "checked": [], **_seen(run)}).status_code == 409
     bad = api.post(f"/api/runs/{rid}/overrides", json={"values": {"法人番号": "12-34"}}).json()
     assert bad["report"]["pending_slots"] == ["法人番号"]
     ok = api.post(f"/api/runs/{rid}/overrides", json={"values": {"法人番号": "1234567890123"}}).json()
     assert ok["report"]["overall_status"] == "PASS" and ok["can_approve"]
     required = [h["item_id"] for h in ok["report"]["hitl_checklist"] if h["required"]]
-    partial = api.post(f"/api/runs/{rid}/approve", json={"reviewer": "架空 花子", "checked": required[:-1]})
+    partial = api.post(f"/api/runs/{rid}/approve", json={"reviewer": "架空 花子", "checked": required[:-1], **_seen(ok)})
     assert partial.status_code == 400 and partial.json()["detail"]["missing"] == required[-1:]
-    assert api.post(f"/api/runs/{rid}/approve", json={"reviewer": " ", "checked": required}).status_code == 400
-    approved = api.post(f"/api/runs/{rid}/approve", json={"reviewer": "架空 花子", "checked": required}).json()
-    dl = api.get(f"/api/runs/{rid}/download")
+    assert api.post(f"/api/runs/{rid}/approve", json={"reviewer": " ", "checked": required, **_seen(ok)}).status_code == 400
+    approved = api.post(f"/api/runs/{rid}/approve", json={"reviewer": "架空 花子", "checked": required, **_seen(ok)}).json()
+    dl = api.get(approved["download_url"])
     assert dl.status_code == 200 and hashlib.sha256(dl.content).hexdigest() == approved["filled_sha256"]
     assert dl.headers["x-form-guard-sha256"] == approved["filled_sha256"]
     assert docx.Document(io.BytesIO(dl.content)).tables[0].cell(3, 1).text == "1234567890123"
@@ -958,25 +970,26 @@ def test_r1_a4_approval_is_bound_to_the_verified_bytes_and_revision(api):
     required = [h["item_id"] for h in run["report"]["hitl_checklist"] if h["required"]]
     body = {"reviewer": "架空 花子", "checked": required}
     url = f"/api/runs/{rid}/approve"
+    sha = run["filled"]["sha256"]
     # (b) a stale view (other hash / other revision) is refused
-    assert api.post(url, json={**body, "filled_sha256": "0" * 64}).status_code == 409
-    assert api.post(url, json={**body, "revision": 7}).status_code == 409
+    assert api.post(url, json={**body, "filled_sha256": "0" * 64, "revision": 0}).status_code == 409
+    assert api.post(url, json={**body, "filled_sha256": sha, "revision": 7}).status_code == 409
     # (a) the file was changed on disk after verification, before approval
     path.write_bytes(good + b"tampered")
-    assert api.post(url, json={**body, "filled_sha256": run["filled"]["sha256"], "revision": 0}).status_code == 409
+    assert api.post(url, json={**body, "filled_sha256": sha, "revision": 0}).status_code == 409
     path.write_bytes(good)
-    ok = api.post(url, json={**body, "filled_sha256": run["filled"]["sha256"], "revision": 0})
+    ok = api.post(url, json={**body, "filled_sha256": sha, "revision": 0})
     assert ok.status_code == 200 and ok.json()["filled_sha256"] == st.verified_sha256 and ok.json()["revision"] == 0
     # (c) the file was changed after approval: download refuses
     path.write_bytes(good[:-8] + b"XXXXXXXX")
-    assert api.get(f"/api/runs/{rid}/download").status_code == 409
+    assert api.get(ok.json()["download_url"]).status_code == 409
     path.write_bytes(good)
-    dl = api.get(f"/api/runs/{rid}/download")
+    dl = api.get(ok.json()["download_url"])
     assert dl.status_code == 200 and dl.content == good  # the exact verified bytes, served from memory
     # an edit creates a new revision and clears the approval; the old view can no longer approve
     edited = api.post(f"/api/runs/{rid}/overrides", json={"values": {"所属部局": "理工学研究科"}}).json()
     assert edited["revision"] == 1 and edited["approval"] is None
-    assert api.post(url, json={**body, "revision": 0}).status_code == 409
+    assert api.post(url, json={**body, "filled_sha256": sha, "revision": 0}).status_code == 409
 
 
 # ------------------------------------------------------------ #5 R1-A5 --verify
@@ -1306,11 +1319,13 @@ def test_r1_a18_reviewer_can_correct_an_ai_filled_field(api):
     rid = run["run_id"]
     assert {m["slot_id"]: m for m in run["mappings"]}["所属部局"]["status"] == "filled"
     required = [h["item_id"] for h in run["report"]["hitl_checklist"] if h["required"]]
-    assert api.post(f"/api/runs/{rid}/approve", json={"reviewer": "架空 花子", "checked": required}).status_code == 200
+    assert api.post(f"/api/runs/{rid}/approve", json={"reviewer": "架空 花子", "checked": required,
+                                                     **_seen(run)}).status_code == 200
     edited = api.post(f"/api/runs/{rid}/overrides", json={"values": {"所属部局": "理工学研究科 機械システム専攻"}}).json()
     m = {x["slot_id"]: x for x in edited["mappings"]}["所属部局"]
     assert m["status"] == "human_entered" and m["filled_value"] == "理工学研究科 機械システム専攻"
-    assert edited["approval"] is None and api.get(f"/api/runs/{rid}/download").status_code == 403
+    assert edited["approval"] is None and api.get(edited["links"]["download"]).status_code == 403
+    assert api.get(run["links"]["download"]).status_code == 403  # the old link: no approval for any revision
     js = (ROOT / "form_guard" / "static" / "app.js").read_text(encoding="utf-8")
     detail = js[js.index("function renderDetail") : js.index("function editControl")]
     assert "editControl(s, m)" in detail and "needs_human_input" not in detail.split("editControl(s, m)")[1][:40]
@@ -1583,17 +1598,18 @@ def test_p00_verified_sha256_is_recorded_once_and_enforced_on_approve_and_downlo
     approve = {"reviewer": "架空 花子", "checked": required, "filled_sha256": st.verified_sha256, "revision": 0}
     assert api.post(f"/api/runs/{rid}/approve", json=approve).status_code == 200
     url = f"/api/runs/{rid}/download"
-    assert api.get(url, params={"filled_sha256": "0" * 64}).status_code == 409  # stale hash from the client
-    assert api.get(url, params={"revision": 3}).status_code == 409  # stale revision from the client
-    ok = api.get(url, params={"filled_sha256": st.verified_sha256, "revision": 0})
+    current = {"filled_sha256": st.verified_sha256, "revision": 0}
+    assert api.get(url, params={**current, "filled_sha256": "0" * 64}).status_code == 409  # stale hash from the client
+    assert api.get(url, params={**current, "revision": 3}).status_code == 409  # stale revision from the client
+    ok = api.get(url, params=current)
     assert ok.status_code == 200 and hashlib.sha256(ok.content).hexdigest() == st.verified_sha256
     path = st.result.filled_path
     good = path.read_bytes()
     path.write_bytes(good + b"x")  # the file on disk differs from the verified bytes
-    assert api.get(url).status_code == 409
+    assert api.get(url, params=current).status_code == 409
     assert api.post(f"/api/runs/{rid}/approve", json=approve).status_code == 409
     path.write_bytes(good)
-    assert api.get(url).status_code == 200
+    assert api.get(url, params=current).status_code == 200
     assert api.post("/api/runs", json={"demo_id": "form1", "mode": "demo", "model_tier": "gpt"}).status_code == 422
 
 
@@ -3144,3 +3160,587 @@ def test_readme_and_docs_describe_the_two_stage_hooks_fallback_chain_and_archive
     assert "**No subagent has a file-editing tool (`Edit`/`Write`)**" in doc and "Hooks**（2 段）" in doc
     for name in ("研究設備共用利用申請書", "地域防災備蓄品貸出申請書"):  # the retitled unmarked forms
         assert name not in readme and name not in doc, name
+
+
+# ===================================================== R1 (Phase 2/3 dual audit) fixes
+# One block per finding of the dual audit of Phase 2/3 (R1-A1 … R1-A12, R1-O1 … R1-O6). Each test fails on the code
+# before the fix and documents the exact failure mode it guards against.
+
+
+def _required(run):
+    return [h["item_id"] for h in run["report"]["hitl_checklist"] if h["required"]]
+
+
+# ------------------------------------------- R1-A1 approve / download require filled_sha256 + revision
+
+
+def test_r1_audit_a1_approve_and_download_require_the_sha256_and_revision_on_screen(api):
+    run = api.post("/api/runs", json={"demo_id": "form1", "mode": "demo"}).json()
+    rid, sha = run["run_id"], run["filled"]["sha256"]
+    st = api.app.state.store.runs[rid]
+    url = f"/api/runs/{rid}/approve"
+    body = {"reviewer": "架空 花子", "checked": _required(run)}
+    missing_or_bad = [{}, {"revision": 0}, {"filled_sha256": sha}, {"filled_sha256": None, "revision": 0},
+                      {"filled_sha256": sha, "revision": None}, {"filled_sha256": "", "revision": 0},
+                      {"filled_sha256": sha[:-1], "revision": 0}, {"filled_sha256": sha + "a", "revision": 0},
+                      {"filled_sha256": "g" * 64, "revision": 0}, {"filled_sha256": sha, "revision": -1},
+                      {"filled_sha256": sha, "revision": "0"}, {"filled_sha256": sha, "revision": True},
+                      {"filled_sha256": sha, "revision": 0.5}]
+    for extra in missing_or_bad:  # before the fix a client that simply left them out was approved
+        assert api.post(url, json={**body, **extra}).status_code == 422, extra
+    assert st.approval is None
+    assert api.post(url, json={**body, "filled_sha256": "0" * 64, "revision": 0}).status_code == 409  # stale file
+    assert api.post(url, json={**body, "filled_sha256": sha, "revision": 1}).status_code == 409       # stale revision
+    ok = api.post(url, json={**body, "filled_sha256": sha.upper(), "revision": 0})  # hex case does not matter
+    assert ok.status_code == 200 and ok.json()["filled_sha256"] == sha
+    link = f"/api/runs/{rid}/download?filled_sha256={sha}&revision=0"
+    assert ok.json()["download_url"] == link and api.get(f"/api/runs/{rid}").json()["links"]["download"] == link
+    dl_url = f"/api/runs/{rid}/download"
+    for params in ({}, {"revision": 0}, {"filled_sha256": sha}, {"filled_sha256": "xyz", "revision": 0},
+                   {"filled_sha256": sha, "revision": -1}, {"filled_sha256": sha, "revision": "one"}):
+        assert api.get(dl_url, params=params).status_code == 422, params  # was: a bare /download served the file
+    assert api.get(dl_url, params={"filled_sha256": "0" * 64, "revision": 0}).status_code == 409
+    assert api.get(dl_url, params={"filled_sha256": sha, "revision": 4}).status_code == 409
+    dl = api.get(link)
+    assert dl.status_code == 200 and hashlib.sha256(dl.content).hexdigest() == sha
+    js = (ROOT / "form_guard" / "static" / "app.js").read_text(encoding="utf-8")
+    assert "filled_sha256: S.run.filled.sha256, revision: S.run.revision" in js  # the approve POST
+    approval = js[js.index("function downloadHref") : js.index("/* ---", js.index("function renderApproval"))]
+    assert "download?filled_sha256=${encodeURIComponent(a.filled_sha256)}" in approval
+    assert "&revision=${encodeURIComponent(a.revision)}" in approval and "dl.href = downloadHref(r);" in approval
+    assert "r.links.download" not in approval
+
+
+# --------------------------------------------- R1-A2 one re-entrant lock: every response is one snapshot
+
+
+def test_r1_audit_a2_concurrent_reads_and_edits_always_see_a_consistent_snapshot(api):
+    import threading
+
+    from fastapi.testclient import TestClient
+
+    from form_guard.server import _payload
+
+    run = api.post("/api/runs", json={"demo_id": "form2", "mode": "demo"}).json()
+    rid = run["run_id"]
+    st = api.app.state.store.runs[rid]
+    assert isinstance(st.lock, type(threading.RLock()))
+    with st.lock:  # re-entrant: a payload built while the lock is held (as overrides / approve do) never deadlocks
+        assert _payload(rid, st)["revision"] == 0
+
+    def field(d):
+        return next(m["filled_value"] for m in d["mappings"] if m["slot_id"] == "所在地")
+
+    values = ["架空県模擬市中央1-2-3", "架空県模擬市北町4-5-6"]
+    posted = {0: (field(run), run["filled"]["sha256"])}
+    seen, errors = [], []
+    done = threading.Event()
+
+    def writer():
+        client = TestClient(api.app)
+        try:
+            for i in range(8):
+                d = client.post(f"/api/runs/{rid}/overrides", json={"values": {"所在地": values[i % 2]}}).json()
+                posted[d["revision"]] = (field(d), d["filled"]["sha256"])
+        except Exception as exc:  # noqa: BLE001 - reported below
+            errors.append(exc)
+        finally:
+            done.set()
+
+    def reader():
+        client = TestClient(api.app)
+        try:
+            while not done.is_set():
+                d = client.get(f"/api/runs/{rid}").json()
+                seen.append((d["revision"], field(d), d["filled"]["sha256"], d["links"]["download"]))
+        except Exception as exc:  # noqa: BLE001 - reported below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=writer)] + [threading.Thread(target=reader) for _ in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=300)
+    assert not errors and not any(t.is_alive() for t in threads)
+    assert sorted(posted) == list(range(9)) and len({sha for _v, sha in list(posted.values())[1:]}) == 2
+    assert len(seen) >= 3
+    for rev, value, sha, link in seen:  # the value, the SHA-256 and the link always belong to the same revision
+        assert (value, sha) == posted[rev], rev
+        assert link.endswith(f"?filled_sha256={sha}&revision={rev}"), rev
+    final = api.get(f"/api/runs/{rid}").json()
+    assert final["revision"] == 8 and (field(final), final["filled"]["sha256"]) == posted[8]
+
+
+# --------------------------------------- R1-A3 designated Excel cells: strict, namespace-aware inline strings
+
+
+def test_r1_audit_a3_excel_designated_cells_must_be_exactly_one_spreadsheetml_inline_string(tmp_path):
+    src, sc, out, w, maps = _designated_xlsx(tmp_path)
+    good = verify(sc, out, maps, "")
+    assert good.overall_status == "PASS" and "4 slot cell(s) read back as the approved text" in check(good, "APP-01").details
+    cell = '<c r="B2" s="1" t="inlineStr"><is><t>架空町内会</t></is></c>'.encode()
+    assert cell in zipfile.ZipFile(out).read("xl/worksheets/sheet1.xml")
+    # Before the fix seven of these passed every check (reverting the designated cell hid them), is_attribute crashed
+    # the verifier inside openpyxl, and foreign_namespace was caught only by XML-02 (its new namespace declaration).
+    attacks = {
+        "wrapper_in_is": cell.replace(b"<is><t>", b"<is><extLst/><t>"),
+        "comment_in_c": cell.replace(b"<is>", b"<!--x--><is>"),
+        "pi_in_is": cell.replace(b"<is>", b"<is><?fg x?>"),
+        "loose_text": cell.replace(b"</t></is>", b"</t>tail</is>"),
+        "text_in_c": cell.replace(b"</is></c>", b"</is>x</c>"),
+        "t_attribute": cell.replace(b"<t>", b'<t foo="1">'),
+        "t_space_default": cell.replace(b"<t>", b'<t xml:space="default">'),
+        "is_attribute": cell.replace(b"<is>", b'<is foo="1">'),
+        "foreign_namespace": cell.replace(b"<is><t>", b'<x:is xmlns:x="urn:fg-test"><x:t>').replace(
+            b"</t></is>", b"</x:t></x:is>"),
+    }
+    for name, new in attacks.items():
+        bad = tmp_path / f"a3_{name}.xlsx"
+        surgical_rewrite(out, bad, "xl/worksheets/sheet1.xml", lambda b, new=new: b.replace(cell, new))
+        rep = verify(sc, bad, maps, "")
+        assert "XML-03" in _failing(rep) and rep.overall_status == "FAIL", (name, _failing(rep))
+        assert any(i.startswith("団体名: B2") for i in check(rep, "XML-03").evidence["designated_cell_issues"]), name
+    rep = verify(sc, tmp_path / "a3_foreign_namespace.xlsx", maps, "")
+    assert {"XML-03", "TEXT-02", "APP-01"} <= _failing(rep)  # and openpyxl cannot read the value at all
+    assert "openpyxl reads 申請!B2 as «None», expected «架空町内会»" in check(rep, "APP-01").details
+    assert any("no spreadsheetml inline string" in i for i in _cell_issues(rep))
+    rep = verify(sc, tmp_path / "a3_t_space_default.xlsx", maps, "")
+    assert any('may carry only xml:space="preserve"' in i for i in _cell_issues(rep))
+
+
+def test_r1_audit_a3_an_unfilled_designated_excel_cell_must_stay_absent_or_identical(tmp_path):
+    from openpyxl.styles import Border, Side
+
+    src, out = tmp_path / "pending.xlsx", tmp_path / "pending_filled.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "申請"
+    ws["A1"], ws["A2"], ws["A3"] = "架空の申請書（テスト）", "団体名", "担当者"
+    ws["B3"].border = Border(bottom=Side(style="thin"))
+    wb.save(src)
+    sc = scan(src, {"targets": [{"slot_id": "団体名", "sheet": 0, "cell": "B2"}, {"slot_id": "担当者", "sheet": 0, "cell": "B3"},
+                                {"slot_id": "追記", "sheet": 0, "cell": "D9"}]})
+    fill_form(sc, {"団体名": "架空町内会"}, out)  # 担当者 and 追記 stay empty: awaiting human input
+    maps = [human_mapping(sc.slot("団体名"), "架空町内会")]
+    rep = verify(sc, out, maps, "")
+    assert rep.overall_status == "NEEDS_HUMAN_INPUT" and not _failing(rep)
+    b3 = re.search(rb'<c r="B3" s="\d+" t="n"></c>', zipfile.ZipFile(out).read("xl/worksheets/sheet1.xml")).group(0)
+    attacks = {  # the revert step removed / restored these cells, so they passed before the fix
+        "styled_new_cell": lambda b: b.replace(b"</sheetData>", b'<row r="9"><c r="D9" s="1"/></row></sheetData>'),
+        "empty_inline_string": lambda b: b.replace(b"</sheetData>", b'<row r="9"><c r="D9" t="inlineStr"/></row></sheetData>'),
+        "retyped_existing": lambda b: b.replace(b3, b3.replace(b't="n"', b't="s"')),
+        "restyled_existing": lambda b: b.replace(b3, re.sub(rb's="\d+"', b's="0"', b3)),
+    }
+    for name, fn in attacks.items():
+        bad = tmp_path / f"pending_{name}.xlsx"
+        surgical_rewrite(out, bad, "xl/worksheets/sheet1.xml", fn)
+        rep = verify(sc, bad, maps, "")
+        assert "XML-03" in _failing(rep) and rep.overall_status == "FAIL", (name, _failing(rep))
+        assert any("was left unfilled but differs from the blank form's cell" in i for i in _cell_issues(rep)), name
+
+
+def test_r1_audit_a3_openpyxl_reads_every_filled_excel_slot_back_as_the_approved_text(demo_runs, tmp_path):
+    from form_guard.verifier import _app_check, expected_sheet_values
+
+    r = demo_runs("form3")  # marker cells (inline and shared strings) of a demo form
+    assert expected_sheet_values(r.scan, {m.slot_id: m.filled_value for m in r.mappings if m.is_written})
+    assert "slot cell(s) read back as the approved text" in check(r.report, "APP-01").details
+    src, sc, out, w, maps = _designated_xlsx(tmp_path)
+    checks = []
+    _app_check("xlsx", out.read_bytes(), checks, [("申請", "B2", "別の値", "団体名"), ("申請", "B3", "模擬 太郎", "担当者")])
+    (app,) = checks
+    assert not app.passed and app.details == "団体名: openpyxl reads 申請!B2 as «架空町内会», expected «別の値»"
+
+
+# ---------------------------- R1-A4 / R1-A5 / R1-O1 office-only & not_a_field cannot be bypassed
+
+
+def test_r1_audit_a4_live_classification_must_cover_every_candidate_exactly_once(samples_dir, fake_client_factory):
+    form = unmarked(samples_dir, "form4")["form"]
+    rules = discover_blank_cells(form)
+    cells = [{"candidate_id": c["candidate_id"], "role": "applicant_fillable", "reason": "label"}
+             for c in rules["candidates"] if c["candidate_id"] != "c01"]  # c01 申請日 left out
+    cells += [{"candidate_id": "c02", "role": "office_only", "reason": "again"},  # c02 answered twice
+              {"candidate_id": "c99", "role": "applicant_fillable", "reason": "no such candidate"}]
+    d = discover_blank_cells(form, mode="live", client=fake_client_factory([echo_model({"cells": cells})]))
+    by = {c["candidate_id"]: c for c in d["candidates"]}
+    for cid in ("c01", "c02"):  # before the fix c01 stayed recommended and c02 took whichever answer came last
+        assert (by[cid]["classified"], by[cid]["applicant_fillable"], by[cid]["recommended"]) == (False, False, False), cid
+        assert by[cid]["category"] == "unclassified" and "not classified by the model" in by[cid]["reason"]
+    assert d["engine"]["classification_issues"] == {"missing": ["c01"], "duplicated": ["c02"], "unknown": ["c99"]}
+    assert recommended_ids(d) == ["c03", "c04", "c05", "c06", "c07"] and by["c03"]["classified"]
+    with pytest.raises(ValueError, match="c01: not classified as an applicant field — never fillable"):
+        build_confirmed_slot_spec(d, ["c01"], form)
+    silent = discover_blank_cells(form, mode="live", client=fake_client_factory([echo_model({"cells": []})]))
+    assert recommended_ids(silent) == [] and not any(c["classified"] for c in silent["candidates"])
+    assert [c["category"] for c in silent["candidates"]] == ["unclassified"] * 7 + ["office_only"] * 4
+
+
+def test_r1_audit_o1_confirmed_cells_are_rechecked_against_a_fresh_discovery_of_the_blank_form(samples_dir):
+    import copy
+
+    p = unmarked(samples_dir, "form4")
+    d = discover_blank_cells(p["form"])
+    stamp = next(c for c in d["candidates"] if c["slot_id"] == "受付番号")
+
+    def edited(cid, **changes):
+        t = copy.deepcopy(d)
+        next(c for c in t["candidates"] if c["candidate_id"] == cid).update(changes)
+        return t
+
+    # coordinate tampering: applicant candidate c01 re-pointed at the office-only 受付番号 cell (filled before the fix)
+    with pytest.raises(ValueError, match="c01: office/administrative use only"):
+        build_confirmed_slot_spec(edited("c01", row=stamp["row"], col=stamp["col"]), ["c01"], p["form"])
+    # every office flag scrubbed from the report: the fresh discovery of the actual form still refuses the cell
+    scrubbed = copy.deepcopy(d)
+    for c in scrubbed["candidates"]:
+        c.update(office_only=False, applicant_fillable=True, recommended=True, category="applicant_fillable",
+                 office_keywords=[], reason="applicant")
+    with pytest.raises(ValueError, match="office/administrative use only"):
+        build_confirmed_slot_spec(scrubbed, [stamp["candidate_id"]], p["form"])
+    # coordinates that are no blank-cell candidate of the form (a printed label, outside the table, wrong file type)
+    for change in ({"col": 0}, {"row": 99}, {"table": 7}, {"file_type": "xlsx"}):
+        with pytest.raises(ValueError, match="not a blank-cell candidate of the current form"):
+            build_confirmed_slot_spec(edited("c01", **change), ["c01"], p["form"])
+    # not_a_field and non-applicant cells are never fillable — not even with the internal office-only override
+    for change in ({"category": "not_a_field"}, {"claude_role": "not_a_field"}, {"applicant_fillable": False}):
+        for allow in (False, True):
+            with pytest.raises(ValueError, match="never fillable"):
+                build_confirmed_slot_spec(edited("c03", **change), ["c03"], p["form"], allow_office_only=allow)
+    # tampered slot ids, labels and printed rules have no effect: the spec is built from the fresh candidates
+    spec = build_confirmed_slot_spec(edited("c04", slot_id="受付番号", label="x", max_chars=5000, constraints={},
+                                            required_format="text"), ["c04"], p["form"])
+    assert [(t["slot_id"], t["table"], t["row"], t["col"]) for t in spec["targets"]] == [("利用目的", 0, 6, 2)]
+    assert spec["slots"]["利用目的"]["max_chars"] == 100 and spec["confirmed_candidates"] == ["c04"]
+    # the blank form is required (or a report that names it)
+    with pytest.raises(ValueError, match="current_form_path is required"):
+        build_confirmed_slot_spec(d, ["c01"])
+    assert build_confirmed_slot_spec({**d, "form_path": str(p["form"])}, ["c01"]) == build_confirmed_slot_spec(d, ["c01"], p["form"])
+    # the same on the .xlsx form: 申請日 (C5) re-pointed at the 事務局使用欄 stamp cell (C18), then at the SUM formula cell
+    p5 = unmarked(samples_dir, "form5")
+    t5 = copy.deepcopy(discover_blank_cells(p5["form"]))
+    c01 = next(c for c in t5["candidates"] if c["candidate_id"] == "c01")
+    assert c01["cell"] == "C5"
+    c01["cell"] = "C18"
+    with pytest.raises(ValueError, match="office/administrative use only"):
+        build_confirmed_slot_spec(t5, ["c01"], p5["form"])
+    c01["cell"] = "E16"
+    with pytest.raises(ValueError, match="not a blank-cell candidate"):
+        build_confirmed_slot_spec(t5, ["c01"], p5["form"])
+
+
+def test_r1_audit_a5_slot_specs_designating_office_only_cells_are_refused_before_filling(api, samples_dir, tmp_path,
+                                                                                        capsys):
+    from form_guard.cli import main
+    from form_guard.mcp_server import FormGuardMCP
+
+    p = unmarked(samples_dir, "form4")
+    memo = read_memo(p["memo"])
+    office = {"targets": [{"slot_id": "申請日", "table": 0, "row": 1, "col": 2},
+                          {"slot_id": "受付", "table": 0, "row": 12, "col": 2}]}  # 受付番号（事務局記入欄）
+    (found,) = office_only_targets(p["form"], office)
+    assert found.startswith("受付 → table 0 row 12 col 2 (") and "受付番号" in found
+    out = tmp_path / "office"
+    with pytest.raises(ValueError, match="refused before filling — the slot spec designates office-only cell"):
+        run_pipeline(p["form"], memo, out, mode="demo", slot_spec=office)  # before the fix: 受付 became a fill target
+    assert not out.exists()
+    applicant = {"targets": office["targets"][:1]}
+    assert office_only_targets(p["form"], applicant) == []
+    assert run_pipeline(p["form"], memo, tmp_path / "ok", mode="demo", slot_spec=applicant).report.overall_status == "PASS"
+    forced = run_pipeline(p["form"], memo, tmp_path / "forced", mode="demo", slot_spec=office, allow_office_only=True)
+    assert forced.filled_path.is_file()  # only the internal override lifts the guard
+    side = tmp_path / "side" / p["form"].name  # a sidecar .slots.json is checked the same way
+    side.parent.mkdir()
+    shutil.copy(p["form"], side)
+    side.with_suffix(".slots.json").write_text(json.dumps(office, ensure_ascii=False), encoding="utf-8")
+    with pytest.raises(ValueError, match="office-only"):
+        run_pipeline(side, memo, tmp_path / "side_out", mode="demo")
+    # CLI --slot-spec: a clean refusal (exit code 2), no traceback and no output folder
+    spec_file = tmp_path / "office.slots.json"
+    spec_file.write_text(json.dumps(office, ensure_ascii=False), encoding="utf-8")
+    cli_out = tmp_path / "cli_out"
+    assert main(["--form", str(p["form"]), "--memo", str(p["memo"]), "--slot-spec", str(spec_file),
+                 "--out-dir", str(cli_out), "--mode", "demo"]) == 2
+    assert "refused before filling" in capsys.readouterr().err and not cli_out.exists()
+    # a cell discovery does not list (its label is a sentence) is judged by the nearest printed text around it
+    doc = tmp_path / "note.docx"
+    dd = docx.Document()
+    t = dd.add_table(rows=2, cols=2)
+    t.cell(0, 0).text = "申請者名"
+    t.cell(1, 0).text = "※この欄は事務局が記入しますので、申請者は何も記入しないでください。"
+    dd.save(doc)
+    assert [c["row"] for c in discover_blank_cells(doc)["candidates"]] == [0]
+    hidden = office_only_targets(doc, {"targets": [{"slot_id": "メモ", "table": 0, "row": 1, "col": 1}]})
+    assert len(hidden) == 1 and "事務局" in hidden[0]
+    assert office_only_targets(doc, {"targets": [{"slot_id": "名", "table": 0, "row": 0, "col": 1}]}) == []
+    xl = tmp_path / "note.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active["A1"], wb.active["A2"] = "申請者名", "※この欄は事務局が記入しますので、申請者は何も記入しないでください。"
+    wb.save(xl)
+    assert office_only_targets(xl, {"targets": [{"slot_id": "メモ", "sheet": 0, "cell": "B2"}]})
+    assert office_only_targets(xl, {"targets": [{"slot_id": "名", "sheet": 0, "cell": "B1"}]}) == []
+    # MCP: a slot_spec_path designating an office-only cell is refused, and nothing is written
+    root = _mcp_root(tmp_path, samples_dir)
+    (root / "office.slots.json").write_text(json.dumps(office, ensure_ascii=False), encoding="utf-8")
+    res = FormGuardMCP(root=root).call_tool("form_guard_fill", {
+        "form_path": "samples/blank_forms/form4_unmarked_blank.docx", "memo_path": "samples/memos/memo4_equipment_use.txt",
+        "slot_spec_path": "office.slots.json"})
+    assert res["isError"] and "refused before filling" in res["content"][0]["text"]
+    assert "office/administrative use only" in res["content"][0]["text"] and not (root / "output").exists()
+    # web: an uploaded slot spec gets the same answer
+    up = api.post("/api/runs/upload", files={"file": ("form4.docx", p["form"].read_bytes()),
+                                             "slot_spec": ("office.json", json.dumps(office).encode())},
+                  data={"memo_text": memo, "mode": "demo"})
+    assert up.status_code == 422 and "office-only" in up.json()["detail"]
+
+
+# ------------------------------------------------- R1-A6 MCP draft -> web sign-off of the exact same file
+
+
+def test_r1_audit_a6_an_mcp_draft_is_signed_off_in_the_web_app_as_the_exact_same_file(samples_dir, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from form_guard.mcp_server import APPROVAL_STATUS, FormGuardMCP
+    from form_guard.server import create_app
+
+    root = _mcp_root(tmp_path, samples_dir)
+    srv = FormGuardMCP(root=root)
+    form1, memo1 = "samples/blank_forms/form1_research_plan_change.docx", "samples/memos/memo1_research_change.txt"
+    f = srv.call_tool("form_guard_fill", {"form_path": form1, "memo_path": memo1})["structuredContent"]
+    rid = f["run_id"]
+    assert f["review_url"] == f"http://127.0.0.1:8000/?run_id={rid}" and f["engine"]["mode"] == "demo"
+    assert f["verification"]["overall_status"] == "PASS" and f["web_handoff"] == f"output/mcp_runs/{rid}/web_handoff.json"
+    handoff = json.loads((root / f["web_handoff"]).read_text(encoding="utf-8"))
+    assert handoff["approval_status"] == APPROVAL_STATUS and handoff["filled_sha256"] == f["filled_sha256"]
+    assert (root / f["out_dir"] / handoff["form"]["blank_copy"]).read_bytes() == (root / form1).read_bytes()
+    draft = (root / f["draft_path"]).read_bytes()
+    app = create_app(run_root=tmp_path / "web_runs", samples_dir=samples_dir, project_root=root,
+                     import_roots=[root / "output" / "mcp_runs", root / "output"])
+    api = TestClient(app)
+    run = api.get(f"/api/runs/{rid}").json()  # what /?run_id=<id> fetches: imported and re-verified on first use
+    assert (run["run_id"], run["revision"], run["filled"]["sha256"]) == (rid, 0, f["filled_sha256"])
+    assert run["imported_from"] == f"output/mcp_runs/{rid}" and run["can_approve"]
+    assert run["report"]["overall_status"] == "PASS" and run["report"]["passed_count"] == 21
+    assert [m["filled_value"] for m in run["mappings"]] == [x["value"] for x in f["fields"]]  # no model re-ran
+    assert app.state.store.runs[rid].verified_bytes == draft
+    appr = api.post(f"/api/runs/{rid}/approve", json={"reviewer": "架空 花子", "checked": _required(run),
+                                                     **_seen(run)}).json()
+    assert appr["approved"] and appr["source_draft"] == f"output/mcp_runs/{rid}"
+    dl = api.get(appr["download_url"])
+    assert dl.status_code == 200 and dl.content == draft  # exactly the bytes the MCP tool wrote
+    assert api.post("/api/runs/import", json={"run_id": rid}).json()["approval"]["reviewer"] == "架空 花子"
+    # a draft that still needs a human value is completed, re-verified and signed off in the web app
+    form2, memo2 = "samples/blank_forms/form2_municipal_equipment_subsidy.docx", "samples/memos/memo2_subsidy_application.txt"
+    f2 = srv.call_tool("form_guard_fill", {"form_path": form2, "memo_path": memo2})["structuredContent"]
+    run2 = api.post("/api/runs/import", json={"run_dir": f"output/mcp_runs/{f2['run_id']}"}).json()
+    assert run2["report"]["pending_slots"] == ["法人番号"] and not run2["can_approve"]
+    ok = api.post(f"/api/runs/{f2['run_id']}/overrides", json={"values": {"法人番号": "1234567890123"}}).json()
+    assert ok["revision"] == 1 and ok["report"]["overall_status"] == "PASS"
+    appr2 = api.post(f"/api/runs/{f2['run_id']}/approve", json={"reviewer": "架空 花子", "checked": _required(ok),
+                                                               **_seen(ok)}).json()
+    assert hashlib.sha256(api.get(appr2["download_url"]).content).hexdigest() == ok["filled"]["sha256"]
+    assert hashlib.sha256((root / f2["draft_path"]).read_bytes()).hexdigest() == f2["filled_sha256"]  # MCP copy untouched
+    # a draft changed after MCP wrote it is refused (409) and never registered
+    f3 = srv.call_tool("form_guard_fill", {"form_path": form1, "memo_path": memo1})["structuredContent"]
+    d3 = root / f3["draft_path"]
+    d3.write_bytes(d3.read_bytes() + b"x")
+    res = api.post("/api/runs/import", json={"run_id": f3["run_id"]})
+    assert res.status_code == 409 and "SHA-256" in res.json()["detail"]
+    assert api.get(f"/api/runs/{f3['run_id']}").status_code == 409 and f3["run_id"] not in app.state.store.runs
+    # re-sealed (draft, audit log and hand-off hashes all rewritten) but altered: verification refuses it (422)
+    f4 = srv.call_tool("form_guard_fill", {"form_path": form1, "memo_path": memo1})["structuredContent"]
+    d4, tmp = root / f4["draft_path"], tmp_path / "resealed.docx"
+    surgical_rewrite(d4, tmp, "word/document.xml", lambda b: b.replace("研究".encode(), "研修".encode(), 1))
+    shutil.copy(tmp, d4)
+    new_sha = hashlib.sha256(d4.read_bytes()).hexdigest()
+    for name, keys in (("audit_log.json", [("filled", "sha256")]),
+                       ("web_handoff.json", [("filled", "sha256"), ("filled_sha256",)])):
+        p_ = root / f4["out_dir"] / name
+        data = json.loads(p_.read_text(encoding="utf-8"))
+        for key in keys:
+            (data[key[0]].__setitem__(key[1], new_sha) if len(key) == 2 else data.__setitem__(key[0], new_sha))
+        p_.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    res = api.post("/api/runs/import", json={"run_id": f4["run_id"]})
+    assert res.status_code == 422 and "fails re-verification" in res.json()["detail"] and "TEXT-01" in res.json()["detail"]
+    # a swapped blank form copy is refused too
+    f5 = srv.call_tool("form_guard_fill", {"form_path": form1, "memo_path": memo1})["structuredContent"]
+    (root / f5["out_dir"] / "_blank" / "form1_research_plan_change.docx").write_bytes((root / form2).read_bytes())
+    res = api.post("/api/runs/import", json={"run_id": f5["run_id"]})
+    assert res.status_code == 409 and "blank form copy" in res.json()["detail"]
+    # only run ids / run folders under output/mcp_runs or output are accepted
+    assert api.post("/api/runs/import", json={}).status_code == 400
+    assert api.post("/api/runs/import", json={"run_id": rid, "run_dir": f["out_dir"]}).status_code == 400
+    assert api.post("/api/runs/import", json={"run_id": "../../etc/passwd"}).status_code == 400
+    assert api.post("/api/runs/import", json={"run_dir": str(tmp_path)}).status_code == 400
+    assert api.post("/api/runs/import", json={"run_dir": f"output/mcp_runs/{rid}/../../.."}).status_code == 400
+    assert api.post("/api/runs/import", json={"run_id": "20991231-235959-abcdef"}).status_code == 404
+    assert api.post("/api/runs/import", json={"run_id": rid, "approve": True}).status_code == 422
+    assert api.get("/api/runs/20991231-235959-abcdef").status_code == 404
+    js = (ROOT / "form_guard" / "static" / "app.js").read_text(encoding="utf-8")
+    assert 'new URLSearchParams(location.search).get("run_id")' in js
+    assert "if (!(await openRunFromQuery())) await handleDeepLink();" in js
+    assert "setRun(await api(`/api/runs/${encodeURIComponent(id)}`), true);" in js
+
+
+# ---------------- R1-A10 / R1-O3 / R1-O6 MCP message limits, demo by default, open-world hints, credential paths
+
+
+def _rpc_answers(raw: bytes) -> list:
+    """What serve() wrote: Content-Length framed and newline-delimited answers, in order."""
+    out, buf = [], io.BytesIO(raw)
+    while True:
+        line = buf.readline()
+        if not line:
+            return out
+        if line.lower().startswith(b"content-length:"):
+            n = int(line.split(b":")[1])
+            buf.readline()
+            out.append(json.loads(buf.read(n)))
+        elif line.strip():
+            out.append(json.loads(line))
+
+
+def test_r1_audit_a10_mcp_messages_are_capped_and_never_read_with_a_negative_length(samples_dir, tmp_path, monkeypatch):
+    from form_guard import mcp_server as m
+
+    assert m.MAX_MCP_MESSAGE_BYTES == 10 * 1024 * 1024
+    srv = m.FormGuardMCP(root=_mcp_root(tmp_path, samples_dir))
+    ping = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode()
+    framed_ping = b"Content-Length: %d\r\n\r\n" % len(ping) + ping
+
+    def serve(raw: bytes) -> list:
+        out = io.BytesIO()
+        m.serve(srv, stdin=io.BytesIO(raw), stdout=out)
+        return _rpc_answers(out.getvalue())
+
+    neg = serve(b"Content-Length: -5\r\n\r\n" + framed_ping)  # before the fix: read(-5) swallowed the whole stream
+    assert neg[0]["error"]["code"] == -32600 and "negative Content-Length" in neg[0]["error"]["message"]
+    assert neg[1] == {"jsonrpc": "2.0", "id": 1, "result": {}}  # the stream stays in step
+    assert serve(b"Content-Length: 12abc\r\n\r\n" + framed_ping)[0]["error"]["code"] == -32700
+    cut = serve(b"Content-Length: 500\r\n\r\n" + ping)  # EOF inside the body
+    assert len(cut) == 1 and cut[0]["error"]["code"] == -32700 and "EOF after" in cut[0]["error"]["message"]
+    monkeypatch.setattr(m, "MAX_MCP_MESSAGE_BYTES", 256)  # the same logic as with 10 MB, without allocating 10 MB
+    big = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping", "params": {"pad": "x" * 400}}).encode()
+    over = serve(b"Content-Length: %d\r\n\r\n" % len(big) + big + framed_ping)
+    assert over[0]["error"]["code"] == -32700 and "exceeds the 256-byte message limit" in over[0]["error"]["message"]
+    assert len(over) == 2 and over[1]["result"] == {}  # the refused body was skipped, never parsed
+    line = serve(big + b"\n" + ping + b"\n")
+    assert line[0]["error"]["code"] == -32700 and "message larger than 256 bytes" in line[0]["error"]["message"]
+    assert len(line) == 2 and line[1]["result"] == {}
+    huge = serve(b"Content-Length: 99999999999999\r\n\r\n")  # nothing is allocated; the stream simply ends
+    assert len(huge) == 1 and huge[0]["error"]["code"] == -32700
+
+
+def test_r1_audit_o3_mcp_defaults_to_demo_mode_marks_open_world_tools_and_refuses_credential_paths(
+        samples_dir, tmp_path, fake_client_factory):
+    from form_guard import mcp_server as m
+
+    tools = {t["name"]: t for t in m.TOOLS}
+    for name in ("form_guard_fill", "form_guard_discover_blank_cells"):
+        mode = tools[name]["inputSchema"]["properties"]["mode"]
+        assert mode["default"] == "demo" and "explicit opt-in" in mode["description"], name
+        assert tools[name]["annotations"]["openWorldHint"] is True, name
+    for name in ("form_guard_list_demos", "form_guard_scan", "form_guard_verify"):
+        assert tools[name]["annotations"]["openWorldHint"] is False, name
+    root = _mcp_root(tmp_path, samples_dir)
+    client = fake_client_factory([])  # any call to Claude would fail this test
+    srv = m.FormGuardMCP(root=root, client=client)
+    form2, memo2 = "samples/blank_forms/form2_municipal_equipment_subsidy.docx", "samples/memos/memo2_subsidy_application.txt"
+    f = srv.call_tool("form_guard_fill", {"form_path": form2, "memo_path": memo2})  # no mode: offline (was "auto")
+    assert not f["isError"] and f["structuredContent"]["engine"]["mode"] == "demo"
+    disc = srv.call_tool("form_guard_discover_blank_cells", {"form_path": "samples/blank_forms/form5_unmarked_blank.xlsx"})
+    assert disc["structuredContent"]["engine"]["mode"] == "demo" and client.beta.messages.calls == []
+    (root / ".env").write_text("X=1\n", encoding="utf-8")
+    (root / ".git").mkdir()
+    (root / ".git" / "config").write_text("[core]\n", encoding="utf-8")
+    for bad in (".env", "./.env", ".ENV", ".env.local", "sub/.env.production", ".git/config", ".ssh/id_test",
+                ".claude-hackathon/settings.json", "samples/../.env", str(root / ".env"), str(root / ".git" / "config")):
+        res = srv.call_tool("form_guard_scan", {"form_path": bad})
+        assert res["isError"] and res["content"][0]["text"] == "access to .env or hidden credential files is forbidden", bad
+    res = srv.call_tool("form_guard_fill", {"form_path": form2, "memo_path": ".env"})
+    assert res["isError"] and "forbidden" in res["content"][0]["text"]
+    assert ".worktrees/" in (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()  # R1-O6
+
+
+# --------------------------- R1-A7 / R1-A11 / R1-O2 hook: e-mail domains, Unicode user names, extensions, .venv
+
+
+def test_r1_audit_a7_hook_email_domains_unicode_user_paths_and_case_insensitive_extensions(tmp_path):
+    import importlib.util
+
+    target = ROOT / "output" / "hook_probe" / "notes.md"
+    at = "@"
+    for mail in ("someone" + at + "notexample.com", "a" + at + "example.com.evil.org", "a" + at + "evil-example.jp",
+                 "team" + at + "anthropic.com", "a" + at + "mail.anthropic.com", "a" + at + "example.net"):
+        reason = _denied(_hook("PreToolUse", "Write", {"file_path": str(target), "content": "連絡先: " + mail}))
+        assert "e-mail address outside the reserved example domains" in reason and mail not in reason, mail
+    for mail in ("info" + at + "example.jp", "a" + at + "sub.example.com", "x" + at + "example.org",
+                 "noreply" + at + "anthropic.com", "NoReply" + at + "Anthropic.COM", "1234+fg" + at + "users.noreply.github.com"):
+        proc = _hook("PreToolUse", "Write", {"file_path": str(target), "content": "連絡先: " + mail})
+        assert proc.returncode == 0 and proc.stdout == b"", mail
+    name = "架空" + "太郎"  # a Japanese user name, assembled at run time
+    for path in ("C:" + _BS + "Users" + _BS + name + _BS + "x.txt", "/home/" + name + "/x", "/Users/" + name + "/x",
+                 "保存先" + "/home/" + name + "/x", "保存先" + "/Users/" + name, "D:/Users/" + name + "/a",
+                 "/c/Users/" + name + "/x", "パス：" + "C:" + _BS + "Users" + _BS + "ｋａｋｕｕ"):
+        reason = _denied(_hook("PreToolUse", "Edit", {"file_path": str(target), "old_string": "x", "new_string": path}))
+        assert "local user-profile path" in reason and name not in reason, path
+    for path in ("/home/runner/work", "/home/root/x", "/home/ubuntu/x", "/home/container/x", "/Users/<user>/x",
+                 "C:" + _BS + "Users" + _BS + "<user>" + _BS + "x", "C:" + _BS + "Users" + _BS + "Public" + _BS + "x"):
+        proc = _hook("PreToolUse", "Edit", {"file_path": str(target), "old_string": "x", "new_string": path})
+        assert proc.returncode == 0 and proc.stdout == b"", path
+    assert not target.exists()
+    env = {"FORM_GUARD_HOOK_PYTHON": sys.executable, "CLAUDE_PROJECT_DIR": str(tmp_path)}
+    files = {"BROKEN.PY": ("def f(:\n", "does not compile"), "BAD.JSON": ("{nope", "not valid JSON"),
+             "NOTES.MD": ("/home/" + name + "/x\n", "local user-profile path")}
+    for fname, (text, needle) in files.items():  # upper-case extensions are checked like lower-case ones
+        (tmp_path / fname).write_text(text, encoding="utf-8")
+        res = json.loads(_hook("PostToolUse", "Write", {"file_path": str(tmp_path / fname)}, env).stdout)
+        assert res["decision"] == "block" and needle in res["reason"], fname
+    (tmp_path / "Good.Json").write_text('{"a": 1}', encoding="utf-8")
+    good = json.loads(_hook("PostToolUse", "Write", {"file_path": str(tmp_path / "Good.Json")}, env).stdout)
+    assert "JSON OK" in good["systemMessage"]
+    spec = importlib.util.spec_from_file_location("hook_guard_probe", HOOK)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    for path in (HOOK, ROOT / "README.md", ROOT / "docs" / "BUILT_WITH_CLAUDE_CODE.md", Path(__file__)):
+        assert mod.hygiene_findings(path.read_text(encoding="utf-8")) == [], path.name  # never flags its own sources
+    assert mod.EXAMPLE_MAIL_DOMAINS == ("example.com", "example.jp", "example.org", "users.noreply.github.com")
+    assert mod.EXACT_MAIL_ALLOW == {"noreply" + at + "anthropic.com"}
+    cfg = json.loads((ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    for event in ("PreToolUse", "PostToolUse"):
+        assert "MultiEdit" in cfg["hooks"][event][0]["matcher"].split("|"), event
+    for doc in ("README.md", "docs/BUILT_WITH_CLAUDE_CODE.md"):
+        text = (ROOT / doc).read_text(encoding="utf-8")
+        assert ".venv" + _BS + "Scripts" + _BS + "Activate.ps1" in text and "source .venv/bin/activate" in text, doc
+        assert "python scripts/hook_guard.py" in text and "FORM_GUARD_HOOK_PYTHON" in text, doc
+
+
+# --------------------------------------- R1-A8 explicit known-model table, honest wording about live requests
+
+
+def test_r1_audit_a8_model_capabilities_use_an_explicit_known_model_table():
+    from form_guard.mapper import KNOWN_MODEL_VERSIONS
+
+    flags = ("adaptive_thinking", "effort", "structured_outputs", "server_side_fallback", "prompt_caching")
+    for mid in ("claude-unrecognized-5-5", "claude-opus-99-9", "claude-sonnet-6-0", "claude-haiku-5-9", "claude-opus-4-9",
+                "claude-mythos-5-1", "anthropic.claude-newfamily-5-5", "claude-opus-5-5-preview"):
+        caps = model_capabilities(mid)  # before the fix any claude-<family>-<4.6+> id got every flag
+        assert not any(caps[f] for f in flags) and caps["effort_levels"] == () and not caps["known"], mid
+    assert set(KNOWN_MODEL_VERSIONS) == {"opus", "sonnet", "haiku", "fable"}
+    for family in ("opus", "sonnet", "haiku"):
+        assert KNOWN_MODEL_VERSIONS[family] == {(4, 5), (4, 6), (4, 7), (5, 0), (5, 5)}
+    for mid in (MODEL_OPUS, MODEL_SONNET, MODEL_HAIKU, "claude-opus-5", "claude-sonnet-5", "claude-opus-4-7",
+                "claude-opus-4-6", "claude-haiku-4-5-20251001", "claude-fable-5-1", "claude-3-haiku-20240307"):
+        assert model_capabilities(mid)["known"], mid
+    kwargs, caps, effort = ClaudeEngine(client=SimpleNamespace(), model="claude-opus-99-9")._request(
+        "claude-opus-99-9", [{"role": "user", "content": "x"}], "system", None)
+    assert set(kwargs) == {"model", "max_tokens", "system", "messages"} and effort is None  # a plain request
+    en = ("Request formatting is verified against mock/transport tests; live API availability and model-specific "
+          "features depend on the caller's Anthropic account tier.")
+    ja = "モデル別に送信パラメータを切り替えます。確認済みなのはモックによるリクエスト形式で、実APIでの利用可否・対応機能はアカウント権限に依存します。"
+    for doc in ("README.md", "docs/BUILT_WITH_CLAUDE_CODE.md"):
+        text = " ".join((ROOT / doc).read_text(encoding="utf-8").split())
+        assert en in text and ja in text and "model_capabilities()" in text, doc
+        for claim in ("no call fails with a 400", "so no 400", "400 エラーは起きません", "400エラーは起きません",
+                      "旧モデルでもエラーになりません"):
+            assert claim not in text, (doc, claim)

@@ -13,7 +13,7 @@ models. [日本語 ↓](#日本語)
 | **Skills** (5) | `.claude/skills/form-scan/SKILL.md`, `.claude/skills/surgical-fill/SKILL.md`, `.claude/skills/structural-audit/SKILL.md`, `.claude/skills/form-fill-verify/SKILL.md`, `.claude/skills/visual-diff-audit/SKILL.md` | Step-by-step procedures for scanning a form (and discovering the empty cells of an unmarked form), filling it from a memo with verbatim evidence, auditing a filled copy with the 21 checks + VIS-01 and the HITL checklist, a one-pass fill-and-verify that explains PASS / NEEDS_HUMAN_INPUT / FAIL, and the visual / layout audit against a naive regeneration. | A procedure that is always done the same way (commands, what to report, what never to do) belongs in a skill: Claude loads it only when the task matches, instead of carrying it in every prompt. A test checks that every CLI flag a skill names really exists. |
 | **Subagents** (4) | `.claude/agents/memo-extractor.md` (tools: Read, Grep, Glob · model: sonnet), `.claude/agents/field-mapper.md` (tools: Read, Glob, Grep, Bash · model: claude-opus-5-5), `.claude/agents/structure-auditor.md` (tools: Read, Glob, Grep, Bash · model: sonnet), `.claude/agents/form-auditor.md` (tools: Read, Grep, Glob, Bash · model: opus) | `memo-extractor` lists every fact of a memo as verbatim quotes **before** it reads the slot list, then assigns them or answers `not_found`. `field-mapper` proposes values under the form's printed rules (和暦 with weekday, caps, condition-safe condensation). `structure-auditor` runs `--verify`, an independent ZIP hash script and the `audit_log.json` cross-check. `form-auditor` re-verifies adversarially, re-reads every value against the memo and lists what the human must confirm. | Separation of duties in fresh contexts: proposing (Opus for rule-heavy mapping, Sonnet for blind extraction) is never the same agent as checking (Sonnet for the fast mechanical audit, Opus for critical review). **No subagent has a file-editing tool (`Edit`/`Write`)**: `memo-extractor` uses only `Read, Grep, Glob`; the others use `Bash` solely for read-only verification commands, under `PreToolUse` protection. |
 | **Hooks** (two-stage) | `.claude/settings.json` → `scripts/hook_guard.py` — `PreToolUse` on `Write\|Edit\|MultiEdit\|NotebookEdit\|Bash\|PowerShell`, `PostToolUse` on `Write\|Edit\|MultiEdit` | **Before** a tool runs, `PreToolUse` refuses (exit code 2 + `permissionDecision: "deny"`) any write, copy-over, move or delete of `samples/blank_forms/*.docx\|*.xlsx` (redirection, cp/mv/rm, Set-Content, Copy-Item, sed -i, inline python / node / .NET writes …), and any write whose new text (`content`, `new_string`, `edits`, `new_source`) carries an Anthropic API key, a literal `ANTHROPIC_API_KEY = "sk-…"`, a personal user-profile path or an e-mail address outside the reserved example domains — so nothing reaches the disk. **After** a write, `PostToolUse` runs `py_compile` and an import smoke test of the edited module (< 1.8 s), validates JSON and re-scans the file; a finding goes back to Claude as `decision: "block"`. | A prompt can be ignored, a hook cannot: the blank templates are the "before" of every proof, and secrets must never be written in the first place. The commands — `python scripts/hook_guard.py pre-tool-use` / `post-tool-use` — contain no `$`, `%` or backtick, so they run identically in Git Bash, PowerShell, cmd, macOS and Linux; `CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR=1` keeps Claude at the project root so the relative path always resolves. Only a human can override the template guard (`FORM_GUARD_ALLOW_TEMPLATE_WRITE=1` in Claude Code's own environment); the git-ignored `.env` is the one place a key may go. No `bypassPermissions` anywhere. |
-| **MCP server** | `.mcp.json` → `python -m form_guard.mcp_server` (`form_guard/mcp_server.py`) | Five tools over stdio JSON-RPC 2.0: `form_guard_list_demos` (all five fictional demos, marked vs unmarked), `form_guard_scan`, `form_guard_discover_blank_cells`, `form_guard_fill`, `form_guard_verify` (+ VIS-01), each with a full JSON Schema `inputSchema`. Newline-delimited and Content-Length framed messages; no dependencies (the official `mcp` SDK can be used with `--fastmcp`). File descriptor 1 is pointed at stderr while the server runs and every message is UTF-8 bytes, so neither a stray print nor a cp932 console can corrupt the stream. | Claude Code (or any MCP client) calls the deterministic engine directly and gets structured results. `form_guard_fill` only writes an **unapproved draft** under `output/mcp_runs/` (never inside `samples/`, never over a blank form), with `approval_status: UNAPPROVED_DRAFT_REQUIRES_HUMAN_SIGN_OFF` in the result, in `APPROVAL_STATUS.json` and in `audit_log.json` — not stamped into the document, which would break the structural proof. Reviewer-entered values cannot be sent through MCP, office-only cells cannot be confirmed, and paths must stay inside the project. |
+| **MCP server** | `.mcp.json` → `python -m form_guard.mcp_server` (`form_guard/mcp_server.py`) | Five tools over stdio JSON-RPC 2.0: `form_guard_list_demos` (all five fictional demos, marked vs unmarked), `form_guard_scan`, `form_guard_discover_blank_cells`, `form_guard_fill`, `form_guard_verify` (+ VIS-01), each with a full JSON Schema `inputSchema`. Newline-delimited and Content-Length framed messages; no dependencies (the official `mcp` SDK can be used with `--fastmcp`). File descriptor 1 is pointed at stderr while the server runs and every message is UTF-8 bytes, so neither a stray print nor a cp932 console can corrupt the stream. | Claude Code (or any MCP client) calls the deterministic engine directly and gets structured results. `form_guard_fill` only writes an **unapproved draft** under `output/mcp_runs/` (never inside `samples/`, never over a blank form), with `approval_status: UNAPPROVED_DRAFT_REQUIRES_HUMAN_SIGN_OFF` in the result, in `APPROVAL_STATUS.json` and in `audit_log.json` — not stamped into the document, which would break the structural proof. Its `review_url` (`http://127.0.0.1:8000/?run_id=…`, via `web_handoff.json`) opens that exact draft in the web app for the named reviewer's sign-off. Reviewer-entered values cannot be sent through MCP, office-only cells can be neither confirmed nor designated, `mode` defaults to `demo`, and paths must stay inside the project (never a `.env*`, `.git`, `.ssh` or `.claude-hackathon` component). |
 
 The web UI makes the suite inspectable without opening an editor: the tab **Claude Code 連携 · Architecture**
 (`GET /api/claude-suite`, `form_guard/claude_suite.py`) reads these files at request time — skill and subagent front
@@ -60,11 +60,14 @@ first id that answers serves the rest of the run, and the audit log keeps both: 
 requested id, unavailable ids, the id used), `usage.calls[].attempted_models`, and a `404 fallback` note in each
 field's `routed_model` reason.
 
-Requests are built from a capability table (`model_capabilities()`): adaptive thinking
-(`thinking={"type": "adaptive", "display": "summarized"}`) and `output_config.effort` are sent only to models that
-accept them (the 5.x models, `claude-opus-4-6`, `claude-sonnet-4-6`); legacy models such as `claude-haiku-4-5` get a
-plain structured-output request, so no call fails with a 400. Effort is clamped to a level the model supports, and
-the server-side refusal fallback is only requested where it exists. The audit log records which model handled which
+Request parameters are adapted per model via `model_capabilities()`, an explicit table of known model ids
+(`KNOWN_MODEL_VERSIONS`: `opus` / `sonnet` / `haiku` 4.5, 4.6, 4.7, 5, 5.5 and `fable` 5 / 5.1): adaptive thinking
+(`thinking={"type": "adaptive", "display": "summarized"}`) and `output_config.effort` are sent only to the table's
+4.6-and-later entries; legacy models such as `claude-haiku-4-5` get a plain structured-output request, and an
+unrecognised family (`claude-unrecognized-5-5`) or future version (`claude-opus-99-9`) gets no capability flags at all.
+Effort is clamped to a level the model supports, and the server-side refusal fallback is only requested where the
+table says it exists. Request formatting is verified against mock/transport tests; live API availability and
+model-specific features depend on the caller's Anthropic account tier. The audit log records which model handled which
 field and why, every served model id, per-call stop reasons and tokens, and the thinking summaries the API returned
 (labelled "API-returned thinking summary" — a summary written by the API, not the model's raw reasoning). The HTML
 report shows the routing table.
@@ -118,7 +121,31 @@ which Form-Guard leaves empty instead of guessing. The same numbers are measured
   paragraph-mark formatting (no drawing, field, hyperlink or table); an Excel cell may only become an inline string
   with its style id kept, and reverting the designated cells must give back the blank sheet byte for byte.
 - The approval in the web app is bound to the revision on screen and to the SHA-256 of the verified bytes; approve and
-  download refuse a stale hash or revision and a file that changed on disk.
+  download *require* both `filled_sha256` and `revision` (422 when missing or malformed) and refuse a stale hash or
+  revision (409) and a file that changed on disk. A run's state is only read and written under its re-entrant lock, so
+  every response is one consistent snapshot.
+- A confirmed discovery is re-checked against a fresh deterministic discovery of the actual blank form: coordinates
+  that are not a candidate, office-only cells and `not_a_field` cells are refused, and the spec is rebuilt from the
+  fresh candidates — editing the discovery JSON cannot point a fill at 受付番号 or 審査欄. A slot spec (uploaded, via
+  MCP `slot_spec_path` or a sidecar `.slots.json`) that designates an office-only cell is refused before writing, and
+  a candidate the live classifier leaves out or lists twice is never recommended.
+- **MCP draft → web sign-off.** `form_guard_fill` writes `web_handoff.json` next to its unapproved draft
+  (`output/mcp_runs/<run id>/`: a byte copy of the blank form, the memo, the effective slot spec, the mappings, the
+  draft's SHA-256) and returns `review_url` = `http://127.0.0.1:8000/?run_id=<run id>`. The web app (`python -m
+  form_guard.cli --serve`) loads that exact file on first use (`GET /api/runs/<run id>` or `POST /api/runs/import`)
+  without running a model, re-runs the 21 checks and VIS-01 against the recorded blank form and refuses a draft whose
+  SHA-256 differs from `audit_log.json` or that fails; the reviewer then inspects, edits, approves and downloads it.
+- The MCP server defaults to `mode: "demo"` (offline; `live` / `auto` send data to the Claude API and are an explicit
+  opt-in, marked with `openWorldHint: true`), caps every message at 10 MB (a larger or negative `Content-Length` or a
+  truncated body is a JSON-RPC parse error, never a blocking read) and refuses paths with a `.env*`, `.git`, `.ssh` or
+  `.claude-hackathon` component.
+- The hooks run as `python scripts/hook_guard.py …`: start Claude Code from a shell where the project's `.venv` is
+  activated (`.venv\Scripts\Activate.ps1` on Windows PowerShell, `.venv\Scripts\activate` in cmd, `source
+  .venv/bin/activate` elsewhere). The script itself needs only the standard library; its import check prefers
+  `.venv` (or `FORM_GUARD_HOOK_PYTHON`) whichever `python` started it. User-profile paths are found whatever the user
+  name (Japanese included), e-mail domains are compared label by label (only `example.com` / `example.jp` /
+  `example.org` and their subdomains, `users.noreply.github.com`, plus exactly `noreply@anthropic.com`), and `.PY` /
+  `.JSON` files are checked like `.py` / `.json`.
 - All sample forms, memos, names and organisations were written from scratch during the hackathon and are fictional
   and non-medical.
 
@@ -160,7 +187,7 @@ Form-Guard Agent は **Built with Claude: Japan 2026**（開発開始 2026-11-02
 | **Skills**（5 種） | `.claude/skills/form-scan/`・`surgical-fill/`・`structural-audit/`・`form-fill-verify/`・`visual-diff-audit/`（各 `SKILL.md`） | 様式のスキャン（マーカーなし様式では空欄候補の発見）、メモの原文引用に基づく記入、21 項目＋VIS-01 の検査と人による最終確認、記入と検証を一度に行い PASS / NEEDS_HUMAN_INPUT / FAIL を説明する手順、生成AIによる作り直し版との見た目の比較。 | 毎回同じ手順（コマンド、報告すること、してはいけないこと）はスキルにまとめ、必要なときだけ読み込ませます。スキルに書いた CLI オプションが実在することもテストで確認します。 |
 | **サブエージェント**（4 種） | `memo-extractor`（Read・Grep・Glob／sonnet）、`field-mapper`（Read・Glob・Grep・Bash／claude-opus-5-5）、`structure-auditor`（Read・Glob・Grep・Bash／sonnet）、`form-auditor`（Read・Grep・Glob・Bash／opus） | `memo-extractor` は欄の一覧を見る**前に**メモの事実を原文引用で洗い出し、その後で欄に割り当てるか `not_found` を返します。`field-mapper` は様式に印刷されたルール（曜日つき和暦・上限額・条件を落とさない要約）に沿って値を提案します。`structure-auditor` は `--verify`・独自の ZIP ハッシュ照合・`audit_log.json` の突き合わせを高速に行い、`form-auditor` は敵対的に検査し直し、各値をメモと照合して人が確認すべき点を挙げます。 | 「提案する役」と「確かめる役」を新しい文脈で分けます。**どのサブエージェントもファイル編集ツール（`Edit`/`Write`）を持ちません**。`memo-extractor` は `Read, Grep, Glob` のみ、ほかの 3 つは検証コマンドのためだけに `Bash` を使い、それも PreToolUse フックの保護下にあります。 |
 | **Hooks**（2 段） | `.claude/settings.json` → `scripts/hook_guard.py`（`Write\|Edit\|MultiEdit\|NotebookEdit\|Bash\|PowerShell` 前の `PreToolUse`、`Write\|Edit\|MultiEdit` 後の `PostToolUse`） | **実行前**の PreToolUse は、白紙様式（`samples/blank_forms/*.docx・*.xlsx`）の書き込み・上書きコピー・移動・削除（リダイレクト、cp/mv/rm、Set-Content、Copy-Item、sed -i、python・node・.NET での直接書き込みなど）と、書き込もうとしている文字列（`content`・`new_string`・`edits`・`new_source`）に含まれる API キー・`ANTHROPIC_API_KEY = "sk-…"` の直書き・個人のユーザーフォルダのパス・例示用ドメイン以外のメールアドレスを、終了コード 2（`permissionDecision: "deny"`）で阻止します。ディスクには何も書かれません。**書き込み後**の PostToolUse は、`py_compile` と編集したモジュールの import 確認（1.8 秒以内）、JSON の妥当性、ファイルの再点検を行い、問題を `decision: "block"` で Claude に返します。 | プロンプトは無視され得ますが、フックは無視できません。白紙様式はすべての検査の「変更前」で、秘密情報はそもそも書かせないことが大切です。コマンド（`python scripts/hook_guard.py pre-tool-use` / `post-tool-use`）は `$`・`%`・バッククォートを含まず、Git Bash・PowerShell・cmd・macOS・Linux で同じように動きます。`CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR=1` で作業ディレクトリをプロジェクト直下に保つので、相対パスが常に解決されます。白紙様式の保護を解除できるのは、`FORM_GUARD_ALLOW_TEMPLATE_WRITE=1` で Claude Code を起動した人だけです。`bypassPermissions` は使いません。 |
-| **MCP サーバー** | `.mcp.json` → `python -m form_guard.mcp_server`（`form_guard/mcp_server.py`） | stdio の JSON-RPC 2.0 で 5 つのツール（`form_guard_list_demos`（架空デモ5件、マーカーの有無つき）・`form_guard_scan`・`form_guard_discover_blank_cells`・`form_guard_fill`・`form_guard_verify`（VIS-01 つき））を JSON Schema 付きで提供します。改行区切りと Content-Length 形式の両方に対応し、追加の依存はありません（`--fastmcp` で公式 `mcp` SDK も利用可）。実行中はファイル記述子 1 を stderr に向け、メッセージは常に UTF-8 なので、余計な出力や cp932 のコンソールでも通信が壊れません。 | Claude Code などの MCP クライアントが決定論的な検証エンジンを直接呼び、構造化された結果を受け取れます。`form_guard_fill` が書くのは `output/mcp_runs/` の**未承認の下書き**だけで（`samples/` の中や白紙様式の上には書きません）、承認状態（`UNAPPROVED_DRAFT_REQUIRES_HUMAN_SIGN_OFF`）は結果・`APPROVAL_STATUS.json`・`audit_log.json` に記録し、文書本体には書き込みません。担当者入力値の送信、事務局欄の確定、プロジェクト外のパスは受け付けません。 |
+| **MCP サーバー** | `.mcp.json` → `python -m form_guard.mcp_server`（`form_guard/mcp_server.py`） | stdio の JSON-RPC 2.0 で 5 つのツール（`form_guard_list_demos`（架空デモ5件、マーカーの有無つき）・`form_guard_scan`・`form_guard_discover_blank_cells`・`form_guard_fill`・`form_guard_verify`（VIS-01 つき））を JSON Schema 付きで提供します。改行区切りと Content-Length 形式の両方に対応し、追加の依存はありません（`--fastmcp` で公式 `mcp` SDK も利用可）。実行中はファイル記述子 1 を stderr に向け、メッセージは常に UTF-8 なので、余計な出力や cp932 のコンソールでも通信が壊れません。 | Claude Code などの MCP クライアントが決定論的な検証エンジンを直接呼び、構造化された結果を受け取れます。`form_guard_fill` が書くのは `output/mcp_runs/` の**未承認の下書き**だけで（`samples/` の中や白紙様式の上には書きません）、承認状態（`UNAPPROVED_DRAFT_REQUIRES_HUMAN_SIGN_OFF`）は結果・`APPROVAL_STATUS.json`・`audit_log.json` に記録し、文書本体には書き込みません。結果の `review_url`（`web_handoff.json` 経由）で、その同じ下書きを Web 画面の承認へ引き継ぎます。担当者入力値の送信、事務局欄の確定・指定、プロジェクト外のパスや `.env`・`.git`・`.ssh`・`.claude-hackathon` を含むパスは受け付けず、`mode` の既定は `demo` です。 |
 
 Web 画面の「Claude Code 連携 · Architecture」タブ（`GET /api/claude-suite`、`form_guard/claude_suite.py`）は、これらの
 ファイルをリクエストのたびに読み込み（Skills とサブエージェントの定義、各サブエージェントのモデルとツール、2 段のフックの
@@ -190,8 +217,11 @@ Haiku・Sonnet の下書きが根拠確認や印刷されたルールで却下�
 `claude-haiku-4-5-20251001` → `claude-haiku-4-5`）に沿って、各モデルの機能に合わせたリクエストで再試行します。最初に応答した
 ID がその実行の残りを担当し、監査ログには要求したモデルと実際に応答したモデルの両方（`usage.model_fallbacks`、
 `usage.calls[].attempted_models`、各欄の `routed_model` の注記）が残ります。
-adaptive thinking（`display: "summarized"`）と effort は対応モデルにだけ送り、`claude-haiku-4-5` などの旧モデルには
-送らないので、パラメータ違いの 400 エラーは起きません。どの欄をどのモデルが担当したか（理由つき）、実際に応答したモデル、
+adaptive thinking（`display: "summarized"`）と effort は、`model_capabilities()` の既知モデル表（`KNOWN_MODEL_VERSIONS`：
+`opus`・`sonnet`・`haiku` の 4.5・4.6・4.7・5・5.5 と `fable` 5・5.1）で対応しているモデルにだけ送り、`claude-haiku-4-5`
+などの旧モデルには送りません。表に無いファミリーや将来のバージョンには、どの機能フラグも付けません。
+モデル別に送信パラメータを切り替えます。確認済みなのはモックによるリクエスト形式で、実APIでの利用可否・対応機能はアカウント権限に依存します。
+どの欄をどのモデルが担当したか（理由つき）、実際に応答したモデル、
 API が返した思考の要約（「API-returned thinking summary」と明記）は監査ログに記録され、HTML レポートにも表示されます。
 
 すべての `FieldMapping` に `routed_model` と `route_reason` を記録します。ライブでは API が実際に返したモデル ID
@@ -229,8 +259,29 @@ Form-Guard はその欄を推測で埋めません。同じ数値は Web 画面�
 - 座標で指定した欄は厳しく検査します。Word の欄に追加できるのは、元の段落記号の書式を持つ 1 つの run と 1 つの `<w:t>` だけ
   （図・フィールド・ハイパーリンク・表は不可）、Excel の欄は書式番号 `s` を保ったインライン文字列だけで、指定欄を元に戻すと
   白紙のシートとバイト単位で一致しなければなりません。
-- Web 画面の承認は、画面上の版（revision）と検査済みファイルの SHA-256 に結び付けます。古いハッシュや版、ディスク上で
-  変更されたファイルは、承認もダウンロードも拒否します。
+- Web 画面の承認は、画面上の版（revision）と検査済みファイルの SHA-256 に結び付けます。承認とダウンロードでは
+  `filled_sha256` と `revision` の両方が必須で（欠けている・形式が違う場合は 422）、古いハッシュや版（409）、ディスク上で
+  変更されたファイルは、承認もダウンロードも拒否します。実行の状態は再入可能なロックの下でだけ読み書きするので、
+  応答は常に一貫したスナップショットです。
+- 確定した空欄は、実際の白紙様式でもう一度決定論的に発見し直して照合します。候補に無い座標・事務局欄・`not_a_field` の欄は
+  拒否し、スロット定義は新しい発見結果から作り直すので、発見結果の JSON を書き換えても受付番号や審査欄には記入できません。
+  スロット定義（アップロード・MCP の `slot_spec_path`・付属の `.slots.json`）が事務局欄を指している場合も記入前に拒否し、
+  ライブ分類で答えが無かった（または重複した）候補は推奨しません。
+- **MCP の下書き → Web で承認。** `form_guard_fill` は未承認の下書きの隣（`output/mcp_runs/<run id>/`）に `web_handoff.json`
+  （白紙様式の複製・メモ・スロット定義・対応付け・下書きの SHA-256）を書き、結果に `review_url`
+  （`http://127.0.0.1:8000/?run_id=<run id>`）を返します。Web 画面（`python -m form_guard.cli --serve`）は初回の
+  `GET /api/runs/<run id>`（または `POST /api/runs/import`）でその同じファイルをモデルを動かさずに読み込み、21項目と VIS-01 を
+  白紙様式に対して再検査し、`audit_log.json` の SHA-256 と違う下書きや不合格の下書きは拒否します。確認者はそのまま確認・修正・
+  承認・ダウンロードできます。
+- MCP サーバーの `mode` の既定は `demo`（オフライン）で、Claude API にデータを送る `live`・`auto` は明示した場合だけです
+  （`openWorldHint: true`）。メッセージは 10 MB まで（それより大きい・負の `Content-Length` や途中で切れた本文は JSON-RPC の
+  解析エラーで、読み込みで止まることはありません）、`.env`・`.git`・`.ssh`・`.claude-hackathon` を含むパスは拒否します。
+- フックは `python scripts/hook_guard.py …` で動くので、プロジェクトの `.venv` を有効にしたシェル（PowerShell は
+  `.venv\Scripts\Activate.ps1`、cmd は `.venv\Scripts\activate`、macOS/Linux は `source .venv/bin/activate`）から Claude Code を
+  起動してください。スクリプト自体は標準ライブラリだけで動き、import 検査は `.venv`（または `FORM_GUARD_HOOK_PYTHON`）を優先します。
+  ユーザーフォルダのパスはユーザー名（日本語を含む）に関係なく検出し、メールのドメインはラベル単位で照合し（`example.com`・
+  `example.jp`・`example.org` とそのサブドメイン、`users.noreply.github.com`、それ以外は `noreply@anthropic.com` だけ）、
+  `.PY`・`.JSON` も `.py`・`.json` と同じく検査します。
 - サンプルの様式・メモ・人名・組織は、すべて本ハッカソン期間中にゼロから自作した架空のもので、医療とは無関係です。
 
 ### 5. Claude Code による反復開発
