@@ -15,6 +15,13 @@ from form_guard.pipeline import run_pipeline  # noqa: E402
 from form_guard.samples import DEMOS, demo_paths, generate_samples, read_memo  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_model_settings(monkeypatch):
+    """Model routing must not depend on the developer's shell (FORM_GUARD_MODEL etc.)."""
+    for var in ("FORM_GUARD_MODEL", "FORM_GUARD_MODEL_TIER", "FORM_GUARD_EFFORT", "FORM_GUARD_FALLBACKS"):
+        monkeypatch.delenv(var, raising=False)
+
+
 @pytest.fixture(scope="session")
 def samples_dir(tmp_path_factory) -> Path:
     base = tmp_path_factory.mktemp("samples")
@@ -63,25 +70,34 @@ class FakeMessages:
 
     def stream(self, **kwargs):
         self.calls.append({**kwargs, "messages": list(kwargs["messages"])})
-        return FakeStream(self.responses.pop(0))
+        response = self.responses.pop(0)
+        return FakeStream(response(kwargs) if callable(response) else response)
 
 
 class FakeClient:
-    """Stands in for anthropic.Anthropic(): client.beta.messages.stream(**kw) -> get_final_message()."""
+    """Stands in for anthropic.Anthropic(): client.beta.messages.stream(**kw) -> get_final_message().
+
+    A response may be a message or a callable ``kwargs -> message`` (e.g. to echo the requested model)."""
 
     def __init__(self, responses):
         self.beta = SimpleNamespace(messages=FakeMessages(responses))
 
 
-def fake_message(payload: dict, stop_reason: str = "end_turn", category=None):
+def fake_message(payload: dict, stop_reason: str = "end_turn", category=None, model: str = "claude-opus-5-5",
+                 thinking: str = ""):
     return SimpleNamespace(
-        content=[SimpleNamespace(type="thinking", thinking=""),
+        content=[SimpleNamespace(type="thinking", thinking=thinking, signature="sig"),
                  SimpleNamespace(type="text", text=json.dumps(payload, ensure_ascii=False))],
         stop_reason=stop_reason,
         stop_details=SimpleNamespace(category=category) if category else None,
         usage=SimpleNamespace(input_tokens=1200, output_tokens=300, cache_read_input_tokens=0),
-        model="claude-opus-5-5",
+        model=model,
     )
+
+
+def echo_model(payload: dict, thinking: str = ""):
+    """A fake response that reports the model the request asked for (as the API does)."""
+    return lambda kwargs: fake_message(payload, model=kwargs["model"], thinking=thinking)
 
 
 @pytest.fixture

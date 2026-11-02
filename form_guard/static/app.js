@@ -219,7 +219,7 @@ function renderHeader() {
   $("#reportLink").href = r.links.report;
   $("#auditLink").href = r.links.audit;
   const b = $("#engineBadge");
-  b.textContent = eng.mode === "live" ? `Claude · ${eng.model}` : "Offline demo engine";
+  b.textContent = eng.mode === "live" ? `Claude · ${eng.model === "auto" ? "auto model routing" : eng.model}` : "Offline demo engine";
   b.className = `pill ${eng.mode === "live" ? "pill-live" : "pill-neutral"}`;
   const pending = r.report.pending_slots.length;
   const hitlTab = $(".tabs button[data-tab=hitl]");

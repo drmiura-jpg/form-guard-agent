@@ -162,7 +162,9 @@ class PatchRecord(BaseModel):
 
     part_name: str
     slot_id: str
-    kind: Literal["text", "attr", "insert_run", "expand_empty"]
+    # text / attr: marker characters; insert_run / expand_empty: a run in an empty Word cell;
+    # fill_cell: an existing empty worksheet <c>; insert_cell: a worksheet <c> (and row) that did not exist yet
+    kind: Literal["text", "attr", "insert_run", "expand_empty", "fill_cell", "insert_cell"]
     byte_start: int
     byte_end: int
     old_text: str

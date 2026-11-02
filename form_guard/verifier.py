@@ -18,6 +18,13 @@ filled file, re-indexes both independently and proves, check by check:
   GRD/CON — every written value backed by verbatim memo quotes, numbers/dates
           supported, character / format / option / cap constraints met.
 
+Coordinate-designated empty cells get their own strict checks. Word: the cell may gain
+exactly one run holding one ``<w:t>``, formatted exactly like the blank cell's paragraph
+mark — no drawing, field, hyperlink or table, and its ``w:pPr`` unchanged (XML-03,
+LAYOUT-03). Excel: the cell may only become an inline string with its ``s`` style kept;
+reverting the designated cells must give back the blank sheet byte for byte, so no
+formula or other cell can have changed (XML-03, LAYOUT-02, LAYOUT-04, TEXT-02).
+
 It also produces the Human-in-the-Loop final confirmation checklist.
 """
 
@@ -27,6 +34,8 @@ import hashlib
 import io
 import re
 import zipfile
+from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional, Union
 
@@ -44,6 +53,7 @@ from .ooxml import (
     check_xlsx_limits,
     ensure_safe_xml,
     index_part,
+    inherited_cell_style,
     iter_start_tags,
     xmlns_declarations,
 )
@@ -203,6 +213,212 @@ def _runs_rpr(xml: bytes, skip_paragraphs: set[int]) -> list[bytes]:
     return out
 
 
+# --------------------------------------------- coordinate-designated Word cells
+
+# Anything but plain text that must never appear in a designated cell unless the blank form already had it.
+NON_TEXT_ELEMENTS = frozenset({
+    "drawing", "pict", "object", "fldSimple", "instrText", "fldChar", "hyperlink", "tbl", "sym", "AlternateContent",
+    "sdt", "ruby", "footnoteReference", "endnoteReference", "commentReference", "ins", "del", "moveFrom", "moveTo",
+    "smartTag", "customXml", "oMath", "oMathPara", "control", "txbxContent", "br", "cr", "tab", "ptab",
+    "contentPart", "subDoc", "delText", "delInstrText", "embedObject",
+})
+_REVISION_MARKS = frozenset({"ins", "del", "moveFrom", "moveTo", "rPrChange"})
+
+
+def _local(el) -> str:
+    return etree.QName(el).localname if isinstance(el.tag, str) else ""
+
+
+def _el_key(el) -> tuple:
+    """Namespace-declaration independent structural key: tag, attributes, text and children (recursively)."""
+    return (el.tag, tuple(sorted(el.attrib.items())), (el.text or "").strip(),
+            tuple(_el_key(c) for c in el if isinstance(c.tag, str)))
+
+
+def _fmt_key(rpr, strip_revisions: bool = False) -> Optional[tuple]:
+    """Run formatting as a comparable key; None when there is none (no or an empty <w:rPr>)."""
+    if rpr is None:
+        return None
+    kids = [c for c in rpr if isinstance(c.tag, str) and not (strip_revisions and _local(c) in _REVISION_MARKS)]
+    if not kids and not rpr.attrib:
+        return None
+    return tuple(sorted(rpr.attrib.items())), tuple(_el_key(c) for c in kids)
+
+
+def _fmt_text(rpr) -> str:
+    if rpr is None or not len(rpr):
+        return "none"
+    return ", ".join(_local(c) + (f"={c.get(f'{W}val')}" if c.get(f"{W}val") is not None else "")
+                     for c in rpr if isinstance(c.tag, str))
+
+
+def docx_designated_cell_issues(part: str, oidx: PartIndex, data_f: bytes, containers: Iterable[int],
+                                slot_by_container: dict[int, str]) -> tuple[list[str], list[str]]:
+    """(structure issues → XML-03, formatting issues → LAYOUT-03) for coordinate-designated empty Word cells.
+
+    The filled paragraph may only differ from the blank one by at most one appended run that holds an optional
+    <w:rPr> and exactly one <w:t>. The run's formatting must equal the paragraph-mark formatting of the blank
+    cell (w:pPr/w:rPr, revision marks aside — what Word gives typed text), and w:pPr must be unchanged.
+    """
+    struct: list[str] = []
+    fmt: list[str] = []
+    containers = sorted(containers)
+    if not containers:
+        return struct, fmt
+    try:
+        po_all = list(etree.fromstring(oidx.data, _PARSER).iter(f"{W}p"))
+        pf_all = list(etree.fromstring(data_f, _PARSER).iter(f"{W}p"))
+    except etree.XMLSyntaxError as exc:
+        return [f"{part}: {exc}"], []
+    if len(po_all) != len(pf_all):
+        return [f"{part}: paragraph count {len(po_all)}→{len(pf_all)} — designated cells could not be compared"], []
+    for ci in containers:
+        c = oidx.containers[ci]
+        sid = slot_by_container.get(ci, f"container {ci}")
+        po, pf = po_all[c.para_index], pf_all[c.para_index]  # type: ignore[index]
+        before = Counter(_local(e) for e in po.iter() if e is not po)
+        after = Counter(_local(e) for e in pf.iter() if e is not pf)
+        added = sorted(k for k in after if k in NON_TEXT_ELEMENTS and after[k] > before.get(k, 0))
+        if added:
+            struct.append(f"{sid}: non-text element(s) {', '.join('<w:' + a + '>' for a in added)} inside the "
+                          f"designated empty cell")
+        runs_o, runs_f = list(po.iter(f"{W}r")), list(pf.iter(f"{W}r"))
+        if len(runs_f) < len(runs_o) or any(_el_key(a) != _el_key(b) for a, b in zip(runs_o, runs_f)):
+            struct.append(f"{sid}: a run that was already in the blank cell was changed or removed")
+        extra = runs_f[len(runs_o):]
+        if len(extra) > 1:
+            struct.append(f"{sid}: {len(extra)} runs added — at most one run may be added to a designated empty cell")
+        for run in extra[:1]:
+            if run.getparent() is not pf:
+                struct.append(f"{sid}: the added run is wrapped in <w:{_local(run.getparent())}>")
+            kids = [_local(k) for k in run if isinstance(k.tag, str)]
+            if kids not in (["t"], ["rPr", "t"]):
+                struct.append(f"{sid}: the added run holds {kids} — only <w:rPr> and one <w:t> are allowed")
+            odd = sorted(etree.QName(a).localname for a in run.attrib if not etree.QName(a).localname.startswith("rsid"))
+            if odd:
+                struct.append(f"{sid}: unexpected attribute(s) on the added run: {odd}")
+            base, got = po.find(f"{W}pPr/{W}rPr"), run.find(f"{W}rPr")
+            if _fmt_key(got) != _fmt_key(base, strip_revisions=True):
+                fmt.append(f"{sid}: run formatting [{_fmt_text(got)}] differs from the blank cell's paragraph-mark "
+                           f"formatting [{_fmt_text(base)}]")
+        ppr_o, ppr_f = po.find(f"{W}pPr"), pf.find(f"{W}pPr")
+        if (None if ppr_o is None else _el_key(ppr_o)) != (None if ppr_f is None else _el_key(ppr_f)):
+            fmt.append(f"{sid}: paragraph properties (w:pPr) of the designated cell were changed or removed")
+    return struct, fmt
+
+
+# -------------------------------------------- coordinate-designated Excel cells
+
+
+@dataclass
+class SheetCellAudit:
+    """Result of checking the designated cells of one worksheet part."""
+
+    reverted: bytes                      # the filled part with every designated cell put back as in the blank form
+    struct: list[str] = field(default_factory=list)    # XML-03
+    style: list[str] = field(default_factory=list)     # LAYOUT-02
+    formula: list[str] = field(default_factory=list)   # LAYOUT-04
+    text: list[str] = field(default_factory=list)      # TEXT-02
+    new_cells: set[str] = field(default_factory=set)   # cells the blank form did not contain
+    checked: int = 0
+
+
+def audit_sheet_cells(part: str, oidx: PartIndex, data_f: bytes, cells: dict[str, str],
+                      prepared: dict[str, str]) -> SheetCellAudit:
+    """Check the designated cells (ref -> slot id) of a filled worksheet and revert them to the blank form's bytes.
+
+    A written cell must be ``<c …same attributes… t="inlineStr"><is><t>value</t></is></c>`` — style id ``s`` kept
+    (or, for a cell the blank form did not contain, the row / column style Excel shows there), no formula, no value
+    element, no rich text. The caller compares the reverted part with the blank one, so a change to any other cell,
+    formula or row shows up there.
+    """
+    fidx = index_part(part, data_f, "sheet")
+    audit = SheetCellAudit(reverted=data_f)
+    if fidx.implicit_refs:
+        audit.struct.append(f"{part}: rows/cells without an r attribute — designated cells cannot be located")
+        return audit
+    for ref, sid in sorted(cells.items()):
+        oc, fc = oidx.cells.get(ref), fidx.cells.get(ref)
+        exp = prepared.get(sid)
+        audit.checked += 1
+        if oc is None and fc is not None:
+            audit.new_cells.add(ref)
+        if fc is None:
+            if exp:
+                audit.text.append(f"{sid}: {ref} should hold «{exp}» but the cell is missing")
+            continue
+        if "f" in fc.children:
+            audit.formula.append(f"{sid}: a formula was written into designated cell {ref}")
+        if exp is None:
+            if fc.children:
+                audit.text.append(f"{sid}: {ref} is awaiting human input but holds content")
+            continue
+        if fc.children != ["is"]:
+            audit.struct.append(f"{sid}: {ref} holds {fc.children} — only an inline string <is><t>…</t></is> may be "
+                                f"written into a designated cell")
+        elif fc.is_container is not None:
+            ic = fidx.containers[fc.is_container]
+            raw = fidx.data[ic.span[0] : ic.span[1]]
+            if ic.runs or b"rPh" in raw or b"phoneticPr" in raw or len(fidx.container_nodes(ic)) != 1:
+                audit.struct.append(f"{sid}: {ref} holds rich text / phonetic runs — a single <t> is expected")
+            got = fidx.container_text(ic)
+            if got != exp:
+                audit.text.append(f"{sid}: {ref} expected «{exp}» got «{got}»")
+        expected = dict(oc.attrs) if oc is not None else {"r": ref}
+        if oc is None:
+            style = inherited_cell_style(oidx, fc.row, fc.col)
+            if style:
+                expected["s"] = style
+        expected["t"] = "inlineStr"
+        if fc.attrs.get("s") != expected.get("s"):
+            audit.style.append(f"{sid}: {ref} cell style s={expected.get('s') or '—'} → s={fc.attrs.get('s') or '—'} "
+                               f"(the cell's format must be kept)")
+        other = sorted(k for k in set(expected) | set(fc.attrs) if k != "s" and expected.get(k) != fc.attrs.get(k))
+        if other:
+            audit.struct.append(f"{sid}: {ref} attributes changed: {other}")
+    audit.reverted = _revert_sheet_cells(oidx, fidx, set(cells))
+    return audit
+
+
+def _revert_sheet_cells(oidx: PartIndex, fidx: PartIndex, refs: set[str]) -> bytes:
+    """The filled worksheet with each designated cell restored to the blank form's bytes (created cells / rows removed)."""
+    edits: list[tuple[int, int, bytes]] = []
+    created_rows = 0
+    for rownum, frow in fidx.rows.items():
+        mine = [r for r in frow.cells if r in refs]
+        if not mine:
+            continue
+        orow = oidx.rows.get(rownum)
+        others = [r for r in frow.cells if r not in refs]
+        kept = [r for r in mine if r in oidx.cells]
+        created = [r for r in mine if r not in oidx.cells]
+        if not others and not kept and (orow is None or orow.empty):
+            # a row created for the new cells, or a self-closing row expanded to hold them
+            edits.append((frow.span[0], frow.span[1], b"" if orow is None else oidx.data[orow.span[0] : orow.span[1]]))
+            if orow is None:
+                created_rows += 1
+            continue
+        for r in kept:
+            fc, oc = fidx.cells[r], oidx.cells[r]
+            edits.append((fc.span[0], fc.span[1], oidx.data[oc.span[0] : oc.span[1]]))
+        for r in created:
+            fc = fidx.cells[r]
+            edits.append((fc.span[0], fc.span[1], b""))
+    osd, fsd = oidx.sheet_data, fidx.sheet_data
+    if (osd is not None and osd.empty and fsd is not None and not fsd.empty and created_rows
+            and created_rows == len(fidx.rows)):
+        edits = [(fsd.span[0], fsd.span[1], oidx.data[osd.span[0] : osd.span[1]])]  # <sheetData/> was expanded
+    data = fidx.data
+    out, cur = bytearray(), 0
+    for s, e, rep in sorted(edits):
+        if s < cur:
+            continue
+        out += data[cur:s] + rep
+        cur = e
+    out += data[cur:]
+    return bytes(out)
+
+
 # ------------------------------------------------------------- xlsx semantics
 
 
@@ -322,15 +538,28 @@ def verify(
     stats["modified_parts"] = modified
 
     # ---------------------------------------------------------------- XML
+    from .writer import prepare_value
+
+    prepared = {k: prepare_value(v, scan.file_type) for k, v in values.items()}
     wellformed, ns_ok, skel_ok = True, True, True
     skel_details, ns_details, wf_details = [], [], []
     filled_parts: dict[str, PartIndex] = {}
-    designated: dict[str, set[int]] = {}
+    designated: dict[str, set[int]] = {}         # Word: paragraph container indices of designated empty cells
+    sheet_cells: dict[str, dict[str, str]] = {}  # Excel: part -> {cell ref: slot id}
+    slot_by_container: dict[str, dict[int, str]] = {}
     for s in scan.slots:
         for o in s.occurrences:
-            if o.marker_kind == "empty_cell":
+            if o.marker_kind != "empty_cell":
+                continue
+            if scan.file_type == "docx":
                 designated.setdefault(o.part_name, set()).add(o.container_index)
+                slot_by_container.setdefault(o.part_name, {})[o.container_index] = s.slot_id
+            elif o.cell_ref:
+                sheet_cells.setdefault(o.part_name, {})[o.cell_ref] = s.slot_id
     slot_keys = {part: slot_node_keys(scan.parts[part]) for part in targets if part in scan.parts}
+    cell_struct: list[str] = []   # designated cells: structure (XML-03)
+    cell_format: list[str] = []   # Word designated cells: formatting (LAYOUT-03)
+    sheet_audits: dict[str, SheetCellAudit] = {}
     tags_compared = 0
     for part in sorted(targets):
         if part not in names_f:
@@ -342,7 +571,13 @@ def verify(
             ensure_safe_xml(data_f, part)
             etree.fromstring(data_f, _PARSER)
             profile = scan.parts[part].profile
-            filled_parts[part] = index_part(part, data_f, profile)
+            if part in sheet_cells:
+                audit = audit_sheet_cells(part, scan.parts[part], data_f, sheet_cells[part], prepared)
+                sheet_audits[part] = audit
+                cell_struct += audit.struct
+                filled_parts[part] = index_part(part, audit.reverted, profile)  # compare the rest of the sheet as-is
+            else:
+                filled_parts[part] = index_part(part, data_f, profile)
         except (etree.XMLSyntaxError, UnsafeXMLError, UnsupportedXMLError) as exc:
             wellformed = False
             wf_details.append(f"{part}: {exc}")
@@ -351,6 +586,11 @@ def verify(
         if _ns_decls(data_o) != _ns_decls(data_f):
             ns_ok = False
             ns_details.append(part)
+        if part in designated:
+            st, fm = docx_designated_cell_issues(part, scan.parts[part], data_f, designated[part],
+                                                 slot_by_container.get(part, {}))
+            cell_struct += st
+            cell_format += fm
         so = skeleton_bytes(scan.parts[part], designated.get(part, ()), slot_keys.get(part, set()))
         sf = skeleton_bytes(filled_parts[part], designated.get(part, ()), slot_keys.get(part, set()))
         tags_compared += sum(1 for _ in iter_start_tags(data_o))
@@ -364,22 +604,25 @@ def verify(
     checks.append(_check("XML-02", "xml", "Namespace declarations preserved exactly", ns_ok and wellformed,
                          "identical prefixes and URIs" if ns_ok else f"changed in {ns_details}", "critical"))
     n_nodes = sum(len(scan.parts[p].nodes) for p in targets if p in scan.parts)
+    n_cells = sum(len(v) for v in designated.values()) + sum(len(v) for v in sheet_cells.values())
+    xml_ok = skel_ok and wellformed and not cell_struct
     checks.append(_check(
-        "XML-03", "xml", "Markup skeleton byte-identical outside slot text (every tag, attribute, property)",
-        skel_ok and wellformed,
+        "XML-03", "xml", "Markup skeleton byte-identical outside slot text (every tag, attribute, property)", xml_ok,
         (f"{tags_compared} tags and {n_nodes} text nodes compared (xml:space and text of every non-slot node included); "
-         f"only slot characters differ" if skel_ok and wellformed
-         else " | ".join(skel_details)), "critical", tags=tags_compared))
+         f"only slot characters differ" + (f"; {n_cells} designated empty cell(s) hold plain text only" if n_cells else "")
+         if xml_ok else " | ".join(skel_details + cell_struct[:6])), "critical", tags=tags_compared,
+        designated_cell_issues=cell_struct[:20]))
     stats["tags_compared"] = tags_compared
+    stats["designated_cells"] = n_cells
 
     # ------------------------------------------------------------- LAYOUT
     if scan.file_type == "docx":
-        _docx_layout_checks(scan, zo, zf, checks, stats, designated)
+        _docx_layout_checks(scan, zo, zf, checks, stats, designated, cell_format)
     else:
-        _xlsx_layout_checks(orig_blob, filled_blob, checks, stats)
+        _xlsx_layout_checks(orig_blob, filled_blob, checks, stats, scan, sheet_audits)
 
     # --------------------------------------------------------------- TEXT
-    _text_checks(scan, filled_parts, values, pending, designated, checks, stats, slot_keys)
+    _text_checks(scan, filled_parts, values, pending, designated, checks, stats, slot_keys, sheet_audits)
 
     # ------------------------------------------------------- GRD / CON / APP
     _content_checks(scan, mappings, values, memo_text, checks, stats)
@@ -401,7 +644,7 @@ def _meta(i: zipfile.ZipInfo) -> tuple:
             i.extract_version, i.external_attr, i.internal_attr, i.extra, i.comment)
 
 
-def _docx_layout_checks(scan, zo, zf, checks, stats, designated):
+def _docx_layout_checks(scan, zo, zf, checks, stats, designated, cell_format=()):
     part = "word/document.xml"
     try:
         so = docx_structure(zo.read(part))
@@ -432,10 +675,16 @@ def _docx_layout_checks(scan, zo, zf, checks, stats, designated):
         same_rpr = _runs_rpr(zo.read(part), skip) == _runs_rpr(zf.read(part), skip)
     except etree.XMLSyntaxError:
         same_rpr = False
-    checks.append(_check("LAYOUT-03", "layout", "Paragraph and run formatting identical (pPr / rPr)", same_ppr and same_rpr,
-                         f"{len(so['pPr'])} paragraphs checked" if same_ppr and same_rpr else
-                         f"paragraph properties {'ok' if same_ppr else 'changed'}, run properties {'ok' if same_rpr else 'changed'}",
-                         "major"))
+    cell_format = list(cell_format)
+    n_designated = sum(len(v) for v in designated.values())
+    fmt_ok = same_ppr and same_rpr and not cell_format
+    checks.append(_check(
+        "LAYOUT-03", "layout", "Paragraph and run formatting identical (pPr / rPr)", fmt_ok,
+        (f"{len(so['pPr'])} paragraphs checked" + (f"; {n_designated} designated empty cell(s) formatted exactly like "
+                                                    f"the blank cell (pPr, paragraph-mark rPr)" if n_designated else "")
+         if fmt_ok else
+         "; ".join([f"paragraph properties {'ok' if same_ppr else 'changed'}, run properties {'ok' if same_rpr else 'changed'}"]
+                   + cell_format[:6])), "major", designated_cell_issues=cell_format[:20]))
     same_sect = so["sectPr"] == sf["sectPr"]
     checks.append(_check("LAYOUT-04", "layout", "Page setup identical (size, margins, header/footer references)", same_sect,
                          f"page {so['page']} twips — identical" if same_sect else f"page {so['page']} → {sf['page']}", "major",
@@ -444,7 +693,7 @@ def _docx_layout_checks(scan, zo, zf, checks, stats, designated):
                   "borders": so["borders"]})
 
 
-def _xlsx_layout_checks(orig_blob, filled_blob, checks, stats):
+def _xlsx_layout_checks(orig_blob, filled_blob, checks, stats, scan=None, sheet_audits=None):
     try:
         with zipfile.ZipFile(io.BytesIO(filled_blob)) as z:
             check_xlsx_limits(z)
@@ -453,6 +702,17 @@ def _xlsx_layout_checks(orig_blob, filled_blob, checks, stats):
                              f"not compared: {exc}", "critical"))
         return
     so, sf = xlsx_structure(orig_blob), xlsx_structure(filled_blob)
+    sheet_audits = sheet_audits or {}
+    cell_style = [i for a in sheet_audits.values() for i in a.style]
+    cell_formula = [i for a in sheet_audits.values() for i in a.formula]
+    # cells the writer created for designated targets: their style is checked by audit_sheet_cells
+    new_cells: dict[int, set[str]] = {}
+    for sidx, _name, part in (scan.sheets if scan is not None else []):
+        if part in sheet_audits:
+            new_cells[sidx] = sheet_audits[part].new_cells
+    for i, sheet in enumerate(sf["sheets"]):
+        for ref in new_cells.get(i, ()):
+            sheet["styles"].pop(ref, None)
     pairs = list(zip(so["sheets"], sf["sheets"]))
     same_count = len(so["sheets"]) == len(sf["sheets"])
     merged_ok = same_count and all(a["merged"] == b["merged"] for a, b in pairs)
@@ -462,27 +722,29 @@ def _xlsx_layout_checks(orig_blob, filled_blob, checks, stats):
                          f"{len(so['sheets'])} sheet(s), {n_m_o} merged ranges — identical" if merged_ok else
                          f"sheets {len(so['sheets'])}→{len(sf['sheets'])}, merged ranges {n_m_o}→{n_m_f}", "critical",
                          original={"merges": n_m_o}, filled={"merges": n_m_f}))
-    style_ok = same_count and all(a["styles"].keys() == b["styles"].keys() and
-                                  all(a["styles"][k] == b["styles"][k] for k in a["styles"]) for a, b in pairs)
+    style_ok = same_count and all(a["styles"] == b["styles"] for a, b in pairs) and not cell_style
     b_o = sum(s["borders"] for s in so["sheets"])
     b_f = sum(s["borders"] for s in sf["sheets"])
+    n_cells = sum(a.checked for a in sheet_audits.values())
     checks.append(_check("LAYOUT-02", "layout", "Borders, fills, fonts and number formats identical for every cell",
-                         style_ok, f"{b_o} cell border edges and all cell styles — identical" if style_ok else
-                         f"border edges {b_o}→{b_f}; cell styles changed", "critical",
-                         original_borders=b_o, filled_borders=b_f))
+                         style_ok, (f"{b_o} cell border edges and all cell styles — identical"
+                                    + (f"; style id (s) of {n_cells} designated cell(s) kept" if n_cells else ""))
+                         if style_ok else "; ".join([f"border edges {b_o}→{b_f}; cell styles changed"] + cell_style[:6]),
+                         "critical", original_borders=b_o, filled_borders=b_f, designated_cell_issues=cell_style[:20]))
     dims_ok = same_count and all(a["widths"] == b["widths"] and a["heights"] == b["heights"] for a, b in pairs)
     checks.append(_check("LAYOUT-03", "layout", "Column widths and row heights identical", dims_ok,
                          "identical" if dims_ok else "changed", "major"))
     f_o = sum(len(s["formulas"]) for s in so["sheets"])
     f_f = sum(len(s["formulas"]) for s in sf["sheets"])
     logic_ok = same_count and all(a["formulas"] == b["formulas"] and a["validations"] == b["validations"]
-                                  and a["page"] == b["page"] for a, b in pairs)
+                                  and a["page"] == b["page"] for a, b in pairs) and not cell_formula
     v_o = sum(len(s["validations"]) for s in so["sheets"])
     v_f = sum(len(s["validations"]) for s in sf["sheets"])
     checks.append(_check("LAYOUT-04", "layout", "Formulas, drop-down validations and print setup identical", logic_ok,
                          f"{f_o} formulas, {v_o} data validations, print area — identical" if logic_ok else
-                         f"formulas {f_o}→{f_f}, validations {v_o}→{v_f}", "critical",
-                         original={"formulas": f_o, "validations": v_o}, filled={"formulas": f_f, "validations": v_f}))
+                         "; ".join([f"formulas {f_o}→{f_f}, validations {v_o}→{v_f}"] + cell_formula[:6]), "critical",
+                         original={"formulas": f_o, "validations": v_o}, filled={"formulas": f_f, "validations": v_f},
+                         designated_cell_issues=cell_formula[:20]))
     stats.update({"sheets": len(so["sheets"]), "merges": n_m_o, "borders": b_o, "formulas": f_o, "validations": v_o})
 
 
@@ -496,7 +758,7 @@ def _expected_text(text: str, values: dict[str, str]) -> str:
     return "".join(out)
 
 
-def _text_checks(scan, filled_parts, values, pending, designated, checks, stats, slot_keys=None):
+def _text_checks(scan, filled_parts, values, pending, designated, checks, stats, slot_keys=None, sheet_audits=None):
     from .writer import prepare_value
 
     slot_keys = slot_keys or {}
@@ -507,7 +769,13 @@ def _text_checks(scan, filled_parts, values, pending, designated, checks, stats,
     residual = []
     if not scan.slots:
         slot_ok = False
-        slot_bad.append("0 fillable slots found — designate {{markers}}, [記入欄: ...], or table coordinates in .slots.json")
+        slot_bad.append("0 fillable slots found — designate {{markers}}, [記入欄: ...], or cell coordinates in .slots.json "
+                        "(unmarked form: run --discover-blanks and confirm the cells to fill)")
+    for audit in (sheet_audits or {}).values():  # designated Excel cells (the rest of the sheet is compared below)
+        n_slot += audit.checked
+        if audit.text:
+            slot_ok = False
+            slot_bad += audit.text
     for part, fidx in filled_parts.items():
         oidx = scan.parts[part]
         if len(oidx.containers) != len(fidx.containers):
@@ -795,10 +1063,21 @@ def infer_values_from_filled(scan: ScanResult, filled_path: Union[str, Path]) ->
             fidx = index_part(part, zf.read(part), oidx.profile)
         except (UnsafeXMLError, UnsupportedXMLError):
             continue
+        if scan.file_type == "xlsx":
+            cells = {o.cell_ref: s.slot_id for s in scan.slots for o in s.occurrences
+                     if o.part_name == part and o.marker_kind == "empty_cell" and o.cell_ref}
+            for ref, sid in cells.items():  # designated worksheet cells: the inline string written into the cell
+                fc = fidx.cells.get(ref)
+                if fc is not None and fc.is_container is not None:
+                    v = fidx.container_text(fidx.containers[fc.is_container])
+                    if v:
+                        values.setdefault(sid, v)
+            if cells:  # match the marker containers with the designated cells put back as in the blank form
+                fidx = index_part(part, _revert_sheet_cells(oidx, fidx, set(cells)), oidx.profile)
         if len(fidx.containers) != len(oidx.containers):
             continue
         empty_targets = {o.container_index: s.slot_id for s in scan.slots for o in s.occurrences
-                         if o.part_name == part and o.marker_kind == "empty_cell"}
+                         if o.part_name == part and o.marker_kind == "empty_cell" and scan.file_type == "docx"}
         for co, cf in zip(oidx.containers, fidx.containers):
             to, tf = oidx.container_text(co), fidx.container_text(cf)
             if co.idx in empty_targets and tf:

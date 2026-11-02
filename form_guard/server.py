@@ -8,6 +8,11 @@ bytes from memory after re-checking the file, under a per-run lock.
 
 The server is meant for 127.0.0.1 only: requests with any other Host header (DNS
 rebinding) and state-changing requests from another Origin (cross-site forms) are refused.
+
+Unmarked blank forms: ``POST /api/discover`` returns candidate empty cells (applicant vs
+office-only) and a ``discovery_id``; ``POST /api/runs/upload`` with that ``discovery_id``
+and the reviewer's ``confirmed_targets`` fills only those cells — after re-checking that
+the uploaded blank form is byte-identical to the one discovery looked at.
 """
 
 from __future__ import annotations
@@ -16,13 +21,14 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import threading
 import zipfile
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from urllib.parse import quote, urlsplit
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -30,12 +36,12 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import DEFAULT_MODEL, __version__
-from .mapper import live_credentials_present, load_dotenv
+from . import DEFAULT_MODEL, MODEL_HAIKU, MODEL_OPUS, MODEL_SONNET, __version__
+from .mapper import MODEL_TIERS, live_credentials_present, load_dotenv
 from .models import FieldMapping
 from .pipeline import PipelineResult, new_run_id, run_pipeline
 from .samples import DEMOS, demo_by_id, demo_paths, ensure_samples, read_memo
-from .scanner import detect_file_type
+from .scanner import build_confirmed_slot_spec, detect_file_type, discover_blank_cells
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
@@ -43,6 +49,8 @@ MAX_UNCOMPRESSED_BYTES = 80 * 1024 * 1024
 MAX_MEMO_CHARS = 60_000
 MAX_VALUE_CHARS = 1_000
 _RUN_ID = re.compile(r"^[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$")
+_DISCOVERY_ID = re.compile(r"^[0-9a-f]{24}$")
+ModelTier = Literal["auto", "opus", "sonnet", "haiku"]
 MEDIA = {".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
          ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]", "testserver"})
@@ -53,6 +61,7 @@ class RunRequest(BaseModel):
     demo_id: str
     mode: str = "auto"
     memo_text: Optional[str] = Field(default=None, max_length=MAX_MEMO_CHARS)
+    model_tier: Optional[ModelTier] = None  # None: FORM_GUARD_MODEL_TIER or auto
 
 
 class OverrideRequest(BaseModel):
@@ -79,9 +88,20 @@ class RunState:
     overrides: dict[str, str] = field(default_factory=dict)
     approval: Optional[dict[str, Any]] = None
     verified_bytes: bytes = b""     # the exact filled file the verifier checked (read once, right after the run)
-    verified_sha256: str = ""
+    verified_sha256: str = ""       # SHA-256 of those bytes; approve() and download() refuse any other file
     revision: int = 0               # +1 on every reviewer edit; approval must name the revision it saw
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def stale(self, filled_sha256: Optional[str], revision: Optional[int]) -> bool:
+        """True if the client looked at another revision or another file than the verified one."""
+        return (revision is not None and revision != self.revision) or \
+            (filled_sha256 is not None and filled_sha256 != self.verified_sha256)
+
+    def on_disk_sha256(self) -> str:
+        try:
+            return _sha(self.result.filled_path)
+        except OSError:
+            return ""
 
 
 class RunStore:
@@ -108,6 +128,32 @@ class RunStore:
         return st
 
 
+class DiscoveryStore:
+    """Discovery reports of uploaded blank forms, kept on the server so a client cannot edit them."""
+
+    def __init__(self, limit: int = 60):
+        self.limit = limit
+        self.items: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
+        self.lock = threading.Lock()
+
+    def put(self, discovery: dict[str, Any], path: Path) -> str:
+        token = secrets.token_hex(12)
+        with self.lock:
+            self.items[token] = {"discovery": discovery, "path": path}
+            while len(self.items) > self.limit:
+                self.items.popitem(last=False)
+        return token
+
+    def get(self, token: Optional[str]) -> dict[str, Any]:
+        if not _DISCOVERY_ID.match(token or ""):
+            raise HTTPException(404, "unknown discovery")
+        with self.lock:
+            item = self.items.get(token or "")
+        if item is None:
+            raise HTTPException(404, "unknown discovery — run /api/discover again")
+        return item
+
+
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -116,9 +162,23 @@ def _verified_copy(result: PipelineResult) -> tuple[bytes, str]:
     """Read the filled file once and make sure it is the very file the verifier checked."""
     blob = result.filled_path.read_bytes()
     sha = hashlib.sha256(blob).hexdigest()
-    if sha != result.report.stats.get("filled_sha256", sha):
+    if sha != (result.verified_sha256 or sha):
         raise HTTPException(409, "the filled file changed while it was being verified — run again")
     return blob, sha
+
+
+def _parse_ids(raw: str) -> list[str]:
+    """confirmed_targets as a JSON list (["c01", "c02"]) or a comma-separated string."""
+    raw = (raw or "").strip()
+    if raw.startswith("["):
+        try:
+            ids = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(400, f"confirmed_targets is not valid JSON: {exc}") from exc
+        if not isinstance(ids, list):
+            raise HTTPException(400, "confirmed_targets must be a list of candidate ids")
+        return [str(i) for i in ids]
+    return [x.strip() for x in raw.split(",") if x.strip()]
 
 
 def _hostname(host: str) -> str:
@@ -209,19 +269,47 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
                                 "script-src 'self'; connect-src 'self'; frame-ancestors 'none'")
         return resp
 
+    discoveries = DiscoveryStore()
+    app.state.discoveries = discoveries
+
     def samples() -> Path:
         return ensure_samples(app.state.samples_dir)
 
+    def _check_tier(model_tier: Optional[str]) -> Optional[str]:
+        if not model_tier:
+            return None  # FORM_GUARD_MODEL_TIER or auto
+        tier = model_tier.lower()
+        if tier not in MODEL_TIERS:
+            raise HTTPException(400, f"model_tier must be one of: {', '.join(MODEL_TIERS)}")
+        return tier
+
+    def _stage_upload(file: UploadFile) -> Path:
+        """Store an uploaded .docx / .xlsx in a fresh staging folder after size, ZIP-bomb and type checks."""
+        suffix = Path(file.filename or "").suffix.lower()
+        if suffix not in MEDIA:
+            raise HTTPException(400, "upload a .docx or .xlsx form")
+        data = file.file.read(MAX_UPLOAD_BYTES + 1)
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(413, "file larger than 10 MB")
+        staging = store.root / "_uploads" / new_run_id()
+        staging.mkdir(parents=True, exist_ok=True)
+        form_path = staging / f"{_safe_stem(file.filename or 'form')}{suffix}"
+        form_path.write_bytes(data)
+        ftype = _check_package(form_path)
+        if f".{ftype}" != suffix:
+            raise HTTPException(400, f"file content is {ftype}, but the extension is {suffix}")
+        return form_path
+
     def _run(form_path: Path, memo: str, mode: str, *, naive: Optional[Path], spec: Optional[dict],
-             demo_id: Optional[str], display: str) -> tuple[str, RunState]:
+             demo_id: Optional[str], display: str, model_tier: Optional[str] = None) -> tuple[str, RunState]:
         run_id = new_run_id()
         run_dir = store.root / run_id
         try:
             result = run_pipeline(form_path, memo, run_dir, mode=mode, naive_path=naive, slot_spec=spec,
-                                  demo_id=demo_id, run_id=run_id, client=app.state.client)
+                                  demo_id=demo_id, run_id=run_id, client=app.state.client, model_tier=model_tier)
         except Exception as exc:  # noqa: BLE001 - surface any pipeline error to the UI
             raise HTTPException(422, f"pipeline failed: {exc}") from exc
-        blob, sha = _verified_copy(result)
+        blob, sha = _verified_copy(result)  # recorded once, at pipeline completion
         st = RunState(result=result, ai_mappings=[m.model_copy(deep=True) for m in result.mappings],
                       form_path=form_path, memo_text=memo, naive_path=naive, spec=spec, display_name=display,
                       verified_bytes=blob, verified_sha256=sha)
@@ -238,7 +326,10 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
     def health():
         live = live_credentials_present() or app.state.client is not None
         return {"status": "ok", "version": __version__, "live_available": live,
-                "default_mode": "live" if live else "demo", "default_model": os.environ.get("FORM_GUARD_MODEL") or DEFAULT_MODEL}
+                "default_mode": "live" if live else "demo", "default_model": os.environ.get("FORM_GUARD_MODEL") or DEFAULT_MODEL,
+                "model_tiers": list(MODEL_TIERS),
+                "default_model_tier": os.environ.get("FORM_GUARD_MODEL_TIER") or "auto",
+                "models": {"opus": MODEL_OPUS, "sonnet": MODEL_SONNET, "haiku": MODEL_HAIKU}}
 
     @app.get("/api/demos")
     def demos():
@@ -258,27 +349,30 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
             raise HTTPException(404, "unknown demo") from exc
         p = demo_paths(d, samples())
         memo = req.memo_text if req.memo_text is not None else read_memo(p["memo"])
-        run_id, st = _run(p["form"], memo, req.mode, naive=p["naive"], spec=None, demo_id=d["id"], display=p["form"].name)
+        run_id, st = _run(p["form"], memo, req.mode, naive=p["naive"], spec=None, demo_id=d["id"], display=p["form"].name,
+                          model_tier=req.model_tier)
         return _payload(run_id, st)
+
+    @app.post("/api/discover")
+    def discover(file: UploadFile = File(...), mode: str = Form("auto"), model_tier: Optional[str] = Form(None)):
+        """Stages 1-3 of blank-cell discovery for an unmarked form; nothing is filled until a reviewer confirms."""
+        tier = _check_tier(model_tier)
+        form_path = _stage_upload(file)
+        try:
+            d = discover_blank_cells(form_path, mode=mode, client=app.state.client, model_tier=tier)
+        except Exception as exc:  # noqa: BLE001 - surface any discovery error to the UI
+            raise HTTPException(422, f"discovery failed: {exc}") from exc
+        d["form"] = file.filename or form_path.name
+        return {**d, "discovery_id": discoveries.put(d, form_path)}
 
     @app.post("/api/runs/upload")
     def run_upload(file: UploadFile = File(...), memo_text: str = Form(...), mode: str = Form("auto"),
-                   slot_spec: Optional[UploadFile] = File(None)):
-        suffix = Path(file.filename or "").suffix.lower()
-        if suffix not in MEDIA:
-            raise HTTPException(400, "upload a .docx or .xlsx form")
+                   slot_spec: Optional[UploadFile] = File(None), model_tier: Optional[str] = Form(None),
+                   discovery_id: Optional[str] = Form(None), confirmed_targets: Optional[str] = Form(None)):
+        tier = _check_tier(model_tier)
         if len(memo_text) > MAX_MEMO_CHARS:
             raise HTTPException(413, "memo too long")
-        data = file.file.read(MAX_UPLOAD_BYTES + 1)
-        if len(data) > MAX_UPLOAD_BYTES:
-            raise HTTPException(413, "file larger than 10 MB")
-        staging = store.root / "_uploads" / new_run_id()
-        staging.mkdir(parents=True, exist_ok=True)
-        form_path = staging / f"{_safe_stem(file.filename or 'form')}{suffix}"
-        form_path.write_bytes(data)
-        ftype = _check_package(form_path)
-        if f".{ftype}" != suffix:
-            raise HTTPException(400, f"file content is {ftype}, but the extension is {suffix}")
+        form_path = _stage_upload(file)
         spec = None
         if slot_spec is not None and slot_spec.filename:
             raw = slot_spec.file.read(200_001)
@@ -288,7 +382,18 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
                 spec = json.loads(raw.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise HTTPException(400, f"slot spec is not valid JSON: {exc}") from exc
-        run_id, st = _run(form_path, memo_text, mode, naive=None, spec=spec, demo_id=None, display=file.filename or form_path.name)
+        if confirmed_targets is not None or discovery_id:
+            if spec is not None:
+                raise HTTPException(400, "send either a slot spec or confirmed discovery targets, not both")
+            if confirmed_targets is None:
+                raise HTTPException(400, "confirmed_targets is required with discovery_id")
+            entry = discoveries.get(discovery_id)
+            try:  # the stored discovery, not anything the client sends, defines the cells
+                spec = build_confirmed_slot_spec(entry["discovery"], _parse_ids(confirmed_targets), form_path)
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
+        run_id, st = _run(form_path, memo_text, mode, naive=None, spec=spec, demo_id=None,
+                          display=file.filename or form_path.name, model_tier=tier)
         return _payload(run_id, st)
 
     @app.get("/api/runs/{run_id}")
@@ -324,15 +429,10 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
     def approve(run_id: str, req: ApproveRequest):
         st = store.get(run_id)
         with st.lock:
-            if (req.revision is not None and req.revision != st.revision) or \
-                    (req.filled_sha256 is not None and req.filled_sha256 != st.verified_sha256):
+            if st.stale(req.filled_sha256, req.revision):
                 raise HTTPException(409, {"message": "stale view or file modified — refresh before approving",
                                           "revision": st.revision, "filled_sha256": st.verified_sha256})
-            try:
-                on_disk = _sha(st.result.filled_path)
-            except OSError:
-                on_disk = ""
-            if on_disk != st.verified_sha256:
+            if not st.verified_sha256 or st.on_disk_sha256() != st.verified_sha256:
                 raise HTTPException(409, {"message": "the filled file was modified after verification — run it again"})
             rep = st.result.report
             if rep.pending_slots:
@@ -360,11 +460,14 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
             return {"approved": True, "download_url": f"/api/runs/{run_id}/download", **st.approval}
 
     @app.get("/api/runs/{run_id}/download")
-    def download(run_id: str):
+    def download(run_id: str, filled_sha256: Optional[str] = None, revision: Optional[int] = None):
         st = store.get(run_id)
         with st.lock:
             if not st.approval:
                 raise HTTPException(403, "human-in-the-loop approval is required before download")
+            if st.stale(filled_sha256, revision) or st.approval.get("revision") != st.revision:
+                raise HTTPException(409, {"message": "stale view — the approved revision / file is not the current one",
+                                          "revision": st.revision, "filled_sha256": st.verified_sha256})
             path = st.result.filled_path
             try:
                 blob = path.read_bytes()

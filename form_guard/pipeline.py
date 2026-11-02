@@ -60,6 +60,11 @@ class PipelineResult:
     builtin_demo: bool = False  # an unmodified built-in demo: sample form + sample memo, no reviewer edits
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds"))
 
+    @property
+    def verified_sha256(self) -> str:
+        """SHA-256 of the exact filled bytes the verifier checked."""
+        return str(self.report.stats.get("filled_sha256", ""))
+
     def to_dict(self, include_previews: bool = True) -> dict[str, Any]:
         memo_lines = self.memo_text.split("\n")
         d: dict[str, Any] = {
@@ -102,12 +107,14 @@ def new_run_id() -> str:
 # ---------------------------------------------------------------- mapping step
 
 
-def _map(scan_r: ScanResult, memo: str, mode: str, model: Optional[str], client: Any) -> tuple[MappingRun, dict]:
+def _map(scan_r: ScanResult, memo: str, mode: str, model: Optional[str], client: Any,
+         model_tier: Optional[str] = None) -> tuple[MappingRun, dict]:
     requested = (mode or "auto").lower()
     resolved = resolve_mode(requested) if client is None else ("live" if requested in ("auto", "live") else "demo")
-    engine = make_engine(resolved, model, client)
+    engine = make_engine(resolved, model, client, model_tier=model_tier)
     info: dict[str, Any] = {"requested_mode": requested, "mode": resolved, "label": engine.label,
-                            "model": getattr(engine, "model", None), "fallback_reason": None}
+                            "model": getattr(engine, "model", None), "model_tier": getattr(engine, "model_tier", None),
+                            "fallback_reason": None}
     try:
         run = map_fields(scan_r.slots, memo, engine, scan_r.title)
     except LiveEngineError as exc:
@@ -191,6 +198,72 @@ def reconstruct_mappings(scan_r: ScanResult, values: dict[str, str], memo: str,
                        if e is not None and (e.filled_value or e.suggested_value) else "No evidence found for this field in the memo."),
         ))
     return out
+
+
+AUDIT_LOG_NAMES = ("audit_log.json", "audit_report.json")
+
+
+def matching_audit_log(filled: Union[str, Path]) -> tuple[Optional[dict], str]:
+    """The audit log written next to ``filled`` for exactly this file (same SHA-256), if any."""
+    sha = hashlib.sha256(Path(filled).read_bytes()).hexdigest()
+    note = ""
+    for name in AUDIT_LOG_NAMES:
+        p = Path(filled).parent / name
+        if not p.is_file():
+            continue
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            note = f"{name} is unreadable — ignored"
+            continue
+        if isinstance(data, dict) and (data.get("filled") or {}).get("sha256") == sha:
+            return data, f"{name} (SHA-256 matches the filled file)"
+        note = f"{name} belongs to a different file (SHA-256 mismatch) — ignored"
+    return None, note
+
+
+@dataclass
+class VerifyOutcome:
+    report: VerificationReport
+    scan: ScanResult
+    values: dict[str, str]
+    memo_text: str
+    basis: str
+    audit_note: str
+
+    @property
+    def grounding_verified(self) -> bool:
+        return not any(c.evidence.get("not_verified") for c in self.report.checks)
+
+
+def verify_filled_copy(original: Union[str, Path], filled: Union[str, Path], memo_text: Optional[str] = None,
+                       slot_spec: Union[dict, str, Path, None] = None, attested: Optional[dict[str, str]] = None,
+                       memo_name: str = "") -> VerifyOutcome:
+    """Audit any filled copy against its blank original (CLI ``--verify``, MCP ``form_guard_verify``).
+
+    Structure and printed rules are always checked. Grounding uses ``memo_text`` if given, else the memo recorded in a
+    matching ``audit_log.json`` next to the filled file; without either the report says grounding was not verified.
+    """
+    from .verifier import infer_values_from_filled
+
+    sc = scan(original, slot_spec)
+    values = infer_values_from_filled(sc, filled)
+    audit, audit_note = matching_audit_log(filled)
+    if memo_text is not None:
+        memo = memo_text
+    else:
+        memo = (audit.get("memo") or {}).get("text", "") if audit else ""
+    memo = memo.replace("\r\n", "\n").replace("\r", "\n")
+    recorded = [FieldMapping.model_validate(m) for m in audit.get("mappings", [])] if audit else []
+    maps = reconstruct_mappings(sc, values, memo, recorded, attested or {})
+    rep = verify(sc, filled, maps, memo)
+    if not memo:
+        basis = "none"
+    elif memo_text is not None:
+        basis = f"memo {memo_name}" if memo_name else "memo provided"
+    else:
+        basis = "memo recorded in the audit log"
+    return VerifyOutcome(rep, sc, values, memo, basis, audit_note)
 
 
 def apply_overrides(scan_r: ScanResult, mappings: list[FieldMapping], overrides: dict[str, str]) -> list[FieldMapping]:
@@ -395,7 +468,13 @@ def run_pipeline(
     prior: Optional[tuple[list[FieldMapping], dict[str, Any]]] = None,
     png: bool = False,
     write_outputs: bool = True,
+    model_tier: Optional[str] = None,
 ) -> PipelineResult:
+    """Scan -> map & self-correct -> surgical write -> verify -> visual diff, for one blank form and memo.
+
+    ``model_tier`` (auto | opus | sonnet | haiku; None = ``FORM_GUARD_MODEL_TIER`` or auto) selects the Claude
+    model(s) in live mode; ``slot_spec`` may be a spec built by ``build_confirmed_slot_spec`` for an unmarked form.
+    """
     timings: dict[str, float] = {}
     t = time.perf_counter()
     form_path = Path(form_path)
@@ -409,7 +488,7 @@ def run_pipeline(
     if prior is not None:
         mappings, engine_info = [m.model_copy(deep=True) for m in prior[0]], dict(prior[1])
     else:
-        run, engine_info = _map(scan_r, memo_text, mode, model, client)
+        run, engine_info = _map(scan_r, memo_text, mode, model, client, model_tier)
         mappings = run.mappings
     mappings = apply_overrides(scan_r, mappings, overrides or {})
     timings["map"] = time.perf_counter() - t

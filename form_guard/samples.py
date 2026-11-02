@@ -7,6 +7,11 @@ free-text memos that contain the source facts, sidecar slot specs, and scripted
 re-generating a form from scratch (lost borders and merged cells, paraphrased
 legal text, US-Letter page setup, invented numbers).
 
+Two further forms are *unmarked* blank forms — no ``{{markers}}``, no ``[記入欄: …]``,
+no ``.slots.json`` — for blank-cell discovery: a research-equipment application
+(.docx) and a disaster-stockpile loan application (.xlsx), each with an office-only
+area, merged cells and (in the workbook) a SUM formula.
+
 Generation is deterministic: ZIP timestamps and document properties are fixed,
 so re-running the generator reproduces byte-identical files on the same machine.
 """
@@ -61,11 +66,38 @@ DEMOS = [
 ]
 
 
+UNMARKED_FORMS = [
+    {
+        "id": "form4",
+        "title": "研究設備共用利用申請書（マーカーなし白紙様式）",
+        "title_en": "Shared Research Equipment Use Application (unmarked blank form)",
+        "org": "架空学術機関（fictional research institute）",
+        "file_type": "docx",
+        "form": "form4_unmarked_blank.docx",
+        "memo": "memo4_equipment_use.txt",
+    },
+    {
+        "id": "form5",
+        "title": "地域防災備蓄品貸出申請書（マーカーなし白紙様式 .xlsx）",
+        "title_en": "Disaster Stockpile Loan Application (unmarked blank workbook)",
+        "org": "架空市（fictional city）",
+        "file_type": "xlsx",
+        "form": "form5_unmarked_blank.xlsx",
+        "memo": "memo5_stockpile_loan.txt",
+    },
+]
+
+
 def demo_by_id(demo_id: str) -> dict:
     for d in DEMOS:
         if d["id"] == demo_id:
             return d
     raise KeyError(demo_id)
+
+
+def unmarked_paths(item: dict, samples_dir: Path | None = None) -> dict[str, Path]:
+    base = Path(samples_dir) if samples_dir else default_samples_dir()
+    return {"form": base / "blank_forms" / item["form"], "memo": base / "memos" / item["memo"]}
 
 
 def default_samples_dir() -> Path:
@@ -157,8 +189,42 @@ MEMO3 = """11/2（月）定例点検メモ（記録者：点検責任者 模擬 
 次回点検は12月8日（火）に実施予定。
 """
 
+MEMO4 = """件名：研究設備共用利用申請の準備メモ（架空学術機関 研究基盤共用センター宛て）
+作成：2026年11月2日（月）　作成者：模擬 花子（研究支援課）
+
+■ 申請内容
+・申請日：2026年11月2日（月）
+・申請者氏名：架空 一郎（材料工学研究室 准教授）
+・所属機関：架空学術機関 材料工学研究室
+・利用目的：試作した多孔質セラミック試料の表面微細構造を観察し、焼成温度による気孔径の違いを比較する。
+・利用希望期間：2026年11月16日（月）から2026年11月27日（金）まで
+
+■ 連絡先
+・研究代表者：架空 一郎
+・事務担当者：模擬 花子
+
+■ メモ
+・受付番号・受付日・審査欄は事務局が記入するので、申請者側では空欄のままにする。
+"""
+
+MEMO5 = """架空市 防災課への備蓄品貸出申請メモ（架空町内会 防災部）
+記録日：2026年11月2日（月）
+
+【申請内容】
+申請日：2026年11月2日（月）
+申請団体名：架空町内会 防災部
+代表者氏名：模擬 五郎（防災部長）
+借用希望物品：簡易テント2張、発電機1台、投光器2台
+使用予定金額：48,000円（燃料費・運搬費の見込み）
+使用目的：2026年11月29日（日）の地域防災訓練で使用する。
+
+【メモ】
+・決裁印と受付番号の欄は事務局が記入するため、空欄のままにしておく。
+"""
+
 MEMOS = {"memo1_research_change.txt": MEMO1, "memo2_subsidy_application.txt": MEMO2,
-         "memo3_safety_inspection.txt": MEMO3}
+         "memo3_safety_inspection.txt": MEMO3, "memo4_equipment_use.txt": MEMO4,
+         "memo5_stockpile_loan.txt": MEMO5}
 
 # ======================================================================= slot specs
 
@@ -768,6 +834,176 @@ def _finalise_xlsx(blob: bytes) -> bytes:
     return rebuild_deterministic(blob, transform=transform)
 
 
+# ============================================================ unmarked blank forms
+
+
+def build_form4() -> bytes:
+    """Unmarked .docx: empty value cells next to printed labels, a duplicated 「氏名」 label, an office-only area."""
+    doc = _new_document("研究設備共用利用申請書（マーカーなし白紙様式）")
+    _header_footer(doc, "架空学術機関 研究基盤共用センター")
+    _para(doc, "様式第2号（第6条関係）", size=9, first=True)
+    _para(doc, "研究設備共用利用申請書", align="center", size=16, bold=True, gothic=True, before=4, after=6)
+    _para(doc, "架空学術機関長　殿", after=4)
+    _para(doc, "　架空学術機関研究設備共用規程第6条の規定により、下記のとおり研究設備の共用利用を申請します。",
+          align="both", after=2)
+    _para(doc, "記", align="center", after=2)
+
+    widths = [30, 24, 56, 20, 40]
+    t = _table(doc, 15, widths)
+    _banner(t, 0, "1．申請者")
+    for r, label in ((1, "申請日"), (2, "申請者氏名"), (3, "所属機関")):
+        _label(t.cell(r, 0).merge(t.cell(r, 1)), label)
+        _vcenter(t.cell(r, 2).merge(t.cell(r, 4)))
+        _row_height(t.rows[r], 9)
+    _banner(t, 4, "2．利用内容")
+    _label(t.cell(5, 0).merge(t.cell(5, 1)), "利用設備")
+    c = t.cell(5, 2).merge(t.cell(5, 4))
+    _para(c, "共用走査型電子顕微鏡（架空機種 FG-100）", first=True, size=9.5)
+    _vcenter(c)
+    _row_height(t.rows[5], 9)
+    _label(t.cell(6, 0).merge(t.cell(6, 1)), "利用目的", "（100字以内）")
+    t.cell(6, 2).merge(t.cell(6, 4))
+    _row_height(t.rows[6], 20)
+    _label(t.cell(7, 0).merge(t.cell(7, 1)), "利用希望期間", "（和暦で記入）")
+    _vcenter(t.cell(7, 2).merge(t.cell(7, 4)))
+    _row_height(t.rows[7], 10)
+    _banner(t, 8, "3．連絡先")
+    for r, group in ((9, "研究代表者"), (10, "事務担当者")):
+        _label(t.cell(r, 0), group, center=True)
+        _label(t.cell(r, 1), "氏名", center=True)
+        _vcenter(t.cell(r, 2).merge(t.cell(r, 4)))
+        _row_height(t.rows[r], 9)
+    _banner(t, 11, "4．事務局使用欄（申請者は記入しないでください）")
+    _label(t.cell(12, 0).merge(t.cell(12, 1)), "受付番号（事務局記入欄）")
+    _vcenter(t.cell(12, 2))
+    _label(t.cell(12, 3).merge(t.cell(12, 4)), "事務局受付欄", center=True)
+    _label(t.cell(13, 0).merge(t.cell(13, 1)), "受付日（事務局記入欄）")
+    _vcenter(t.cell(13, 2))
+    stamp = t.cell(13, 3).merge(t.cell(14, 4))  # stamp area spanning two rows (vMerge)
+    _cell_borders(stamp, {"top": ("single", 4), "left": ("single", 4), "bottom": ("double", 6), "right": ("single", 12)})
+    _label(t.cell(14, 0).merge(t.cell(14, 1)), "審査欄（事務局記入欄）")
+    _vcenter(t.cell(14, 2))
+    for r in (12, 13, 14):
+        _row_height(t.rows[r], 9)
+    _fix_widths(t, widths)
+
+    _para(doc, "（注意事項）", bold=True, gothic=True, size=9.5, before=6, after=1)
+    notes = [
+        "1　日付は和暦で記入すること。",
+        "2　利用目的は100字以内で具体的に記入すること。",
+        "3　「4．事務局使用欄」は事務局が記入するため、申請者は記入しないこと。",
+        "4　本様式の書式（罫線・欄の配置・注意事項の文言）は変更しないこと。",
+    ]
+    for n in notes:
+        _para(doc, n, size=9, indent_mm=4, hanging_mm=4)
+    return _docx_bytes(doc)
+
+
+def build_form5() -> bytes:
+    """Unmarked .xlsx: empty merged value cells, a reference table with a SUM formula, an office-only stamp area."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.worksheet.page import PageMargins
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "貸出申請書"
+    for col, w in {"A": 6, "B": 12, "C": 12, "D": 12, "E": 10, "F": 12, "G": 12, "H": 12}.items():
+        ws.column_dimensions[col].width = w
+    base = Font(name="游ゴシック", size=10.5)
+    bold = Font(name="游ゴシック", size=10.5, bold=True)
+    small = Font(name="游ゴシック", size=9)
+    thin, medium = Side(style="thin", color="000000"), Side(style="medium", color="000000")
+    label_fill = PatternFill("solid", fgColor="F2F2F2")
+    head_fill = PatternFill("solid", fgColor="DDEBF7")
+
+    def put(rng, value=None, font=base, h=None, v="center", wrap=False, fill=None, fmt=None):
+        first = rng.split(":")[0]
+        if ":" in rng:
+            ws.merge_cells(rng)
+        cell = ws[first]
+        if value is not None:
+            cell.value = value
+        cell.font = font
+        cell.alignment = Alignment(horizontal=h, vertical=v, wrap_text=wrap)
+        if fill is not None:
+            for row in ws[rng] if ":" in rng else [[cell]]:
+                for c in row:
+                    c.fill = fill
+        if fmt:
+            cell.number_format = fmt
+        return cell
+
+    def grid(rng, outline=medium):
+        rows = ws[rng]
+        n_r, n_c = len(rows), len(rows[0])
+        for i, row in enumerate(rows):
+            for j, c in enumerate(row):
+                c.border = Border(left=outline if j == 0 else thin, right=outline if j == n_c - 1 else thin,
+                                  top=outline if i == 0 else thin, bottom=outline if i == n_r - 1 else thin)
+
+    put("A1:H1", "地域防災備蓄品貸出申請書", Font(name="游ゴシック", size=16, bold=True), h="center")
+    put("A2:H2", "様式B-2（架空市防災備蓄品貸出要領第4条関係）", small, h="right")
+    put("A3:H3", "架空市長　様　架空市防災備蓄品貸出要領第4条の規定により、下記のとおり申請します。", small, h="left")
+    ws.row_dimensions[1].height = 30
+    put("A4:H4", "1　申請者記入欄", bold, h="left", fill=head_fill)
+    for r, label, rng in ((5, "申請日", "C5:H5"), (6, "申請団体名", "C6:H6"), (7, "代表者氏名", "C7:H7")):
+        put(f"A{r}:B{r}", label, bold, h="center", fill=label_fill)
+        put(rng, None)
+        ws.row_dimensions[r].height = 22
+    put("A8:B8", "借用希望物品\n（30字以内）", bold, h="center", wrap=True, fill=label_fill)
+    put("C8:H8", None, h="left", wrap=True)
+    put("A9:B9", "使用予定金額\n（単位：円）", bold, h="center", wrap=True, fill=label_fill)
+    put("C9:E9", None, h="right")
+    put("F9:H9", "※燃料費・運搬費を含む", small, h="left")
+    for r in (8, 9):
+        ws.row_dimensions[r].height = 30
+    grid("A5:H9")
+    put("A11:H11", "2　貸出可能な備蓄品（参考）", bold, h="left", fill=head_fill)
+    for rng, text in (("A12", "No."), ("B12:D12", "品目"), ("E12", "在庫数"), ("F12:H12", "保管場所")):
+        put(rng, text, bold, h="center", fill=label_fill)
+    stock = [("簡易テント", 6, "架空市防災倉庫A"), ("発電機", 3, "架空市防災倉庫B"), ("投光器", 8, "架空市防災倉庫A")]
+    for i, (item, qty, place) in enumerate(stock):
+        r = 13 + i
+        put(f"A{r}", i + 1, h="center")
+        put(f"B{r}:D{r}", item)
+        put(f"E{r}", qty, h="right", fmt='0"点"')
+        put(f"F{r}:H{r}", place, small)
+    put("A16:D16", "在庫合計（点）", bold, h="center", fill=label_fill)
+    put("E16", "=SUM(E13:E15)", h="right", fmt='0"点"')
+    put("F16:H16", "（自動計算）", small, h="left")
+    grid("A12:H16")
+    put("A17:H17", "3　事務局記入欄（申請者は記入しないこと）", bold, h="left", fill=head_fill)
+    put("A18:B19", "※事務局使用欄（決裁印・受付番号）", bold, h="center", wrap=True, fill=label_fill)
+    put("C18:H19", None)
+    for r in (18, 19):
+        ws.row_dimensions[r].height = 24
+    grid("A18:H19")
+    put("A21:H21", "（記入上の注意）", bold, h="left")
+    notes = ["1　日付は和暦で記入すること。",
+             "2　※印の欄は事務局が記入するため、申請者は記入しないこと。",
+             "3　本様式の書式・計算式は変更しないこと。"]
+    for i, n in enumerate(notes):
+        put(f"A{22 + i}:H{22 + i}", n, small, h="left")
+    put("A26:H26", FICTION_NOTICE_JA, Font(name="游ゴシック", size=8, color="666666"), h="center")
+
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.page_setup.orientation = "portrait"
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_margins = PageMargins(left=0.6, right=0.6, top=0.7, bottom=0.7)
+    ws.print_area = "A1:H26"
+    ws.oddFooter.center.text = "架空サンプル様式（Fictional sample form）"
+    wb.properties.creator = "Form-Guard Agent sample generator"
+    wb.properties.title = "地域防災備蓄品貸出申請書（マーカーなし白紙様式 .xlsx）"
+    wb.properties.created = SAMPLE_TIMESTAMP
+    wb.properties.modified = SAMPLE_TIMESTAMP
+    buf = io.BytesIO()
+    wb.save(buf)
+    return _finalise_xlsx(buf.getvalue())
+
+
 # ============================================================ naive "regeneration"
 
 NAIVE_NOTE = "naive-regeneration simulation (scripted to reproduce common failure modes; values intentionally flawed)"
@@ -896,6 +1132,10 @@ NAIVE_BUILDERS = {
     "broken_naive_ai_form2.docx": build_naive_form2,
     "broken_naive_ai_form3.xlsx": build_naive_form3,
 }
+UNMARKED_BUILDERS = {  # no slot spec: the cells to fill come from discovery + human confirmation
+    "form4_unmarked_blank.docx": build_form4,
+    "form5_unmarked_blank.xlsx": build_form5,
+}
 
 
 def generate_samples(samples_dir: Path | str | None = None, with_comparisons: bool = True) -> dict[str, Path]:
@@ -913,6 +1153,10 @@ def generate_samples(samples_dir: Path | str | None = None, with_comparisons: bo
         sp = blank / f"{Path(name).stem}.slots.json"
         sp.write_text(json.dumps(spec, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
         written[sp.name] = sp
+    for name, fn in UNMARKED_BUILDERS.items():
+        p = blank / name
+        p.write_bytes(fn())
+        written[name] = p
     for name, text in MEMOS.items():
         p = memos / name
         p.write_text(text, encoding="utf-8", newline="\n")
@@ -930,7 +1174,8 @@ def generate_samples(samples_dir: Path | str | None = None, with_comparisons: bo
 
 def ensure_samples(samples_dir: Path | str | None = None) -> Path:
     base = Path(samples_dir) if samples_dir else default_samples_dir()
-    needed = [base / "blank_forms" / d["form"] for d in DEMOS] + [base / "memos" / d["memo"] for d in DEMOS] + \
+    needed = [base / "blank_forms" / d["form"] for d in DEMOS + UNMARKED_FORMS] + \
+             [base / "memos" / d["memo"] for d in DEMOS + UNMARKED_FORMS] + \
              [base / "broken_before" / d["naive"] for d in DEMOS]
     if not all(p.exists() for p in needed):
         generate_samples(base)

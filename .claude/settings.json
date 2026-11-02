@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import sys,json,os,re;d=json.loads(sys.stdin.read() or '{}');p=str((d.get('tool_input') or {}).get('file_path') or '');t=p.lower().endswith(('.py','.md','.json','.txt','.toml','.yml','.yaml','.js','.html','.css','.cfg','.ini','.sh','.ps1'));s=open(p,encoding='utf-8',errors='replace').read() if t and os.path.isfile(p) else '';e=[];m='exec';exec('try:\\n compile(s,os.path.basename(p),m)\\nexcept SyntaxError as x:\\n e.append(x)') if s and p.endswith('.py') else None;exec('try:\\n json.loads(s)\\nexcept ValueError as x:\\n e.append(x)') if s and p.endswith('.json') else None;q=chr(34)+chr(39);b=chr(92)*2;r=[('Anthropic API key','sk-'+'ant-[A-Za-z0-9_-]{10,}'),('literal API key assignment','api'+'_key[ ]*=[ ]*['+q+'][^'+q+']{8,}'),('local user-profile path','[A-Za-z]:[/'+b+']Users[/'+b+'][A-Za-z0-9]'),('local user-profile path','/Users/[A-Za-z0-9._-]+/')];w=[k for k,v in r if re.search(v,s)];a=[x for x in re.findall('[A-Za-z0-9._+-]+@([A-Za-z0-9-]+(?:[.][A-Za-z0-9-]+)+)',s) if not x.lower().endswith(('example.jp','example.com','example.org','example.net','noreply.github.com','anthropic.com'))];n=['syntax: '+str(x) for x in e]+['hygiene: '+k for k in dict.fromkeys(w)]+(['hygiene: e-mail address outside the reserved example domains'] if a else []);print(chr(10).join('[form-guard hook] '+os.path.basename(p)+': '+x for x in n),file=sys.stderr) if n else None;sys.exit(2 if n else 0)\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

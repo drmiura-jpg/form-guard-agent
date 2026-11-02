@@ -115,6 +115,56 @@ class Container:
 
 
 @dataclass
+class SheetCell:
+    """A worksheet ``<c>`` element (profile ``sheet``), located by byte offsets."""
+
+    ref: str
+    row: int
+    col: int
+    qname: str
+    start_tag: tuple[int, int]
+    end_tag: Optional[tuple[int, int]]
+    empty: bool
+    attrs: dict[str, str] = field(default_factory=dict)
+    children: list[str] = field(default_factory=list)  # local names of the direct children (v, f, is, …)
+    is_container: Optional[int] = None  # index of its <is> inline-string container, if any
+
+    @property
+    def span(self) -> tuple[int, int]:
+        end = self.end_tag[1] if self.end_tag else self.start_tag[1]
+        return (self.start_tag[0], end)
+
+
+@dataclass
+class SheetRow:
+    r: int
+    qname: str
+    start_tag: tuple[int, int]
+    end_tag: Optional[tuple[int, int]]
+    empty: bool
+    attrs: dict[str, str] = field(default_factory=dict)
+    cells: list[str] = field(default_factory=list)  # cell refs in document order
+
+    @property
+    def span(self) -> tuple[int, int]:
+        end = self.end_tag[1] if self.end_tag else self.start_tag[1]
+        return (self.start_tag[0], end)
+
+
+@dataclass
+class ElementSpan:
+    qname: str
+    start_tag: tuple[int, int]
+    end_tag: Optional[tuple[int, int]]
+    empty: bool
+
+    @property
+    def span(self) -> tuple[int, int]:
+        end = self.end_tag[1] if self.end_tag else self.start_tag[1]
+        return (self.start_tag[0], end)
+
+
+@dataclass
 class PartIndex:
     part_name: str
     data: bytes
@@ -122,6 +172,12 @@ class PartIndex:
     nodes: list[TextNode]
     containers: list[Container]
     tables: list[TableInfo]
+    # worksheet structure (profile "sheet" only): every <c> / <row>, <sheetData>, column styles
+    cells: dict[str, SheetCell] = field(default_factory=dict)
+    rows: dict[int, SheetRow] = field(default_factory=dict)
+    sheet_data: Optional[ElementSpan] = None
+    col_styles: list[tuple[int, int, str]] = field(default_factory=list)  # (min, max, style id)
+    implicit_refs: bool = False  # a <row> or <c> without its r attribute (cells cannot be addressed)
 
     def container_text(self, c: Container) -> str:
         out = []
@@ -293,6 +349,9 @@ def index_part(part_name: str, data: bytes, profile: str) -> PartIndex:
     cell_stack: list[CellInfo] = []
     counters = {"para": 0, "si": 0, "run": 0}
     state = {"skip": 0, "cell_ref": None, "text": None}
+    sheet_cells: dict[str, SheetCell] = {}
+    sheet_rows: dict[int, SheetRow] = {}
+    sheet_meta: dict = {"sheet_data": None, "cols": [], "implicit": False}
 
     parser = expat.ParserCreate(namespace_separator=" ")
     parser.buffer_text = False
@@ -311,6 +370,8 @@ def index_part(part_name: str, data: bytes, profile: str) -> PartIndex:
         frame = _Frame(uri, local, span, empty)
         parent = stack[-1] if stack else None
         key = (uri, local)
+        if profile == "sheet" and parent is not None and parent.role == "cell":
+            parent.ref.children.append(local)  # type: ignore[union-attr]
 
         if key in skip_keys:
             state["skip"] += 1
@@ -331,6 +392,8 @@ def index_part(part_name: str, data: bytes, profile: str) -> PartIndex:
                 counters["si"] += 1
             else:
                 c.cell_ref = state["cell_ref"]
+                if parent is not None and parent.role == "cell":
+                    parent.ref.is_container = c.idx  # type: ignore[union-attr]
             containers.append(c)
             cont_stack.append(c.idx)
             frame.role, frame.ref = "container", c.idx
@@ -388,10 +451,37 @@ def index_part(part_name: str, data: bytes, profile: str) -> PartIndex:
             frame.role = "run"
         elif profile == "sheet" and key == (S_NS, "c"):
             state["cell_ref"] = attrs.get("r")
+            if parent is not None and parent.role == "row":
+                ref = (attrs.get("r") or "").replace("$", "").upper()
+                rc = split_cell_ref(ref) if ref else None
+                if rc is None:
+                    sheet_meta["implicit"] = True
+                else:
+                    cell = SheetCell(ref=ref, row=rc[0], col=rc[1], qname=qname_of(data[span[0] : span[1]]),
+                                     start_tag=span, end_tag=None, empty=empty, attrs=dict(attrs))
+                    sheet_cells.setdefault(ref, cell)
+                    parent.ref.cells.append(ref)  # type: ignore[union-attr]
+                    frame.role, frame.ref = "cell", cell
         elif profile == "sheet" and key == (S_NS, "r") and cont_stack:
             run_stack.append(counters["run"])
             counters["run"] += 1
             frame.role = "run"
+        elif profile == "sheet" and key == (S_NS, "row") and parent is not None and parent.role == "sheetData":
+            r = _int(attrs.get("r"), 0)
+            if r <= 0:
+                sheet_meta["implicit"] = True
+            else:
+                row = SheetRow(r=r, qname=qname_of(data[span[0] : span[1]]), start_tag=span, end_tag=None,
+                               empty=empty, attrs=dict(attrs))
+                sheet_rows.setdefault(r, row)
+                frame.role, frame.ref = "row", row
+        elif profile == "sheet" and key == (S_NS, "sheetData"):
+            sheet_meta["sheet_data"] = ElementSpan(qname_of(data[span[0] : span[1]]), span, None, empty)
+            frame.role = "sheetData"
+        elif profile == "sheet" and key == (S_NS, "col"):
+            lo, hi = _int(attrs.get("min"), 0), _int(attrs.get("max"), 0)
+            if lo and hi and attrs.get("style"):
+                sheet_meta["cols"].append((lo, hi, attrs["style"]))
         stack.append(frame)
 
     def end(name: str):
@@ -428,6 +518,10 @@ def index_part(part_name: str, data: bytes, profile: str) -> PartIndex:
         elif role == "ppr_rpr" and cont_stack:
             full_end = end_span[1] if end_span else frame.start[1]
             containers[cont_stack[-1]].ppr_rpr = data[frame.start[0] : full_end]
+        elif role in ("cell", "row"):
+            frame.ref.end_tag = end_span  # type: ignore[union-attr]
+        elif role == "sheetData" and sheet_meta["sheet_data"] is not None:
+            sheet_meta["sheet_data"].end_tag = end_span
 
     def chars(text: str):
         if state["text"] is not None and stack and stack[-1].role == "text":
@@ -440,7 +534,9 @@ def index_part(part_name: str, data: bytes, profile: str) -> PartIndex:
         parser.Parse(data, True)
     except expat.ExpatError as exc:  # pragma: no cover - surfaced to the verifier
         raise UnsupportedXMLError(f"{part_name}: XML parse error: {exc}") from exc
-    return PartIndex(part_name, data, profile, nodes, containers, tables)
+    return PartIndex(part_name, data, profile, nodes, containers, tables, cells=sheet_cells, rows=sheet_rows,
+                     sheet_data=sheet_meta["sheet_data"], col_styles=sheet_meta["cols"],
+                     implicit_refs=sheet_meta["implicit"])
 
 
 def _int(v, default: int) -> int:
@@ -448,6 +544,36 @@ def _int(v, default: int) -> int:
         return int(v)
     except (TypeError, ValueError):
         return default
+
+
+_A1_RE = re.compile(r"^\$?([A-Za-z]{1,3})\$?([0-9]{1,7})$")
+
+
+def split_cell_ref(ref: str) -> Optional[tuple[int, int]]:
+    """'C5' -> (5, 3) as (row, column); None if ``ref`` is not an A1-style cell reference."""
+    m = _A1_RE.match(ref.strip())
+    if not m or int(m.group(2)) < 1:
+        return None
+    return int(m.group(2)), column_number(m.group(1))
+
+
+def column_letters(n: int) -> str:
+    out = ""
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        out = chr(65 + rem) + out
+    return out
+
+
+def inherited_cell_style(idx: PartIndex, row: int, col: int) -> Optional[str]:
+    """Style id Excel applies to a cell that does not exist yet: the row's (customFormat) or the column's."""
+    r = idx.rows.get(row)
+    if r is not None and r.attrs.get("customFormat") in ("1", "true") and r.attrs.get("s"):
+        return r.attrs["s"]
+    for lo, hi, style in idx.col_styles:
+        if lo <= col <= hi:
+            return style
+    return None
 
 
 # --------------------------------------------------------------- package helpers

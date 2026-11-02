@@ -4,6 +4,11 @@ Pipeline: Scan -> Map & Self-Correct (Claude or offline demo engine) -> Surgical
 Write -> Structural Verify -> Visual Diff & Human-in-the-Loop report.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
-DEFAULT_MODEL = "claude-opus-5-5"
+# Current-generation Claude models used by the multi-model router (form_guard/mapper.py).
+MODEL_OPUS = "claude-opus-5-5"      # long-text condensation, self-correction after validator rejection
+MODEL_SONNET = "claude-sonnet-5-5"  # standard text / yen / person-name fields
+MODEL_HAIKU = "claude-haiku-5-5"    # structured fields (dates, IDs, choices) and blank-cell label classification
+
+DEFAULT_MODEL = MODEL_OPUS

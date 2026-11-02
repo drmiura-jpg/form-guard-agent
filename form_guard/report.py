@@ -128,6 +128,14 @@ def build_report_html(d: dict[str, Any]) -> str:
                      f"<div class='card'>{_checks_table(naive['checks'])}</div>"
     eng = d["engine"]
     fb = f" — <b>fallback:</b> {E(eng['fallback_reason'])}" if eng.get("fallback_reason") else ""
+    routing = (eng.get("usage") or {}).get("routing") or []
+    routing_html = ""
+    if routing:  # live mode: which model handled which field, and why
+        trs = "".join(f"<tr><td>{E(r['task'])}</td><td class='mono'>{E(r['model'])}</td><td>{E('、'.join(r['slots']))}</td>"
+                      f"<td class='muted'>{E(' / '.join(dict.fromkeys(r.get('reasons', {}).values())))}</td></tr>"
+                      for r in routing)
+        routing_html = ("<h2>Model routing / モデルの使い分け</h2><div class='card'><table><tr><th>Task</th><th>Model</th>"
+                        f"<th>Fields</th><th>Why</th></tr>{trs}</table></div>")
     # Never claim an uploaded form, an edited memo or reviewer-typed values are fictional.
     footer = ("This report is generated from the supplied form and memo. Reviewing the facts and deciding to submit "
               "is the human reviewer's responsibility. ｜ このレポートは入力された様式・メモに基づきます。"
@@ -151,6 +159,7 @@ def build_report_html(d: dict[str, Any]) -> str:
 <h2>Visual comparison / 見た目の比較</h2><div class="grid3">{''.join(figs)}</div>
 <h2>Field mapping &amp; verbatim sources / 記入値と根拠</h2><div class="card"><table>
 <tr><th>Field</th><th>Value</th><th>Chars</th><th>Status</th><th>Source quote · self-correction</th></tr>{''.join(rows)}</table></div>
+{routing_html}
 <h2>Source memo / 入力メモ（黄色＝引用箇所）</h2><div class="memo">{_memo_html(d['memo']['text'], maps)}</div>
 <h2>Structural audit / 構造検査</h2><div class="card">{_checks_table(rep['checks'])}</div>
 <h3>ZIP entries (SHA-256)</h3><div class="card"><table><tr><th>Entry</th><th>Role</th><th>SHA-256</th><th>Result</th></tr>{entries}</table></div>

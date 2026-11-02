@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "form-guard": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["-m", "form_guard.mcp_server"],
+      "env": {}
+    }
+  }
+}

@@ -1,0 +1,481 @@
+"""Form-Guard MCP server: the Form-Guard tools over the Model Context Protocol (stdio, JSON-RPC 2.0).
+
+    python -m form_guard.mcp_server             # built-in stdio server, no extra dependencies
+    python -m form_guard.mcp_server --fastmcp   # the same tools through the official `mcp` SDK (pip install mcp)
+
+Claude Code picks it up from ``.mcp.json`` (server name ``form-guard``). Messages may be newline-delimited
+JSON (the MCP stdio transport) or Content-Length framed; every answer uses the framing of its request.
+
+Tools: ``form_guard_scan``, ``form_guard_discover_blank_cells``, ``form_guard_fill``, ``form_guard_verify``.
+
+Human approval is never bypassed: ``form_guard_fill`` only writes an unapproved draft into
+``output/mcp_runs/<run id>/`` and returns the verification report and the HITL checklist; signing off and
+downloading stay in the web app. Values attributed to a human reviewer (``--set`` in the CLI) cannot be sent
+through MCP, and office-only cells cannot be confirmed. Paths are resolved against the server root (the working
+directory, or ``FORM_GUARD_MCP_ROOT``) and must stay inside it.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional
+
+from . import __version__
+
+PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
+APPROVAL_STATUS = "UNAPPROVED_DRAFT_REQUIRES_HUMAN_SIGN_OFF"
+MAX_MEMO_CHARS = 60_000
+SERVER_INFO = {"name": "form-guard", "title": "Form-Guard Agent", "version": __version__}
+INSTRUCTIONS = (
+    "Form-Guard fills only the designated fields of .docx/.xlsx forms and proves nothing else changed. "
+    "Use form_guard_scan to list slots; for an unmarked blank form use form_guard_discover_blank_cells, show the "
+    "candidates to the user and let them choose; form_guard_fill writes an UNAPPROVED draft — tell the user that a "
+    "named human reviewer must sign it off (python -m form_guard.cli --serve) before it is used; form_guard_verify "
+    "audits any filled copy against its blank original. All sample forms are fictional; do not use real personal data."
+)
+
+_MODE = {"type": "string", "enum": ["auto", "demo", "live"]}
+_TIER = {"type": "string", "enum": ["auto", "opus", "sonnet", "haiku"],
+         "description": "Claude model tier in live mode: auto = Haiku for structured fields, Sonnet for standard text, "
+                        "Opus for long text and self-correction"}
+_PATH = {"type": "string"}
+
+TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "form_guard_scan",
+        "title": "Scan a form for fillable slots",
+        "description": "List the fillable slots of a .docx/.xlsx form ({{markers}}, [記入欄: …] or cell coordinates in a "
+                       ".slots.json) with the rules printed on the form (character limits, 和暦, digits, caps, "
+                       "drop-down options). Read-only.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "form_path": {**_PATH, "description": "blank form, relative to the server root"},
+                "slot_spec_path": {**_PATH, "description": "optional .slots.json (aliases, coordinate targets)"},
+            },
+            "required": ["form_path"],
+            "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "form_guard_discover_blank_cells",
+        "title": "Discover empty cells of an unmarked blank form",
+        "description": "4-stage discovery for a form without markers: (1) empty cells next to a printed label, "
+                       "(2) applicant_fillable vs office_only (事務局・受付印・受付番号・審査欄・決裁…) with unique slot ids "
+                       "and printed rules, (3) deterministic safety checks (formula and merged-continuation cells are "
+                       "rejected), (4) a report for HUMAN confirmation. Nothing is written. Read-only.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "form_path": {**_PATH, "description": "unmarked blank form, relative to the server root"},
+                "mode": {**_MODE, "default": "demo",
+                         "description": "demo = deterministic rules; live / auto = Claude also classifies the labels"},
+                "model_tier": {**_TIER, "default": "auto"},
+            },
+            "required": ["form_path"],
+            "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "form_guard_fill",
+        "title": "Fill a form into an unapproved draft",
+        "description": "Run scan → grounded mapping with self-correction → surgical write → 21-check verification into "
+                       "output/mcp_runs/<run id>/. The result is an UNAPPROVED DRAFT (approval_status "
+                       f"{APPROVAL_STATUS}) with the verification report and the HITL checklist; a named human reviewer "
+                       "must sign it off before use. For an unmarked form pass the discovery report and the "
+                       "candidate ids the user confirmed (office-only cells are always refused).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "form_path": {**_PATH, "description": "blank form, relative to the server root"},
+                "memo_text": {"type": "string", "description": "source memo text (or use memo_path)"},
+                "memo_path": {**_PATH, "description": "UTF-8 memo file, relative to the server root"},
+                "slot_spec_path": {**_PATH, "description": "optional .slots.json"},
+                "discovery": {"type": "object", "description": "report returned by form_guard_discover_blank_cells"},
+                "discovery_path": {**_PATH, "description": "discovery report saved as JSON (alternative to discovery)"},
+                "confirmed_ids": {"type": "array", "items": {"type": "string"},
+                                  "description": "candidate ids the user confirmed, e.g. [\"c01\", \"c02\"]"},
+                "mode": {**_MODE, "default": "auto",
+                         "description": "auto = Claude if ANTHROPIC_API_KEY is set, else the offline engine"},
+                "model_tier": {**_TIER, "default": "auto"},
+            },
+            "required": ["form_path"],
+            "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+    },
+    {
+        "name": "form_guard_verify",
+        "title": "Verify a filled copy against its blank original",
+        "description": "Re-run the deterministic checks (ZIP/SHA-256, XML skeleton, tables/borders/merges, boilerplate "
+                       "text, designated cells, printed rules) on any filled .docx/.xlsx. Grounding is checked against "
+                       "memo_text / memo_path, or a matching audit_log.json next to the filled file. Read-only.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "original_path": {**_PATH, "description": "blank original, relative to the server root"},
+                "filled_path": {**_PATH, "description": "filled copy, relative to the server root"},
+                "memo_text": {"type": "string"},
+                "memo_path": _PATH,
+                "slot_spec_path": _PATH,
+            },
+            "required": ["original_path", "filled_path"],
+            "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    },
+]
+TOOL_NAMES = [t["name"] for t in TOOLS]
+
+
+class ToolError(Exception):
+    """A tool-level failure, reported to the client as a result with isError: true."""
+
+
+class FormGuardMCP:
+    def __init__(self, root: Optional[Path] = None, client: Any = None):
+        self.root = Path(root or os.environ.get("FORM_GUARD_MCP_ROOT") or Path.cwd()).resolve()
+        self.out_root = self.root / "output" / "mcp_runs"
+        self.client = client  # a Claude client for live mode (tests pass a fake one)
+        self.protocol_version = PROTOCOL_VERSIONS[0]
+
+    # ----------------------------------------------------------------- JSON-RPC
+
+    def handle_payload(self, payload: Any) -> Any:
+        if isinstance(payload, list):  # batch (2025-03-26)
+            out = [r for r in (self.handle(m) for m in payload) if r is not None]
+            return out or None
+        return self.handle(payload)
+
+    def handle(self, msg: Any) -> Optional[dict[str, Any]]:
+        if not isinstance(msg, dict):
+            return _error(None, -32600, "Invalid Request")
+        method, mid = msg.get("method"), msg.get("id")
+        if not isinstance(method, str):
+            return None if "id" not in msg or "result" in msg or "error" in msg else _error(mid, -32600, "Invalid Request")
+        if "id" not in msg:  # notification (notifications/initialized, notifications/cancelled, …): no answer
+            return None
+        params = msg.get("params") or {}
+        if not isinstance(params, dict):
+            return _error(mid, -32602, "params must be an object")
+        if method == "initialize":
+            wanted = params.get("protocolVersion")
+            self.protocol_version = wanted if wanted in PROTOCOL_VERSIONS else PROTOCOL_VERSIONS[0]
+            return _result(mid, {"protocolVersion": self.protocol_version,
+                                 "capabilities": {"tools": {"listChanged": False}},
+                                 "serverInfo": SERVER_INFO, "instructions": INSTRUCTIONS})
+        if method == "ping":
+            return _result(mid, {})
+        if method == "tools/list":
+            return _result(mid, {"tools": TOOLS})
+        if method == "tools/call":
+            name, args = params.get("name"), params.get("arguments") or {}
+            if name not in TOOL_NAMES:
+                return _error(mid, -32602, f"Unknown tool: {name}")
+            if not isinstance(args, dict):
+                return _error(mid, -32602, "arguments must be an object")
+            return _result(mid, self.call_tool(name, args))
+        return _error(mid, -32601, f"Method not found: {method}")
+
+    def call_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        handler = {"form_guard_scan": self.tool_scan, "form_guard_discover_blank_cells": self.tool_discover,
+                   "form_guard_fill": self.tool_fill, "form_guard_verify": self.tool_verify}[name]
+        schema = next(t["inputSchema"] for t in TOOLS if t["name"] == name)
+        try:
+            unknown = sorted(set(args) - set(schema["properties"]))
+            if unknown:
+                raise ToolError(f"unknown argument(s) for {name}: {', '.join(unknown)}")
+            missing = [k for k in schema["required"] if args.get(k) in (None, "")]
+            if missing:
+                raise ToolError(f"missing required argument(s): {', '.join(missing)}")
+            with contextlib.redirect_stdout(sys.stderr):  # stdout carries protocol messages only
+                data = json.loads(json.dumps(handler(args), ensure_ascii=False, default=str))
+        except ToolError as exc:
+            return {"content": [{"type": "text", "text": str(exc)}], "isError": True}
+        except Exception as exc:  # noqa: BLE001 - every failure is reported to the client, never crashes the server
+            return {"content": [{"type": "text", "text": f"{type(exc).__name__}: {exc}"}], "isError": True}
+        return {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False, indent=1)}],
+                "structuredContent": data, "isError": False}
+
+    # -------------------------------------------------------------------- helpers
+
+    def _path(self, value: Any, what: str) -> Path:
+        if not isinstance(value, str) or not value.strip():
+            raise ToolError(f"{what} is required")
+        p = Path(value)
+        p = (p if p.is_absolute() else self.root / p).resolve()
+        if not p.is_relative_to(self.root):
+            raise ToolError(f"{what} must be inside the server root")
+        if not p.is_file():
+            raise ToolError(f"{what} not found: {value}")
+        return p
+
+    def _rel(self, p: Path) -> str:
+        p = Path(p).resolve()
+        return p.relative_to(self.root).as_posix() if p.is_relative_to(self.root) else p.name
+
+    def _memo(self, args: dict[str, Any], required: bool) -> Optional[str]:
+        from .samples import read_memo
+
+        if args.get("memo_text") is not None:
+            text = str(args["memo_text"])
+        elif args.get("memo_path"):
+            text = read_memo(self._path(args["memo_path"], "memo_path"))
+        elif required:
+            raise ToolError("memo_text or memo_path is required")
+        else:
+            return None
+        if len(text) > MAX_MEMO_CHARS:
+            raise ToolError(f"memo longer than {MAX_MEMO_CHARS:,} characters")
+        return text.replace("\r\n", "\n").replace("\r", "\n")
+
+    def _spec(self, args: dict[str, Any]) -> Optional[dict[str, Any]]:
+        if not args.get("slot_spec_path"):
+            return None
+        try:
+            return json.loads(self._path(args["slot_spec_path"], "slot_spec_path").read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ToolError(f"slot spec is not valid JSON: {exc}") from exc
+
+    @staticmethod
+    def _checks(report) -> list[dict[str, Any]]:
+        return [{"check_id": c.check_id, "passed": c.passed, "description": c.description, "details": c.details[:300]}
+                for c in report.checks]
+
+    # ---------------------------------------------------------------------- tools
+
+    def tool_scan(self, args: dict[str, Any]) -> dict[str, Any]:
+        from .scanner import scan, sha256_file
+
+        form = self._path(args.get("form_path"), "form_path")
+        r = scan(form, self._spec(args))
+        out = {
+            "form": self._rel(form), "file_type": r.file_type, "title": r.title, "form_sha256": sha256_file(form),
+            "slot_count": len(r.slots),
+            "slots": [{"slot_id": s.slot_id, "label": s.label, "marker_kind": s.occurrences[0].marker_kind,
+                       "required_format": s.required_format, "max_chars": s.max_chars, "constraints": s.constraints,
+                       "context_label": s.context_label, "location": s.location_path, "occurrences": len(s.occurrences)}
+                      for s in r.slots],
+            "warnings": r.warnings,
+        }
+        if not r.slots:
+            out["hint"] = "0 slots — for an unmarked blank form call form_guard_discover_blank_cells"
+        return out
+
+    def tool_discover(self, args: dict[str, Any]) -> dict[str, Any]:
+        from .scanner import discover_blank_cells
+
+        form = self._path(args.get("form_path"), "form_path")
+        d = discover_blank_cells(form, mode=str(args.get("mode") or "demo"), client=self.client,
+                                 model_tier=args.get("model_tier") or None)
+        d["form_path"] = self._rel(form)
+        return d
+
+    def tool_fill(self, args: dict[str, Any]) -> dict[str, Any]:
+        from .pipeline import new_run_id, run_pipeline
+        from .scanner import build_confirmed_slot_spec
+
+        form = self._path(args.get("form_path"), "form_path")
+        memo = self._memo(args, required=True)
+        spec = self._spec(args)
+        selection = "slot spec" if spec else "markers / sidecar .slots.json"
+        if args.get("discovery") is not None or args.get("discovery_path") or args.get("confirmed_ids") is not None:
+            if spec is not None:
+                raise ToolError("send either slot_spec_path or discovery + confirmed_ids, not both")
+            if isinstance(args.get("discovery"), dict):
+                discovery = args["discovery"]
+            elif args.get("discovery_path"):
+                discovery = json.loads(self._path(args["discovery_path"], "discovery_path").read_text(encoding="utf-8"))
+            else:
+                raise ToolError("confirmed_ids needs the discovery report (discovery or discovery_path)")
+            ids = args.get("confirmed_ids")
+            if not isinstance(ids, list):
+                raise ToolError("confirmed_ids must be a list of candidate ids confirmed by the user")
+            try:
+                spec = build_confirmed_slot_spec(discovery, [str(i) for i in ids], form)
+            except ValueError as exc:
+                raise ToolError(f"refused before filling: {exc}") from exc
+            selection = (f"discovery cells {', '.join(spec['confirmed_candidates'])} passed by the MCP client — the "
+                         f"human reviewer checks them at sign-off")
+        run_id = new_run_id()
+        out_dir = self.out_root / run_id
+        r = run_pipeline(form, memo, out_dir, mode=str(args.get("mode") or "auto"), client=self.client,
+                         slot_spec=spec, run_id=run_id, model_tier=args.get("model_tier") or None)
+        rep = r.report
+        spec_path: Optional[str] = args.get("slot_spec_path") or None
+        if spec is not None and not spec_path:  # keep the confirmed cells next to the draft (needed to verify it later)
+            sp = out_dir / "confirmed.slots.json"
+            sp.write_text(json.dumps(spec, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
+            spec_path = self._rel(sp)
+        status = {
+            "approval_status": APPROVAL_STATUS, "run_id": run_id, "draft": r.filled_path.name,
+            "filled_sha256": r.verified_sha256, "verification": rep.overall_status, "cell_selection": selection,
+            "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "note": "Draft written through MCP. It is not approved: a named human reviewer must confirm every HITL "
+                    "checklist item (web app: python -m form_guard.cli --serve) before the file is used.",
+        }
+        (out_dir / "APPROVAL_STATUS.json").write_text(json.dumps(status, ensure_ascii=False, indent=2) + "\n",
+                                                      encoding="utf-8", newline="\n")
+        return {
+            "approval_status": APPROVAL_STATUS,
+            "human_sign_off_required": True,
+            "next_step": status["note"],
+            "run_id": run_id,
+            "out_dir": self._rel(out_dir),
+            "draft_path": self._rel(r.filled_path),
+            "report_html": self._rel(out_dir / "report.html"),
+            "audit_log": self._rel(out_dir / "audit_log.json"),
+            "slot_spec_path": spec_path,
+            "filled_sha256": r.verified_sha256,
+            "cell_selection": selection,
+            "engine": {k: r.engine.get(k) for k in ("mode", "label", "model", "model_tier", "fallback_reason")},
+            "routing": (r.engine.get("usage") or {}).get("routing", []),
+            "verification": {"overall_status": rep.overall_status, "passed": rep.passed_count,
+                             "failed": rep.failed_count, "pending_slots": rep.pending_slots,
+                             "ungrounded_claims": rep.ungrounded_claims_count, "checks": self._checks(rep)},
+            "fields": [{"slot_id": m.slot_id, "status": m.status, "value": m.filled_value,
+                        "suggested_value": m.suggested_value, "source_quote": m.source_quote,
+                        "source_line_range": m.source_line_range, "normalizations": m.normalizations}
+                       for m in r.mappings],
+            "hitl_checklist": [{"item_id": h.item_id, "kind": h.kind, "prompt": h.prompt, "value": h.value,
+                                "source_quote": h.source_quote, "flags": h.flags, "required": h.required}
+                               for h in rep.hitl_checklist],
+        }
+
+    def tool_verify(self, args: dict[str, Any]) -> dict[str, Any]:
+        from .pipeline import verify_filled_copy
+
+        original = self._path(args.get("original_path"), "original_path")
+        filled = self._path(args.get("filled_path"), "filled_path")
+        memo = self._memo(args, required=False)
+        out = verify_filled_copy(original, filled, memo, self._spec(args), None,
+                                 memo_name=str(args.get("memo_path") or ""))
+        rep = out.report
+        return {
+            "original": self._rel(original), "filled": self._rel(filled), "overall_status": rep.overall_status,
+            "passed": rep.passed_count, "failed": rep.failed_count, "pending_slots": rep.pending_slots,
+            "grounding_verified": out.grounding_verified, "grounding_basis": out.basis, "audit_log": out.audit_note,
+            "ungrounded_claims": rep.ungrounded_claims_count, "values_found": out.values, "checks": self._checks(rep),
+        }
+
+
+def _result(mid: Any, result: dict[str, Any]) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": mid, "result": result}
+
+
+def _error(mid: Any, code: int, message: str) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": mid, "error": {"code": code, "message": message}}
+
+
+# ------------------------------------------------------------------------ transport
+
+
+def _write(stdout, payload: Any, framed: bool) -> None:
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    stdout.write((b"Content-Length: %d\r\n\r\n" % len(body)) + body if framed else body + b"\n")
+    stdout.flush()
+
+
+def serve(server: FormGuardMCP, stdin=None, stdout=None) -> None:
+    """Read JSON-RPC messages until EOF: newline-delimited JSON, or Content-Length framed (LSP style)."""
+    stdin = stdin or sys.stdin.buffer
+    stdout = stdout or sys.stdout.buffer
+    while True:
+        line = stdin.readline()
+        if not line:
+            break
+        if not line.strip():
+            continue
+        framed = line.lstrip().lower().startswith(b"content-length:")
+        if framed:
+            try:
+                length = int(line.split(b":", 1)[1].strip())
+            except ValueError:
+                _write(stdout, _error(None, -32700, "Parse error: bad Content-Length header"), True)
+                continue
+            while True:  # further headers, up to the blank separator line
+                header = stdin.readline()
+                if not header or not header.strip():
+                    break
+            body = stdin.read(length)
+        else:
+            body = line
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            _write(stdout, _error(None, -32700, "Parse error"), framed)
+            continue
+        response = server.handle_payload(payload)
+        if response is not None:
+            _write(stdout, response, framed)
+
+
+def build_fastmcp(server: FormGuardMCP):
+    """The same four tools on the official MCP Python SDK (optional dependency ``mcp``)."""
+    try:
+        from mcp.server.fastmcp import FastMCP
+    except ImportError as exc:
+        raise RuntimeError("the optional 'mcp' package is not installed — run the built-in server instead "
+                           "(python -m form_guard.mcp_server)") from exc
+
+    app = FastMCP("form-guard", instructions=INSTRUCTIONS)
+    docs = {t["name"]: t["description"] for t in TOOLS}
+
+    def run(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        result = server.call_tool(name, {k: v for k, v in arguments.items() if v is not None})
+        if result.get("isError"):
+            raise RuntimeError(result["content"][0]["text"])
+        return result["structuredContent"]
+
+    @app.tool(name="form_guard_scan", description=docs["form_guard_scan"])
+    def form_guard_scan(form_path: str, slot_spec_path: Optional[str] = None) -> dict:
+        return run("form_guard_scan", {"form_path": form_path, "slot_spec_path": slot_spec_path})
+
+    @app.tool(name="form_guard_discover_blank_cells", description=docs["form_guard_discover_blank_cells"])
+    def form_guard_discover_blank_cells(form_path: str, mode: str = "demo", model_tier: str = "auto") -> dict:
+        return run("form_guard_discover_blank_cells", {"form_path": form_path, "mode": mode, "model_tier": model_tier})
+
+    @app.tool(name="form_guard_fill", description=docs["form_guard_fill"])
+    def form_guard_fill(form_path: str, memo_text: Optional[str] = None, memo_path: Optional[str] = None,
+                        slot_spec_path: Optional[str] = None, discovery: Optional[dict] = None,
+                        discovery_path: Optional[str] = None, confirmed_ids: Optional[list[str]] = None,
+                        mode: str = "auto", model_tier: str = "auto") -> dict:
+        return run("form_guard_fill", {
+            "form_path": form_path, "memo_text": memo_text, "memo_path": memo_path, "slot_spec_path": slot_spec_path,
+            "discovery": discovery, "discovery_path": discovery_path, "confirmed_ids": confirmed_ids, "mode": mode,
+            "model_tier": model_tier})
+
+    @app.tool(name="form_guard_verify", description=docs["form_guard_verify"])
+    def form_guard_verify(original_path: str, filled_path: str, memo_text: Optional[str] = None,
+                          memo_path: Optional[str] = None, slot_spec_path: Optional[str] = None) -> dict:
+        return run("form_guard_verify", {"original_path": original_path, "filled_path": filled_path,
+                                         "memo_text": memo_text, "memo_path": memo_path, "slot_spec_path": slot_spec_path})
+
+    return app
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    ap = argparse.ArgumentParser(prog="form-guard-mcp", description="Form-Guard MCP server (stdio)")
+    ap.add_argument("--root", type=Path, default=None,
+                    help="directory the tools may read and write (default: FORM_GUARD_MCP_ROOT or the working directory)")
+    ap.add_argument("--fastmcp", action="store_true", help="serve through the official mcp SDK (pip install mcp)")
+    a = ap.parse_args(argv)
+    server = FormGuardMCP(root=a.root)
+    print(f"form-guard MCP server {__version__}: stdio, {len(TOOLS)} tools", file=sys.stderr)
+    if a.fastmcp:
+        build_fastmcp(server).run()
+        return 0
+    serve(server)
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

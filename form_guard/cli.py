@@ -3,21 +3,26 @@
     python -m form_guard.cli --all-demos                 # run all 3 fictional demos -> output/
     python -m form_guard.cli --form F --memo M --out-dir D [--mode demo|live|auto] [--set 法人番号=...]
     python -m form_guard.cli --scan FORM                 # list the slots a form exposes
+    python -m form_guard.cli --discover-blanks FORM      # unmarked blank form: propose empty cells to fill
+    python -m form_guard.cli --form F --memo M --discovery F.discovery.json --confirm c01,c02   # fill confirmed cells
     python -m form_guard.cli --verify ORIGINAL FILLED [--memo M]  # audit any filled copy against its blank original
     python -m form_guard.cli --generate-samples          # (re)write samples/ deterministically
     python -m form_guard.cli --serve [--port 8000]       # web UI at http://127.0.0.1:8000
+
+Live mode: --model-tier auto (default; Haiku / Sonnet / Opus routed per field) | opus | sonnet | haiku.
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import sys
 from pathlib import Path
 from typing import Optional
 
 from . import DEFAULT_MODEL, __version__
+
+MODEL_TIER_CHOICES = ["auto", "opus", "sonnet", "haiku"]
 
 
 def _console_safe() -> None:
@@ -71,6 +76,8 @@ def _print_result(result, out_root: Optional[Path] = None) -> None:
     for c in result.report.checks:
         if not c.passed:
             print(f"   ✗ {c.check_id} {c.description}: {c.details[:160]}")
+    for step in (result.engine.get("usage") or {}).get("routing", []):
+        print(f"   · {step['task']} → {step['model']}: {', '.join(step['slots'])}")
     rel = result.out_dir / "report.html" if result.out_dir else None
     if rel is not None:
         try:
@@ -80,30 +87,8 @@ def _print_result(result, out_root: Optional[Path] = None) -> None:
         print(f"   → {rel}")
 
 
-AUDIT_LOG_NAMES = ("audit_log.json", "audit_report.json")
-
-
-def matching_audit_log(filled: Path) -> tuple[Optional[dict], str]:
-    """The audit log written next to ``filled`` for exactly this file (same SHA-256), if any."""
-    sha = hashlib.sha256(Path(filled).read_bytes()).hexdigest()
-    note = ""
-    for name in AUDIT_LOG_NAMES:
-        p = Path(filled).parent / name
-        if not p.is_file():
-            continue
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            note = f"{name} is unreadable — ignored"
-            continue
-        if isinstance(data, dict) and (data.get("filled") or {}).get("sha256") == sha:
-            return data, f"{name} (SHA-256 matches the filled file)"
-        note = f"{name} belongs to a different file (SHA-256 mismatch) — ignored"
-    return None, note
-
-
 def run_all_demos(out_dir: Path, mode: str, model: Optional[str], samples_dir: Optional[Path], regenerate: bool,
-                  png: bool, client=None) -> tuple[list, int]:
+                  png: bool, client=None, model_tier: Optional[str] = None) -> tuple[list, int]:
     from .pipeline import run_pipeline
     from .report import build_index_html
     from .samples import DEMOS, demo_paths, ensure_samples, generate_samples, read_memo
@@ -116,13 +101,35 @@ def run_all_demos(out_dir: Path, mode: str, model: Optional[str], samples_dir: O
     for demo in DEMOS:
         p = demo_paths(demo, base)
         r = run_pipeline(p["form"], read_memo(p["memo"]), out_dir / demo["id"], mode=mode, model=model,
-                         naive_path=p["naive"], demo_id=demo["id"], png=png, client=client)
+                         naive_path=p["naive"], demo_id=demo["id"], png=png, client=client, model_tier=model_tier)
         results.append(r)
     summaries = [_summary_line(r) for r in results]
     (out_dir / "index.html").write_text(build_index_html(summaries), encoding="utf-8", newline="\n")
     (out_dir / "summary.json").write_text(json.dumps(summaries, ensure_ascii=False, indent=2), encoding="utf-8", newline="\n")
     failures = sum(1 for r in results if r.report.overall_status == "FAIL")
     return results, failures
+
+
+def _print_discovery(d: dict) -> None:
+    cands = d["candidates"]
+    rec = [c for c in cands if c["recommended"]]
+    print(f"{d['form']} ({d['file_type']}) — {len(cands)} candidate cells ({len(rec)} recommended), "
+          f"{len(d['rejected'])} rejected · stage 2: {d['engine']['label']}")
+    print(f"   blank form SHA-256 {d['form_sha256'][:16]}… (confirmation is refused if the form changes)")
+    for c in cands:
+        mark = "✓" if c["recommended"] else "✗"
+        where = c.get("cell") or f"table {c.get('table')} row {c.get('row')} col {c.get('col')}"
+        rule = c["required_format"] + (f", ≤{c['max_chars']} chars" if c.get("max_chars") else "")
+        note = "" if c["recommended"] else f"  — {c['reason']}"
+        print(f"   {c['candidate_id']} {mark} {c['slot_id']:<14} {rule:<22} {where}{note}")
+    for r in d["rejected"]:
+        print(f"   rejected: {r['location']} — {r['reason']}")
+
+
+def _confirmed_ids(discovery: dict, confirm: str) -> list[str]:
+    if confirm.strip().lower() == "recommended":
+        return [c["candidate_id"] for c in discovery.get("candidates", []) if c.get("recommended")]
+    return [x.strip() for x in confirm.split(",") if x.strip()]
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -133,6 +140,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     act.add_argument("--all-demos", action="store_true", help="run the 3 fictional demo forms end-to-end")
     act.add_argument("--form", type=Path, help="blank .docx/.xlsx form to fill")
     act.add_argument("--scan", type=Path, metavar="FORM", help="list the slots discovered in a form")
+    act.add_argument("--discover-blanks", type=Path, metavar="FORM",
+                     help="unmarked blank form: propose the empty cells to fill (nothing is written)")
     act.add_argument("--verify", nargs=2, type=Path, metavar=("ORIGINAL", "FILLED"), help="audit a filled copy")
     act.add_argument("--generate-samples", action="store_true", help="(re)generate samples/ deterministically")
     act.add_argument("--serve", action="store_true", help="start the web UI")
@@ -140,8 +149,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--out-dir", type=Path, default=Path("output"))
     ap.add_argument("--mode", choices=["auto", "demo", "live"], default="auto",
                     help="auto = Claude if ANTHROPIC_API_KEY is set, else the offline demo engine")
-    ap.add_argument("--model", default=None, help=f"Claude model for live mode (default {DEFAULT_MODEL})")
+    ap.add_argument("--model", default=None, help=f"pin one Claude model for every call (default: routed; "
+                                                  f"{DEFAULT_MODEL} for long text and self-correction)")
+    ap.add_argument("--model-tier", choices=MODEL_TIER_CHOICES, default=None,
+                    help="auto (default, or FORM_GUARD_MODEL_TIER) = Haiku for structured fields, Sonnet for standard "
+                         "text, Opus for long text and self-correction; or one tier for every call")
     ap.add_argument("--slot-spec", type=Path, help="optional <form>.slots.json (aliases, coordinate targets)")
+    ap.add_argument("--discovery", type=Path, help="discovery report written by --discover-blanks (use with --confirm)")
+    ap.add_argument("--confirm", metavar="IDS", help="candidate ids the reviewer confirmed (c01,c02,…) or 'recommended'")
     ap.add_argument("--naive", type=Path, help="optional naive-regeneration file to audit for comparison")
     ap.add_argument("--set", action="append", default=[], metavar="SLOT=VALUE",
                     help="reviewer-entered value (with --verify: a value the reviewer attests to)")
@@ -179,29 +194,38 @@ def main(argv: Optional[list[str]] = None) -> int:
                   f" {cons if cons else ''}\n      {s.location_path}")
         for w in r.warnings:
             print(f"  ! {w}")
+        if not r.slots:
+            print("  0 slots: no {{markers}}, [記入欄: …] or coordinate targets — for an unmarked blank form run "
+                  "--discover-blanks FORM")
+        return 0
+
+    if a.discover_blanks:
+        from .scanner import discover_blank_cells
+
+        d = discover_blank_cells(a.discover_blanks, mode=a.mode, model_tier=a.model_tier)
+        _print_discovery(d)
+        a.out_dir.mkdir(parents=True, exist_ok=True)
+        out = a.out_dir / f"{a.discover_blanks.stem}.discovery.json"
+        out.write_text(json.dumps(d, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
+        print(f"   → {out}")
+        print(f"Next (human confirmation): python -m form_guard.cli --form {a.discover_blanks} --memo MEMO "
+              f"--discovery {out} --confirm c01,c02,…  (or --confirm recommended)")
+        if a.json:
+            print(json.dumps(d, ensure_ascii=False, indent=2))
         return 0
 
     if a.verify:
-        from .models import FieldMapping
-        from .pipeline import reconstruct_mappings
+        from .pipeline import verify_filled_copy
         from .samples import read_memo
-        from .scanner import scan
-        from .verifier import infer_values_from_filled, verify
 
         original, filled = a.verify
-        sc = scan(original, a.slot_spec)
-        values = infer_values_from_filled(sc, filled)
-        audit, audit_note = matching_audit_log(filled)
-        memo = read_memo(a.memo) if a.memo else ((audit.get("memo") or {}).get("text", "") if audit else "")
-        recorded = [FieldMapping.model_validate(m) for m in audit.get("mappings", [])] if audit else []
-        maps = reconstruct_mappings(sc, values, memo, recorded, _parse_sets(a.set))
-        rep = verify(sc, filled, maps, memo)
-        unverified = any(c.evidence.get("not_verified") for c in rep.checks)
-        basis = ("memo " + str(a.memo) if a.memo else "memo recorded in the audit log") if memo else "none"
+        out = verify_filled_copy(original, filled, read_memo(a.memo) if a.memo else None, a.slot_spec,
+                                 _parse_sets(a.set), memo_name=str(a.memo) if a.memo else "")
+        rep = out.report
         print(f"{filled.name} vs {original.name}: {rep.overall_status} ({rep.passed_count} passed, {rep.failed_count} failed)"
-              + (" — grounding NOT verified (structure only)" if unverified else ""))
-        print(f"  grounding basis: {basis}" + (f"; audit log: {audit_note}" if audit_note else "")
-              + ("" if memo else " — pass --memo MEMO (or keep audit_log.json next to the filled file) to check sources"))
+              + ("" if out.grounding_verified else " — grounding NOT verified (structure only)"))
+        print(f"  grounding basis: {out.basis}" + (f"; audit log: {out.audit_note}" if out.audit_note else "")
+              + ("" if out.memo_text else " — pass --memo MEMO (or keep audit_log.json next to the filled file) to check sources"))
         for c in rep.checks:
             mark = "–" if c.evidence.get("not_verified") else ("✓" if c.passed else "✗")
             print(f"  {mark} {c.check_id:<10} {c.description} — {c.details[:150]}")
@@ -209,7 +233,8 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if a.all_demos:
         print(f"Form-Guard Agent {__version__} — running 3 fictional demo forms (mode: {a.mode})")
-        results, failures = run_all_demos(a.out_dir, a.mode, a.model, a.samples_dir, a.regenerate_samples, a.png)
+        results, failures = run_all_demos(a.out_dir, a.mode, a.model, a.samples_dir, a.regenerate_samples, a.png,
+                                          model_tier=a.model_tier)
         print(f"Engine: {results[0].engine.get('label')}"
               + (f" (fallback: {results[0].engine['fallback_reason']})" if results[0].engine.get("fallback_reason") else ""))
         for r in results:
@@ -227,9 +252,26 @@ def main(argv: Optional[list[str]] = None) -> int:
             ap.error("--form requires --memo")
         from .pipeline import run_pipeline
         from .samples import read_memo
+        from .scanner import build_confirmed_slot_spec
 
+        spec = a.slot_spec
+        if a.discovery or a.confirm:
+            if not (a.discovery and a.confirm):
+                ap.error("--discovery and --confirm go together")
+            if a.slot_spec:
+                ap.error("use either --slot-spec or --discovery/--confirm")
+            discovery = json.loads(a.discovery.read_text(encoding="utf-8"))
+            try:
+                spec = build_confirmed_slot_spec(discovery, _confirmed_ids(discovery, a.confirm), a.form)
+            except ValueError as exc:
+                print(f"refused before filling: {exc}", file=sys.stderr)
+                return 2
+            a.out_dir.mkdir(parents=True, exist_ok=True)
+            sp = a.out_dir / f"{a.form.stem}.confirmed.slots.json"
+            sp.write_text(json.dumps(spec, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
+            print(f"Confirmed {len(spec['targets'])} cell(s): {', '.join(t['slot_id'] for t in spec['targets'])} → {sp}")
         r = run_pipeline(a.form, read_memo(a.memo), a.out_dir, mode=a.mode, model=a.model, naive_path=a.naive,
-                         overrides=_parse_sets(a.set), slot_spec=a.slot_spec, png=a.png)
+                         overrides=_parse_sets(a.set), slot_spec=spec, png=a.png, model_tier=a.model_tier)
         print(f"Engine: {r.engine.get('label')}")
         _print_result(r)
         print(f"   filled file: {r.filled_path}")
