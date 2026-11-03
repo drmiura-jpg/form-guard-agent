@@ -799,12 +799,68 @@ def test_r1_a1_grounding_rejects_wrong_names_ids_options_and_composite_parts(sam
     # (d) the legitimate conversions still pass
     assert errors(ground_value("4,836,000円", ["税抜で483万6千円"], memo2)) == []
     # (e) sub-multiplier compounds (2千万円, 3百万円, 1億2千万円, 上限2千万円) parse and ground as single totals
-    from form_guard.constraints import infer_slot_constraints
+    from form_guard.constraints import _CAP_RE, infer_slot_constraints
     for raw, expected in (("2千万円", 20_000_000), ("3百万円", 3_000_000), ("50百万円", 50_000_000),
                           ("1億2千万円", 120_000_000), ("１億２千万", 120_000_000), ("1千2百万円", 12_000_000),
-                          ("500千円", 500_000), ("483万6千円", 4_836_000)):
+                          ("500千円", 500_000), ("483万6千円", 4_836_000), ("1万5000円", 15_000)):
         assert parse_compound(raw.rstrip("円")) == expected and quantities(raw) == {float(expected)}, raw
+    assert quantities("予算100万 2026年度") == {1_000_000.0, 2026.0}
     assert infer_slot_constraints("補助金申請額", ["補助金申請額"], ["上限2千万円（千円未満切捨て）"], "")["constraints"]["max_value"] == 20_000_000
+    assert infer_slot_constraints("補助金申請額", ["補助金申請額"], ["上限3百万円"], "")["constraints"]["max_value"] == 3_000_000
+    assert infer_slot_constraints("補助金申請額", ["補助金申請額"], ["上限1,000,000円"], "")["constraints"]["max_value"] == 1_000_000
+    t0 = time.perf_counter()
+    assert _CAP_RE.search("上限" + "1" * 40 + "ドル") is None and (time.perf_counter() - t0) < 0.1
+    # (f) deterministic property-based round-trip (true int -> Japanese compound notation -> parse_compound/quantities) + shrinking
+    def _to_jp_compound(n: int, style: int) -> str:
+        if n == 0:
+            return "0円"
+        parts = []
+        oku, rem = divmod(n, 100_000_000)
+        man, tail = divmod(rem, 10_000)
+        if oku:
+            parts.append(f"{oku}億")
+        if man:
+            if style == 1 and man % 1000 == 0:
+                parts.append(f"{man // 1000}千万")
+            elif style == 2 and man % 100 == 0:
+                parts.append(f"{man // 100}百万")
+            elif style == 3 and man >= 1000 and (man % 1000) % 100 == 0 and (man % 1000) > 0:
+                parts.append(f"{man // 1000}千{(man % 1000) // 100}百万")
+            else:
+                parts.append(f"{man:,}万" if style == 4 else f"{man}万")
+        if tail:
+            if style in (1, 2) and tail % 1000 == 0:
+                parts.append(f"{tail // 1000}千")
+            else:
+                parts.append(f"{tail:,}" if style == 4 else f"{tail}")
+        s = "".join(parts) + "円"
+        if style == 5:
+            s = s.translate(str.maketrans("0123456789,", "０１２３４５６７８９，"))
+        return s
+
+    def _shrink_counterexample(text: str, pred) -> str:
+        cur = text
+        changed = True
+        while changed:
+            changed = False
+            for i in range(len(cur)):
+                cand = cur[:i] + cur[i + 1 :]
+                if cand and pred(cand):
+                    cur = cand
+                    changed = True
+                    break
+        return cur
+
+    import random
+    rng = random.Random(20261103)
+    for _ in range(100):
+        val = rng.choice([0, rng.randint(1, 999) * 1000, rng.randint(1, 9999) * 10_000,
+                          rng.randint(1, 50) * 1_000_000, rng.randint(1, 20) * 10_000_000,
+                          rng.randint(1, 9) * 100_000_000 + rng.randint(0, 9) * 10_000_000])
+        for st in range(6):
+            s = _to_jp_compound(val, st)
+            assert parse_compound(s.rstrip("円")) == val and quantities(s) == {float(val)}, (val, st, s)
+    assert _shrink_counterexample("今年度の研究費申請額は 2千万円（税込）とする", lambda x: "2千万円" in x) == "2千万円"
     memo_sub = "今年度の研究費申請額は 2千万円（内訳：設備費 3百万円、人件費 1千7百万円）とする。\n"
     yen_slot = _text_slot("補助金申請額", fmt="yen")
     assert errors(ground_value("20,000,000円", ["研究費申請額は 2千万円"], memo_sub, yen_slot)) == []
@@ -5082,14 +5138,80 @@ def test_p4_r1_audit_fixes_zero_amounts_negated_quotes_checkbox_locks_and_expect
     with pytest.raises(ValueError, match="SHA-256"):
         discover_blank_cells(p4, mode="demo", expected_sha256="0" * 64)
 
-    # /test L2 & L3 hole-plug: direct script execution of cli.py and mcp_server.py (--help & invalid flag)
-    for script_rel in ("form_guard/cli.py", "form_guard/mcp_server.py"):
-        p_help = subprocess.run([sys.executable, "-X", "utf8", str(ROOT / script_rel), "--help"],
-                                capture_output=True, text=True, encoding="utf-8", timeout=20)
-        assert p_help.returncode == 0 and "usage:" in p_help.stdout.lower()
-        p_bad = subprocess.run([sys.executable, "-X", "utf8", str(ROOT / script_rel), "--__nonexistent_flag_testplay__"],
-                               capture_output=True, text=True, encoding="utf-8", timeout=20)
-        assert p_bad.returncode != 0 and "Traceback (most recent call last):" not in (p_bad.stdout + p_bad.stderr)
+    # R1-A1: MCP serve() survives 5000-digit integer ValueError and lone surrogate \ud800 in both framings
+    from form_guard import mcp_server as m
+
+    srv = m.FormGuardMCP(root=_mcp_root(tmp_path, samples_dir))
+    huge_int = b'{"jsonrpc":"2.0","id":' + (b"9" * 5000) + b',"method":"ping"}'
+    surrogate_req = b'{"jsonrpc":"2.0","id":"\\ud800","method":"\\ud800"}'
+    ping_req = b'{"jsonrpc":"2.0","id":99,"method":"ping"}'
+    nl_stream = huge_int + b"\n" + surrogate_req + b"\n" + ping_req + b"\n"
+    nl_out = io.BytesIO()
+    m.serve(srv, stdin=io.BytesIO(nl_stream), stdout=nl_out)
+    nl_msgs = [json.loads(line.decode("utf-8")) for line in nl_out.getvalue().splitlines() if line.strip()]
+    assert len(nl_msgs) == 3 and nl_msgs[0]["error"]["code"] == -32700
+    assert nl_msgs[1]["error"]["code"] == -32601 and nl_msgs[2] == {"jsonrpc": "2.0", "id": 99, "result": {}}
+
+    def _frame(b: bytes) -> bytes:
+        return b"Content-Length: %d\r\n\r\n" % len(b) + b
+
+    fr_out = io.BytesIO()
+    m.serve(srv, stdin=io.BytesIO(_frame(huge_int) + _frame(surrogate_req) + _frame(ping_req)), stdout=fr_out)
+    fr_raw = fr_out.getvalue()
+    assert b'"id":99,"result":{}' in fr_raw and b"\\ud800" in fr_raw
+
+    # R1-A2: build_fastmcp form_guard_discover_blank_cells accepts expected_sha256 (match / mismatch / None)
+    import types
+
+    registered: dict[str, Any] = {}
+
+    class _FakeFastMCP:
+        def __init__(self, name, instructions=None):
+            self.name = name
+
+        def tool(self, name, description=""):
+            def _dec(fn):
+                registered[name] = fn
+                return fn
+
+            return _dec
+
+    fake_mcp_mod = types.ModuleType("mcp")
+    fake_server_mod = types.ModuleType("mcp.server")
+    fake_fastmcp_mod = types.ModuleType("mcp.server.fastmcp")
+    fake_fastmcp_mod.FastMCP = _FakeFastMCP  # type: ignore[attr-defined]
+    sys.modules["mcp"] = fake_mcp_mod
+    sys.modules["mcp.server"] = fake_server_mod
+    sys.modules["mcp.server.fastmcp"] = fake_fastmcp_mod
+    try:
+        m.build_fastmcp(srv)
+    finally:
+        for k in ("mcp.server.fastmcp", "mcp.server", "mcp"):
+            sys.modules.pop(k, None)
+    disc_fn = registered["form_guard_discover_blank_cells"]
+    res_none = disc_fn("samples/blank_forms/form6_study_group_grant.pdf")
+    res_match = disc_fn("samples/blank_forms/form6_study_group_grant.pdf", expected_sha256=res_none["form_sha256"])
+    assert res_match["form_sha256"] == res_none["form_sha256"]
+    with pytest.raises(RuntimeError, match="refused before discovery:.*SHA-256"):
+        disc_fn("samples/blank_forms/form6_study_group_grant.pdf", expected_sha256="0" * 64)
+
+
+@pytest.mark.parametrize(
+    "script_rel",
+    ["form_guard", "form_guard/__main__.py", "form_guard/cli.py", "form_guard/mcp_server.py"],
+)
+def test_cli_and_mcp_server_start_when_run_directly_as_scripts(script_rel):
+    def run(*args):
+        return subprocess.run(
+            [sys.executable, "-X", "utf8", str(ROOT / script_rel), *args],
+            capture_output=True, text=True, encoding="utf-8", timeout=20, stdin=subprocess.DEVNULL,
+        )
+
+    ok = run("--help")
+    assert ok.returncode == 0 and "usage:" in ok.stdout.lower(), ok.stderr
+    bad = run("--__nonexistent_flag_testplay__")
+    assert bad.returncode == 2 and "Traceback (most recent call last):" not in (bad.stdout + bad.stderr)
+
 
 
 

@@ -217,7 +217,7 @@ _KANJI_DIGITS = {"〇": 0, "零": 0, "一": 1, "二": 2, "三": 3, "四": 4, "�
 _KANJI_SMALL = {"十": 10, "百": 100, "千": 1000}
 _KANJI_BIG = {"万": 10_000, "億": 100_000_000, "兆": 1_000_000_000_000}
 _UNIT_MULT = {**_KANJI_SMALL, **_KANJI_BIG}
-_COMPOUND_NUM_PAT = rf"(?:{_NUM}\s*(?:[兆億万千百十]\s*)+)+(?:{_NUM})?"
+_COMPOUND_NUM_PAT = rf"(?:{_NUM}\s*[兆億万千百十]+)+(?:{_NUM})?"
 
 _AMOUNT_RE = re.compile(
     rf"(?P<approx>約|およそ|おおよそ|概ね)?\s*(?P<num>{_COMPOUND_NUM_PAT}|{_NUM})\s*(?P<k>千)?円"

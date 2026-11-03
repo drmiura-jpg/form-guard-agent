@@ -94,7 +94,7 @@ pip install -r requirements.txt
 
 python -m form_guard.cli --all-demos     # runs the 3 fictional demos -> output/index.html
 python -m form_guard.cli --serve         # web UI on http://127.0.0.1:8000 (grant portal: /portal)
-pytest -v                                # 246 tests
+pytest -v                                # 250 tests
 ```
 
 Requires Python 3.10+. Without `ANTHROPIC_API_KEY` everything runs on the deterministic **offline demo engine**, so the

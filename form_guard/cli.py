@@ -23,8 +23,12 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-if __package__ in (None, ""):
+if __package__ in (None, ""):  # python form_guard/cli.py: run the package module itself
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    if __name__ == "__main__":
+        from form_guard.cli import main as _main
+
+        raise SystemExit(_main())
     __package__ = "form_guard"
 
 from . import DEFAULT_MODEL, __version__

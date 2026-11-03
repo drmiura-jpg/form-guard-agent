@@ -46,8 +46,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Iterable, Optional
 
-if __package__ in (None, ""):
+if __package__ in (None, ""):  # python form_guard/mcp_server.py: run the package module itself
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    if __name__ == "__main__":
+        from form_guard.mcp_server import main as _main
+
+        raise SystemExit(_main())
     __package__ = "form_guard"
 
 from . import __version__
@@ -620,7 +624,7 @@ def _protocol_stdout() -> BinaryIO:
 
 
 def _write(stdout, payload: Any, framed: bool) -> None:
-    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
+    body = json.dumps(payload, ensure_ascii=True, separators=(",", ":"), default=str).encode("utf-8")
     stdout.write((b"Content-Length: %d\r\n\r\n" % len(body)) + body if framed else body + b"\n")
     stdout.flush()
 
@@ -696,7 +700,7 @@ def serve(server: FormGuardMCP, stdin=None, stdout=None) -> None:
             body = line
         try:
             payload = json.loads(body.decode("utf-8-sig"))
-        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        except (UnicodeDecodeError, ValueError, RecursionError):
             _write(stdout, _error(None, PARSE_ERROR, "Parse error"), framed)
             continue
         response = server.handle_payload(payload)
@@ -730,8 +734,10 @@ def build_fastmcp(server: FormGuardMCP):
         return run("form_guard_scan", {"form_path": form_path, "slot_spec_path": slot_spec_path})
 
     @app.tool(name="form_guard_discover_blank_cells", description=docs["form_guard_discover_blank_cells"])
-    def form_guard_discover_blank_cells(form_path: str, mode: str = "demo", model_tier: str = "auto") -> dict:
-        return run("form_guard_discover_blank_cells", {"form_path": form_path, "mode": mode, "model_tier": model_tier})
+    def form_guard_discover_blank_cells(form_path: str, mode: str = "demo", model_tier: str = "auto",
+                                        expected_sha256: Optional[str] = None) -> dict:
+        return run("form_guard_discover_blank_cells", {
+            "form_path": form_path, "mode": mode, "model_tier": model_tier, "expected_sha256": expected_sha256})
 
     @app.tool(name="form_guard_fill", description=docs["form_guard_fill"])
     def form_guard_fill(form_path: str, memo_text: Optional[str] = None, memo_path: Optional[str] = None,
