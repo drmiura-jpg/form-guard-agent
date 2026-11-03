@@ -83,7 +83,10 @@ def has_marker(text: str) -> bool:
 _TEMPLATE_BLANK = "[ 　_＿]+"
 ERA_DATE_TEMPLATE_RE = re.compile(rf"(?:令和|平成|昭和){_TEMPLATE_BLANK}年{_TEMPLATE_BLANK}月{_TEMPLATE_BLANK}日"
                                   r"(?:[ 　]*[（(][ 　_＿]*[）)])?")
+ERALESS_DATE_TEMPLATE_RE = re.compile(rf"年{_TEMPLATE_BLANK}月{_TEMPLATE_BLANK}日(?:[ 　]*[（(][ 　_＿]*[）)])?")
 TEMPLATE_REASON = "applicant field — printed era-date template next to a printed label; the template is replaced by the date"
+ERALESS_TEMPLATE_REASON = ("era-less date skeleton (年 月 日 without a printed era) — confirm manually / "
+                           "元号の無い日付骨格（人が確認）")
 
 
 def era_date_template(text: str) -> Optional[tuple[int, int]]:
@@ -94,6 +97,12 @@ def era_date_template(text: str) -> Optional[tuple[int, int]]:
         return None
     start = len(text) - len(text.lstrip())
     return start, start + len(s)
+
+
+def is_eraless_date_template(text: str) -> bool:
+    """True when ``text`` holds only an era-less date skeleton such as 「　　年　　月　　日」."""
+    s = (text or "").strip(" 　_＿\t\r\n")
+    return bool(s and ERALESS_DATE_TEMPLATE_RE.fullmatch(s))
 
 
 @dataclass
@@ -625,7 +634,7 @@ def _scan_xlsx(path: Path, spec: dict) -> ScanResult:
         if is_checkbox_target(tgt):
             add_checkbox(tgt, slot_id, sidx, sname, part, ref, el)
             return
-        template = xlsx_template_cell(el, oc)
+        template = xlsx_template_cell(el, oc, idx, parts.get("xl/sharedStrings.xml"), sidx, ref, sst_refs)
         if not template and ((el is not None and el.children) or (oc is not None and oc.value not in (None, ""))):
             warnings.append(f"coordinate target {slot_id!r}: {ref} is not empty — refusing to overwrite printed text")
             return
@@ -709,13 +718,39 @@ def _scan_xlsx(path: Path, spec: dict) -> ScanResult:
     return result
 
 
-def xlsx_template_cell(el: Any, oc: Any) -> str:
-    """The printed text of a worksheet cell that holds only an era-date skeleton (「令和　　年　　月　　日」) as a shared or
-    inline string — no formula, no rich content — else "". Such a cell is written as one inline string (the date)."""
+def _is_plain_container(idx: Optional[PartIndex], ci: Optional[int]) -> bool:
+    """True when container ``ci`` in ``idx`` holds exactly one plain ``<t>`` (no ``<r>``, ``<rPr>``, ``<rPh>``, ``<phoneticPr>``)."""
+    if idx is None or ci is None or ci < 0 or ci >= len(idx.containers):
+        return False
+    c = idx.containers[ci]
+    raw = idx.data[c.span[0] : c.span[1]]
+    return not c.runs and b"rPr" not in raw and b"rPh" not in raw and b"phoneticPr" not in raw and len(idx.container_nodes(c)) == 1
+
+
+def xlsx_template_cell(el: Any, oc: Any, sheet_idx: Optional[PartIndex] = None,
+                       sst_idx: Optional[PartIndex] = None, sidx: Optional[int] = None,
+                       ref: str = "", sst_refs: Optional[dict[int, list[tuple[int, str, str, str]]]] = None) -> str:
+    """The printed text of a worksheet cell that holds only an era-date skeleton (「令和　　年　　月　　日」) as a plain
+    shared or inline string — no formula, no rich text / phonetic runs — else "". Such a cell is written as one
+    inline string (the date)."""
     if el is None or oc is None or not isinstance(oc.value, str) or not era_date_template(oc.value):
         return ""
     if el.children not in (["v"], ["is"]) or el.attrs.get("t") not in ("s", "inlineStr"):
         return ""
+    if el.attrs.get("t") == "inlineStr":
+        if sheet_idx is not None and not _is_plain_container(sheet_idx, el.is_container):
+            return ""
+    elif el.attrs.get("t") == "s" and sst_idx is not None:
+        si = None
+        if sst_refs is not None and sidx is not None and ref:
+            si = next((k for k, refs in sst_refs.items() for (s_i, _n, _p, rr) in refs if s_i == sidx and rr == ref), None)
+        if si is None and sheet_idx is not None and el.end_tag is not None:
+            m = re.search(rb"<(?:\w+:)?v[^>]*>\s*([0-9]+)\s*</(?:\w+:)?v>", sheet_idx.data[el.start_tag[1] : el.end_tag[0]])
+            if m:
+                si = int(m.group(1))
+        ci = next((c.idx for c in sst_idx.containers if c.si_index == si), None) if si is not None else None
+        if not _is_plain_container(sst_idx, ci):
+            return ""
     return oc.value
 
 
@@ -919,7 +954,8 @@ def _docx_blank_candidates(path: Path) -> tuple[list[_Cand], str]:
 
     def label_for(t: TableInfo, cell: CellInfo) -> tuple[Optional[CellInfo], str]:
         left = _cell_at(t, cell.row_idx, cell.col_idx - 1) if cell.col_idx > 0 else None
-        if left is not None and text_of(t, left) and not era_date_template(text_of(t, left)) and not options_of(left):
+        if (left is not None and text_of(t, left) and not era_date_template(text_of(t, left))
+                and not is_eraless_date_template(text_of(t, left)) and not options_of(left)):
             return left, "left"
         r = cell.row_idx - 1
         while r >= 0 and not is_banner(t, r):  # column-header table: walk up through empty cells
@@ -927,7 +963,7 @@ def _docx_blank_candidates(path: Path) -> tuple[list[_Cand], str]:
             if above is None:
                 break
             if text_of(t, above):  # a printed 「令和　年　月　日」 is a field to fill, never another cell's label
-                return (None, "") if era_date_template(text_of(t, above)) else (above, "above")
+                return (None, "") if (era_date_template(text_of(t, above)) or is_eraless_date_template(text_of(t, above))) else (above, "above")
             r -= 1
         return None, ""
 
@@ -954,9 +990,11 @@ def _docx_blank_candidates(path: Path) -> tuple[list[_Cand], str]:
                 if not cell.containers:
                     continue
                 template_ci = _template_container(idx, cell) if _cell_text(idx, cell) else None
+                eraless = False
                 if _cell_text(idx, cell) and template_ci is None:
                     options = options_of(cell) if cell.vmerge != "continue" else []
-                    if not options:
+                    eraless = not options and is_eraless_date_template(_cell_text(idx, cell))
+                    if not options and not eraless:
                         continue  # printed text, not a field (a printed 「令和　　年　　月　　日」 or □ line is one)
                 origin = _resolve_vmerge(t, cell)
                 if origin is not cell and _cell_text(idx, origin):
@@ -977,6 +1015,8 @@ def _docx_blank_candidates(path: Path) -> tuple[list[_Cand], str]:
                 rejected = ""
                 if cell.vmerge == "continue":
                     rejected = "vertically merged continuation (vMerge) — only the first cell of the merge can be filled"
+                elif eraless:
+                    rejected = ERALESS_TEMPLATE_REASON
                 else:
                     c0 = idx.containers[template_ci if template_ci is not None else cell.containers[0]]
                     if any(tok in idx.data[c0.span[0] : c0.span[1]] for tok in _UNSAFE_PARAGRAPH_TOKENS):
@@ -1000,9 +1040,9 @@ def _xlsx_blank_candidates(path: Path) -> tuple[list[_Cand], str]:
         sheets = xlsx_sheet_parts(zf)
         check_xlsx_limits(zf, sheets)
         raw = {part: index_part(part, zf.read(part), "sheet") for _, _, part in sheets if part in zf.namelist()}
-        sst_users = {(s, ref): len(refs) for refs in (_shared_string_refs(zf, sheets).values()
-                                                      if "xl/sharedStrings.xml" in zf.namelist() else [])
-                     for s, _n, _p, ref in refs}
+        sst_refs_map = _shared_string_refs(zf, sheets) if "xl/sharedStrings.xml" in zf.namelist() else {}
+        sst_idx = index_part("xl/sharedStrings.xml", zf.read("xl/sharedStrings.xml"), "sst") if "xl/sharedStrings.xml" in zf.namelist() else None
+        sst_users = {(s, ref): len(refs) for refs in sst_refs_map.values() for s, _n, _p, ref in refs}
     wb = openpyxl.load_workbook(path, data_only=False)
     cands: list[_Cand] = []
     texts: list[str] = []
@@ -1049,11 +1089,12 @@ def _xlsx_blank_candidates(path: Path) -> tuple[list[_Cand], str]:
             x = origin_cell(r, c)
             return (x is not None and x.data_type != "f" and isinstance(x.value, str) and bool(x.value.strip())
                     and not _is_sentence(x.value) and not era_date_template(x.value)
-                    and not parse_checkbox_options(x.value))
+                    and not is_eraless_date_template(x.value) and not parse_checkbox_options(x.value))
 
         def template_of(r: int, c: int) -> str:
             b = box(r, c)
-            return xlsx_template_cell(sheet_idx.cells.get(f"{get_column_letter(b[1])}{b[0]}"), origin_cell(r, c))
+            top_ref = f"{get_column_letter(b[1])}{b[0]}"
+            return xlsx_template_cell(sheet_idx.cells.get(top_ref), origin_cell(r, c), sheet_idx, sst_idx, sidx, top_ref, sst_refs_map)
 
         def is_banner(r: int) -> bool:
             b = box(r, 1)
@@ -1077,7 +1118,9 @@ def _xlsx_blank_candidates(path: Path) -> tuple[list[_Cand], str]:
             template = template_of(r, c)
             lit = "" if template else literal(r, c)
             options = parse_checkbox_options(lit) if lit and (box(r, c)[:2] == (r, c)) else []
-            if (r, c) in seen or (lit and (not options or any(o["checked"] for o in options))):
+            eraless = not template and not options and bool(lit) and is_eraless_date_template(lit)
+            rich_era = not template and not options and bool(lit) and bool(era_date_template(lit))
+            if (r, c) in seen or (lit and not eraless and not rich_era and (not options or any(o["checked"] for o in options))):
                 return
             seen.add((r, c))
             b = box(r, c)
@@ -1093,6 +1136,10 @@ def _xlsx_blank_candidates(path: Path) -> tuple[list[_Cand], str]:
             rng = f"{top_ref}:{get_column_letter(b[3])}{b[2]}" if b != (r, c, r, c) else ""
             if (b[0], b[1]) != (r, c):
                 rejected = f"merged continuation of {rng} — only the top-left cell {top_ref} can hold a value"
+            elif eraless:
+                rejected = ERALESS_TEMPLATE_REASON
+            elif rich_era:
+                rejected = "printed era-date template uses rich-text or phonetic runs — fill manually so character styling is preserved"
             elif is_formula(r, c):
                 rejected = f"formula cell ({origin_cell(r, c).value}) — formulas are never fill targets"
             elif sheet_idx.implicit_refs:
@@ -1120,8 +1167,10 @@ def _xlsx_blank_candidates(path: Path) -> tuple[list[_Cand], str]:
                     consider(rr, b[3] + 1, (x.row, x.column), "left")
         for x in cells:  # (b) an empty table cell below a column header (no label on its left)
             r, c = x.row, x.column
-            blank = x.value is None or bool(template_of(r, c))  # empty, or a printed 「令和　年　月　日」 to complete
-            if (r, c) in seen or not blank or r > max_row or c > max_col or (literal(r, c) and not template_of(r, c)):
+            eraless_b = not bool(template_of(r, c)) and is_eraless_date_template(literal(r, c))
+            rich_era_b = not bool(template_of(r, c)) and bool(era_date_template(literal(r, c)))
+            blank = x.value is None or bool(template_of(r, c)) or eraless_b or rich_era_b  # empty, or a printed 「令和　年　月　日」 to complete
+            if (r, c) in seen or not blank or r > max_row or c > max_col or (literal(r, c) and not template_of(r, c) and not eraless_b and not rich_era_b):
                 continue
             if box(r, c)[:2] != (r, c):
                 continue

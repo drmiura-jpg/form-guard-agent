@@ -133,7 +133,8 @@ def patch_part(idx: PartIndex, values: dict[str, str], file_type: str,
                sheet_cell_targets: dict[str, str] | None = None,
                template_targets: dict[int, str] | None = None,
                sheet_template_cells: set[str] | frozenset[str] = frozenset(),
-               checkbox_targets: dict[int, tuple[str, list[int]]] | None = None) -> tuple[bytes, list[PatchRecord]]:
+               checkbox_targets: dict[int, tuple[str, list[int]]] | None = None,
+               sst_idx: Optional[PartIndex] = None) -> tuple[bytes, list[PatchRecord]]:
     """Return (new_part_bytes, patch_records) for one indexed OOXML part.
 
     ``empty_cell_targets``: Word paragraph container index -> slot id; ``sheet_cell_targets``: worksheet cell
@@ -201,7 +202,7 @@ def patch_part(idx: PartIndex, values: dict[str, str], file_type: str,
             continue
         patches.append(_insert_run_patch(idx, idx.containers[cidx], slot_id, values[slot_id]))
     if sheet_cell_targets:
-        patches += _sheet_cell_patches(idx, sheet_cell_targets, values, sheet_template_cells)
+        patches += _sheet_cell_patches(idx, sheet_cell_targets, values, sheet_template_cells, sst_idx=sst_idx)
     for cidx, (slot_id, offsets) in (checkbox_targets or {}).items():
         patches += _checkbox_patches(idx, idx.containers[cidx], slot_id, offsets)
 
@@ -267,8 +268,32 @@ def _fill_existing_cell(data: bytes, cell: SheetCell, value: str) -> bytes:
     return body + b">" + _inline_string(_prefix(cell.qname), value) + b"</" + cell.qname.encode() + b">"
 
 
+def _is_plain_sheet_template_cell(idx: PartIndex, cell: SheetCell, sst_idx: Optional[PartIndex] = None) -> bool:
+    """True when ``cell`` holds a single plain ``<t>`` (inline string or shared string) without rich text / phonetic runs."""
+    if cell.children not in (["v"], ["is"]) or cell.attrs.get("t") not in ("s", "inlineStr"):
+        return False
+    if cell.attrs.get("t") == "inlineStr":
+        if cell.is_container is None or cell.is_container >= len(idx.containers):
+            return False
+        c = idx.containers[cell.is_container]
+        raw = idx.data[c.span[0] : c.span[1]]
+        return not c.runs and b"rPr" not in raw and b"rPh" not in raw and b"phoneticPr" not in raw and len(idx.container_nodes(c)) == 1
+    if sst_idx is not None and cell.end_tag is not None:
+        m = re.search(rb"<(?:\w+:)?v[^>]*>\s*([0-9]+)\s*</(?:\w+:)?v>", idx.data[cell.start_tag[1] : cell.end_tag[0]])
+        if not m:
+            return False
+        si = int(m.group(1))
+        c = next((x for x in sst_idx.containers if x.si_index == si), None)
+        if c is None:
+            return False
+        raw = sst_idx.data[c.span[0] : c.span[1]]
+        return not c.runs and b"rPr" not in raw and b"rPh" not in raw and b"phoneticPr" not in raw and len(sst_idx.container_nodes(c)) == 1
+    return True
+
+
 def _sheet_cell_patches(idx: PartIndex, targets: dict[str, str], values: dict[str, str],
-                        templates: set[str] | frozenset[str] = frozenset()) -> list[_BytePatch]:
+                        templates: set[str] | frozenset[str] = frozenset(),
+                        sst_idx: Optional[PartIndex] = None) -> list[_BytePatch]:
     if idx.profile != "sheet":
         raise UnsupportedXMLError(f"{idx.part_name}: cell coordinates need a worksheet part")
     if idx.implicit_refs:
@@ -301,7 +326,7 @@ def _sheet_cell_patches(idx: PartIndex, targets: dict[str, str], values: dict[st
             if cell is None:
                 missing.append((col, ref, slot_id, value))
                 continue
-            template = ref in templates and cell.children in (["v"], ["is"]) and cell.attrs.get("t") in ("s", "inlineStr")
+            template = ref in templates and _is_plain_sheet_template_cell(idx, cell, sst_idx)
             if cell.children and not template:
                 raise UnsupportedXMLError(f"{idx.part_name} {ref}: cell is not empty — refusing to overwrite it")
             # a printed 「令和　　年　　月　　日」 cell becomes the inline-string date; its shared string stays in the table
@@ -376,7 +401,7 @@ def fill_form(scan: ScanResult, values: dict[str, str], out_path: Union[str, Pat
                     boxes[o.container_index] = (s.slot_id, checkbox_offsets(text, o.checkbox_options,
                                                                             prepared[s.slot_id]))
         new_bytes, recs = patch_part(idx, prepared, scan.file_type, empty_targets, cell_targets, templates,
-                                     sheet_templates, boxes)
+                                     sheet_templates, boxes, sst_idx=scan.parts.get("xl/sharedStrings.xml"))
         if recs:
             etree.fromstring(new_bytes, etree.XMLParser(resolve_entities=False, no_network=True))
             replacements[part] = new_bytes

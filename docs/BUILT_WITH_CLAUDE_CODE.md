@@ -81,7 +81,7 @@ calls add API latency that is not included):
 | form4 `form4_unmarked_blank.docx` | 7 (locate 11 empty cells, decide office vs applicant) | 113 | 503 XML tags · 38 printed text blocks · 24 merged cells/ranges · 10 border definitions · 18 package parts | 120 ms | 21/21 (PASS) | 9 checklist items |
 | form5 `form5_unmarked_blank.xlsx` | 5 (locate 6 empty cells, decide office vs applicant) | 52 | 282 XML tags · 30 printed text blocks · 34 merged cells/ranges · 269 border definitions · 9 package parts | 154 ms | 21/21 (PASS) | 7 checklist items |
 
-Across the five forms:
+Across the 5 built-in Word/Excel forms (form1–form5; the fixed-PDF demo 6 is not in this table):
 - Form-Guard wrote 40 values (848 characters) into 41 designated fields and compared 2,119 XML tags, 171 printed text blocks, 124 merged cells/ranges and 650 border definitions, in about 0.1–0.25 s per form (wall-clock varies with machine load; the counted columns do not).
 - What is left for the person is the 51-item sign-off checklist (each value next to its verbatim source) and the one fact the memo does not contain (法人番号 in form2), which Form-Guard leaves empty instead of guessing. The same numbers are measured live in the web UI's Claude Code tab.
 
@@ -151,7 +151,7 @@ The git history shows the iterations, each one done with Claude Code and each on
 - **4. Phase 3 (judging-criteria polish)** — MIT licence, interactive discovery of unmarked forms in the web UI,
   `routed_model` / `route_reason` on every field, the Claude Code tab (`GET /api/claude-suite`), the Japanese-first
   bilingual UI with the judge walkthrough, and this documentation.
-- **5. Phase 2 integration** — the two-stage hook guard (`scripts/hook_guard.py`), four read-only subagents and five
+- **5. Phase 2 integration** — the two-stage hook guard (`scripts/hook_guard.py`), four subagents without `Edit`/`Write` tools (three use hook-guarded `Bash`) and five
   skills, the fifth MCP tool `form_guard_list_demos` with fd-level stdout isolation and UTF-8 stdio, the 404 model
   fallback chain and recorded escalations, all five demos in the web UI with one-click discovery + auto-preview, and
   the archive gate against path traversal, ZIP bombs and XXE.
@@ -252,7 +252,7 @@ Haiku・Sonnet の下書きが根拠確認や印刷されたルールで却下�
 作業量を同じスクリプトでファイルから数えたもので、人の作業時間を計ったものではありません。右側の列が Form-Guard の
 計測値です。`python docs/measure_workflow.py` で再現できます（表は英語版と同じ）。
 
-5 つの様式で、Form-Guard は 41 の指定欄に 40 件（848 文字）を記入し、XML タグ 2,119 個・定型文 171 か所・結合セル 124・
+Word/Excel の 5 つの様式（form1〜form5、固定PDFのデモ6はこの表の対象外）で、Form-Guard は 41 の指定欄に 40 件（848 文字）を記入し、XML タグ 2,119 個・定型文 171 か所・結合セル 124・
 罫線定義 650 を 1 様式あたり約 0.1〜0.25 秒で照合しました（時間は PC の負荷で変わりますが、数えた列は変わりません）。
 人に残るのは、各値を原文と並べて確認する計 51 項目の最終確認と、メモに無い事実（様式 2 の法人番号）の入力だけです。
 Form-Guard はその欄を推測で埋めません。同じ数値は Web 画面の Claude Code タブでもその場で計測して表示します。
@@ -315,7 +315,7 @@ git の履歴に、Claude Code で進めた各段階が残っています。ど�
 - **4. Phase 3（審査基準に沿った仕上げ）** — MIT ライセンス、Web 画面でのマーカーなし様式の対話的な空欄発見、全欄の
   `routed_model` / `route_reason`、Claude Code タブ（`GET /api/claude-suite`）、日本語を既定とする 2 言語 UI と審査員向け
   ガイドツアー、このドキュメント。
-- **5. Phase 2 の統合** — 2 段のフック（`scripts/hook_guard.py`）、読み取り専用のサブエージェント 4 種とスキル 5 種、5 つ目の
+- **5. Phase 2 の統合** — 2 段のフック（`scripts/hook_guard.py`）、`Edit`/`Write` ツールを持たないサブエージェント 4 種（うち 3 種はフックで制限した `Bash` を使用）とスキル 5 種、5 つ目の
   MCP ツール `form_guard_list_demos` とファイル記述子レベルの出力分離・UTF-8 の入出力、404 時のモデルフォールバックと
   引き上げの記録、Web 画面での 5 デモと 1 クリックの空欄発見＋自動プレビュー、パストラバーサル・ZIP 爆弾・XXE を防ぐ関門。
 - **6. Phase 4（固定PDF様式・文字型チェックボックス `□` → `■`・公募ポータル連携）** — 固定PDF様式（`form6_study_group_grant.pdf`）

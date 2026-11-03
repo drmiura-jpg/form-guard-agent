@@ -14,7 +14,7 @@ Built for **Built with Claude: Japan 2026** (development started Monday, 2026-11
 | **① 潜在的インパクト**<br>Potential Impact | **30%** | 行政・大学・施設の指定様式（`.docx` / `.xlsx` / 固定 `.pdf`）で、罫線1本・結合セル1つの崩れによる差し戻しを防ぎ、非エンジニアでも明日から安全に使える | `/` 上部「なぜ Form-Guard か？」バナー · [ハッカソン後の継続利用場面 ↓](#why-this-matters--who-keeps-using-it-after-the-hackathon) |
 | **② デモの完成度**<br>Demo & Presentation | **25%** | 作り直し版（7項目不合格）との視覚比較、マーカーなし白紙からの4段階空欄自動発見、原文引用ハイライトと推測拒否（法人番号は人の入力待ち） | `/#tour=1`（視覚比較） · `/#tour=2`（空欄自動発見） · `/#tour=3`（原文根拠・推測拒否） · [3分動画台本](docs/DEMO_VIDEO_SCRIPT_JA.md) |
 | **③ Claude の創造的活用**<br>Creative Use of Claude | **25%** | 欄ごとの3段モデル振り分け（Haiku 4.5 / Sonnet 5 / Opus 5.5）＋404フォールバック連鎖、2段フック（`PreToolUse` / `PostToolUse`）、編集ツール無しの4サブエージェント、Skills 6種、依存ゼロの5ツール MCP、公募ポータル `/portal` 連携 | `/#tour=4`（「Claude Code 連携 · Architecture」タブ） · [BUILT_WITH_CLAUDE_CODE.md](docs/BUILT_WITH_CLAUDE_CODE.md) |
-| **④ 実装の深さと実行力**<br>Depth & Execution | **20%** | 7区分21項目＋`VIS-01`（指定欄以外のずれ `0 px`）の決定論的検査、版（`revision`）と `SHA-256` に結び付いた人間承認ロック、実機 Word/Excel 16.0 検証、250件の自動テスト（APIキー不要で再現可） | `/#tour=5`（21項目構造証明＆人間承認ロック） · `pytest -v`（250 passed） |
+| **④ 実装の深さと実行力**<br>Depth & Execution | **20%** | 7区分21項目＋`VIS-01`（指定欄以外のずれ `0 px`）の決定論的検査、版（`revision`）と `SHA-256` に結び付いた人間承認ロック、実機 Word/Excel 16.0 検証、272件の自動テスト（APIキー不要で再現可） | `/#tour=5`（21項目構造証明＆人間承認ロック） · `pytest -v`（272 passed） |
 
 ---
 
@@ -42,7 +42,7 @@ left-hand columns are counted from the files, **not** a timed study of a person)
 | form4 `form4_unmarked_blank.docx` | 7 (locate 11 empty cells, decide office vs applicant) | 113 | 503 XML tags · 38 printed text blocks · 24 merged cells/ranges · 10 border definitions · 18 package parts | 120 ms | 21/21 (PASS) | 9 checklist items |
 | form5 `form5_unmarked_blank.xlsx` | 5 (locate 6 empty cells, decide office vs applicant) | 52 | 282 XML tags · 30 printed text blocks · 34 merged cells/ranges · 269 border definitions · 9 package parts | 154 ms | 21/21 (PASS) | 7 checklist items |
 
-- Across the 5 built-in forms Form-Guard filled 41 designated fields (40 values, 848 characters written) and verified 2,119 XML tags, 171 printed text blocks, 124 merged cells/ranges and 650 border definitions in about 0.1–0.25 s per form.
+- Across the 5 built-in Word/Excel forms (form1–form5; the fixed-PDF demo 6 is not in this table) Form-Guard filled 41 designated fields (40 values, 848 characters written) and verified 2,119 XML tags, 171 printed text blocks, 124 merged cells/ranges and 650 border definitions in about 0.1–0.25 s per form.
 - What is left for the person is the 51-item source-linked sign-off checklist and 1 unstated fact — `法人番号` in form2 — which stays empty for the human instead of being hallucinated.
 
 **Post-hackathon continued use & deployment roadmap**
@@ -97,7 +97,7 @@ pip install -r requirements.txt
 
 python -m form_guard.cli --all-demos     # runs the 3 fictional demos -> output/index.html
 python -m form_guard.cli --serve         # web UI on http://127.0.0.1:8000 (grant portal: /portal)
-pytest -v                                # 271 tests
+pytest -v                                # 272 tests
 ```
 
 Requires Python 3.10+. Without `ANTHROPIC_API_KEY` everything runs on the deterministic **offline demo engine**, so the
@@ -497,7 +497,7 @@ form_guard/
   portal.py       the fictional grant portal (GET /portal, GET /api/portal/forms, downloads with SHA-256)
   claude_suite.py reads .claude/ and .mcp.json for GET /api/claude-suite; measure.py measured workflow numbers
   static/         vanilla HTML/CSS/JS web UI (Japanese first, 日本語 / EN)
-.claude/          6 skills, 4 read-only subagents, two-stage hooks (settings.json); .mcp.json registers the MCP server
+.claude/          6 skills, 4 subagents without Edit/Write tools (3 use hook-guarded Bash), two-stage hooks (settings.json); .mcp.json registers the MCP server
 scripts/          hook_guard.py — PreToolUse template + secret guard, PostToolUse compile / import / JSON check
 docs/             BUILT_WITH_CLAUDE_CODE.md, DEMO_VIDEO_SCRIPT_JA.md (3-min demo script), measure_workflow.py, screenshots
 samples/          blank forms (3 marked + 2 unmarked + 1 fixed PDF), slot specs, memos, naive regenerations (samples.py)
@@ -543,7 +543,7 @@ License: MIT (see [LICENSE](LICENSE)).
   名前のある確認者が承認するまでダウンロードはロックされます。
 
 **計測による定量的な裏付け**（`python docs/measure_workflow.py`、オフラインエンジン、架空のサンプル様式。様式ごとの表は
-英語版を参照。手作業の列はファイルから数えた作業量で、人の作業時間を計ったものではありません）：5つの付属様式で、
+英語版を参照。手作業の列はファイルから数えた作業量で、人の作業時間を計ったものではありません）：Word/Excel の 5 つの付属様式（form1〜form5、固定PDFのデモ6はこの表の対象外）で、
 Form-Guard は 41 の指定欄に 40 件（848 文字）を記入し、XML タグ 2,119 個・定型文 171 か所・結合セル／範囲 124・罫線定義 650 を
 1 様式あたり約 0.1〜0.25 秒で照合しました。人に残るのは、各値を原文と並べて確認する計 51 項目の最終確認と、メモに無い事実
 1 件（様式2の法人番号）の入力だけです。Form-Guard はその欄を推測で埋めません。

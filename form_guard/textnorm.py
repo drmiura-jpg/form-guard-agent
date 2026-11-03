@@ -233,7 +233,8 @@ def parse_wareki_exact(s: str) -> Optional[date]:
 
 # --------------------------------------------------------------------- numbers
 
-_NUM = "[0-9０-９][0-9０-９,，]*(?:[.．][0-9０-９]+)?"
+_NUM = "[0-9０-９][0-9０-９,，.．]*"
+_SIGN = r"[-−ー－▲△+＋]"
 _KANJI_DIGITS = {"〇": 0, "零": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
 _KANJI_SMALL = {"十": 10, "百": 100, "千": 1000}
 _KANJI_BIG = {"万": 10_000, "億": 100_000_000, "兆": 1_000_000_000_000}
@@ -241,24 +242,30 @@ _UNIT_MULT = {**_KANJI_SMALL, **_KANJI_BIG}
 _COMPOUND_NUM_PAT = rf"(?:{_NUM}\s*[兆億万千百十]+)+(?:{_NUM})?"
 
 _AMOUNT_RE = re.compile(
-    rf"(?P<approx>約|およそ|おおよそ|概ね)?\s*(?P<num>{_COMPOUND_NUM_PAT}|{_NUM})\s*(?P<k>千)?円"
+    rf"(?P<approx>約|およそ|おおよそ|概ね)?\s*(?P<sign>{_SIGN})?\s*(?P<num>{_COMPOUND_NUM_PAT}|{_NUM})\s*(?P<k>千)?円"
 )
-_KANJI_AMOUNT_RE = re.compile(r"(?P<approx>約|およそ)?(?P<num>[〇一二三四五六七八九十百千万億兆]+)円")
-_PLAIN_NUM_RE = re.compile(r"[0-9][0-9,]*(?:\.[0-9]+)?")
+_KANJI_AMOUNT_RE = re.compile(rf"(?P<approx>約|およそ)?\s*(?P<sign>{_SIGN})?\s*(?P<num>[〇一二三四五六七八九十百千万億兆]+)円")
+_PLAIN_NUM_RE = re.compile(r"[0-9][0-9,.]*")
 
 
 def _to_float(s: str) -> float:
-    s = unicodedata.normalize("NFKC", s).replace(",", "")
+    s = unicodedata.normalize("NFKC", s).replace(",", "").strip()
+    if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", s):
+        raise ValueError(f"not a plain non-negative number: {s!r}")
     return float(s)
 
 
 # Comma grouping must be groups of three digits: 1,612,000 — never 52,00 / 1,,000 / 1,00,000.
 _GROUPED_RE = re.compile(r"^[0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?$")
+_PLAIN_TERM_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)?$")
 
 
 def _decimal_term(tok: str) -> Decimal:
-    if "," in tok and not _GROUPED_RE.match(tok):
-        raise ValueError(f"malformed digit grouping {tok!r} (commas must separate groups of three digits)")
+    if "," in tok:
+        if not _GROUPED_RE.match(tok):
+            raise ValueError(f"malformed digit grouping {tok!r} (commas must separate groups of three digits)")
+    elif not _PLAIN_TERM_RE.match(tok):
+        raise ValueError(f"malformed number token {tok!r}")
     try:
         return Decimal(tok.replace(",", ""))
     except InvalidOperation as exc:
@@ -322,10 +329,27 @@ class AmountMatch:
     text: str
 
 
+def _Preceded_by_neg(text: str, pos: int) -> bool:
+    """True when the character right before ``pos`` is a negative sign (-1,000円, −100万, ▲50万円), not a range or code (JR-2099-999, 100〜200)."""
+    i = pos - 1
+    while i >= 0 and text[i] in " \t":
+        i -= 1
+    if i < 0 or text[i] not in "-−ー－▲△":
+        return False
+    # An ASCII/Unicode minus or ▲/△ before a number is a negative sign unless it connects a preceding ASCII letter/digit or unit (JR-2099-999, 100万円-200万円).
+    if text[i] in "▲△":
+        return True
+    prev = text[i - 1] if i > 0 else ""
+    return not ((prev.isascii() and prev.isalnum()) or prev in "0123456789０１２３４５６７８９円万億兆千百十日月年週時分秒回件名歳%％)）】")
+
+
 def find_amounts(text: str) -> list[AmountMatch]:
     out: list[AmountMatch] = []
-    refused: list[tuple[int, int]] = []  # 52,00万円 / 1.5円: not an amount, and nothing inside them is read as one
+    refused: list[tuple[int, int]] = []  # 52,00万円 / 1.5円 / -1,000円: not an amount, and nothing inside is read as one
     for m in _AMOUNT_RE.finditer(text):
+        if _Preceded_by_neg(text, m.start("num")):
+            refused.append((m.start(), m.end()))
+            continue
         try:
             v = parse_compound(m.group("num"))
         except ValueError:
@@ -336,11 +360,14 @@ def find_amounts(text: str) -> list[AmountMatch]:
         start = m.start("approx") if m.group("approx") else m.start("num")
         out.append(AmountMatch(start, m.end(), v, bool(m.group("approx")), text[start : m.end()]))
     for m in _KANJI_AMOUNT_RE.finditer(text):
-        v = kanji_to_int(m.group("num"))
         s = m.start("num")
+        if _Preceded_by_neg(text, s):
+            refused.append((m.start(), m.end()))
+            continue
+        v = kanji_to_int(m.group("num"))
         # the 万円 / 千円 of a number that is no amount (52,00万円, 1.23456万円) or of 数万円 / 何千円 is never one either
         if (v is None or any(a.start <= s < a.end for a in out) or any(rs <= s < re_ for rs, re_ in refused)
-                or (s > 0 and text[s - 1] in "0123456789０１２３４５６７８９,，.．数何")):
+                or (s > 0 and text[s - 1] in "0123456789０１２３４５６７８９,，.．数何-−ー－▲△")):
             continue
         start = m.start("approx") if m.group("approx") else m.start("num")
         out.append(AmountMatch(start, m.end(), v, bool(m.group("approx")), text[start : m.end()]))
@@ -374,20 +401,27 @@ def quantities(text: str) -> set[float]:
         vals.update(float(x) for x in (d.year, d.month, d.day) if x is not None)
         t = t[: d.start] + " " * (d.end - d.start) + t[d.end :]
     covered: list[tuple[int, int]] = []
+    for m in _AMOUNT_RE.finditer(t):
+        covered.append((m.start(), m.end()))
+    for m in _KANJI_AMOUNT_RE.finditer(t):
+        covered.append((m.start(), m.end()))
     for a in find_amounts(t):
         vals.add(float(a.value))
         covered.append((a.start, a.end))
     for m in re.finditer(_COMPOUND_NUM_PAT, t):
+        if _Preceded_by_neg(t, m.start()):
+            covered.append((m.start(), m.end()))
+            continue
         try:
             vals.add(float(parse_compound(m.group(0))))
         except ValueError:  # 52,00万 / 1.23456万: states no number — its digits do not support anything either
             pass
         covered.append((m.start(), m.end()))
     for m in _PLAIN_NUM_RE.finditer(t):
-        if any(s <= m.start() < e for s, e in covered):
+        if any(s <= m.start() < e for s, e in covered) or _Preceded_by_neg(t, m.start()):
             continue
         try:
-            vals.add(_to_float(m.group(0)))
+            vals.add(_to_float(m.group(0).lstrip("+＋").strip()))
         except ValueError:
             pass
     return vals
@@ -400,11 +434,16 @@ def value_quantities(text: str) -> list[tuple[str, float]]:
         t = t[: d.start] + " " * (d.end - d.start) + t[d.end :]
     out: list[tuple[str, float]] = []
     covered: list[tuple[int, int]] = []
+    for m in _AMOUNT_RE.finditer(t):
+        covered.append((m.start(), m.end()))
+    for m in _KANJI_AMOUNT_RE.finditer(t):
+        covered.append((m.start(), m.end()))
     for a in find_amounts(t):
         out.append((a.text, float(a.value)))
         covered.append((a.start, a.end))
     for m in re.finditer(_COMPOUND_NUM_PAT, t):
-        if any(s <= m.start() < e for s, e in covered):
+        if any(s <= m.start() < e for s, e in covered) or _Preceded_by_neg(t, m.start()):
+            covered.append((m.start(), m.end()))
             continue
         try:
             out.append((m.group(0), float(parse_compound(m.group(0)))))
@@ -412,9 +451,12 @@ def value_quantities(text: str) -> list[tuple[str, float]]:
             pass
         covered.append((m.start(), m.end()))
     for m in _PLAIN_NUM_RE.finditer(t):
-        if any(s <= m.start() < e for s, e in covered):
+        if any(s <= m.start() < e for s, e in covered) or _Preceded_by_neg(t, m.start()):
             continue
-        out.append((m.group(0), _to_float(m.group(0))))
+        try:
+            out.append((m.group(0), _to_float(m.group(0).lstrip("+＋").strip())))
+        except ValueError:
+            pass
     return out
 
 
@@ -573,8 +615,8 @@ def protection(piece: str) -> int:
     if RESTRICTIVE_WORDS.search(piece):
         return 2
     if _SAFETY_WORDS.search(piece):
-        if is_remark(piece) and not re.search(r"完了まで|短縮", piece):
-            return 0  # 「なお、…清掃のみで異常なし」: 'のみ' in a status remark is not a condition
+        if _STATUS_REMARK.search(piece) and not re.search(r"完了まで|短縮", piece):
+            return 0  # 「なお、…清掃のみで異常なし」: 'のみ' in an inspection status remark is not a condition
         return 1
     if _DECISION_WORDS.search(piece.lstrip()) and not is_remark(piece):
         return 1

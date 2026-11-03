@@ -1486,12 +1486,34 @@ def human_mapping(slot: FormSlot, value: str) -> FieldMapping:
 # ===================================================== cross-field printed rules
 
 
-def _memo_date_for(memo: str, label: str) -> Optional[tuple[Any, str, int]]:
-    """The date the memo gives right after ``label`` (「変更予定日（2026年12月15日（火））」「変更予定日：…」
-    「変更予定日は…」) as (date, its text, memo line), or None. The label must stand on its own (line start, bullet
+_DEADLINE_SEP = re.compile(r"\s*[～〜~]\s*")
+
+
+def _parse_deadline_field_date(val: str) -> Optional[Any]:
+    """Parse a single date or the start date of a valid period (both endpoints valid and start <= end)."""
+    s = (val or "").strip()
+    if not s:
+        return None
+    d, prob = check_full_date(s)
+    if d is not None and not prob:
+        return d
+    parts = _DEADLINE_SEP.split(s)
+    if len(parts) == 2:
+        d0, p0 = check_full_date(parts[0].strip())
+        d1, p1 = check_full_date(parts[1].strip())
+        if d0 is not None and d1 is not None and not p0 and not p1 and d0 <= d1:
+            return d0
+    return None
+
+
+def _memo_date_for(memo: str, label: str) -> list[tuple[Any, str, int]]:
+    """All distinct dates the memo gives right after ``label`` (「変更予定日（2026年12月15日（火））」「変更予定日：…」
+    「変更予定日は…」) as [(date, its text, memo line), ...]. The label must stand on its own (line start, bullet
     or punctuation before it: 「め日」 is not found inside 「締め日」), and a date further along the sentence
     (「変更予定日の30日前（11月15日）」) is not taken for it."""
     starts = line_starts(memo)
+    hits: list[tuple[Any, str, int]] = []
+    seen_dates: set[Any] = set()
     for m in re.finditer(r"(?:^|(?<=[\s・\-\*●■◆○〇▶【\[（(、。,，]))" + re.escape(label), memo, re.M):
         end = memo.find("\n", m.end())
         seg = memo[m.end() : end if end >= 0 else len(memo)][:60]
@@ -1509,8 +1531,10 @@ def _memo_date_for(memo: str, label: str) -> Optional[tuple[Any, str, int]]:
                 dt = _date(inf[0], d.month, d.day)
             except ValueError:
                 continue
-        return dt, seg[d.start : d.end], offset_to_line(starts, m.start())
-    return None
+        if dt not in seen_dates:
+            seen_dates.add(dt)
+            hits.append((dt, seg[d.start : d.end], offset_to_line(starts, m.start())))
+    return hits
 
 
 def _advance_rules(raw: Any) -> list[dict[str, Any]]:
@@ -1530,19 +1554,27 @@ def _advance_rules(raw: Any) -> list[dict[str, Any]]:
 
 def _deadline_date(printed: str, own: str, slots: list[FormSlot], by_id: dict[str, FieldMapping],
                    memo: str) -> Optional[tuple[str, Any, str, str]]:
-    """(name, date, its text, where) of the other date of a deadline rule. ``printed`` is the phrase before 「の30日前」
-    (「変更予定日」, or 「本届出書は変更予定日」 / 「必ず変更予定日」 when no 、 separates it): its longest ending of 3+
-    characters that names another field (with a date value) or stands as a memo label followed by a date is used."""
+    """(name, date_or_None, its text, where) of the other date of a deadline rule. ``printed`` is the phrase before
+    「の30日前」 (「変更予定日」, or 「本届出書は変更予定日」 / 「必ず変更予定日」 when no 、 separates it): its longest
+    ending of 3+ characters that names another field or stands as a memo label followed by a date is used.
+    When ``date_or_None`` is None, ``where`` explains why the deadline could not be verified (unconfirmed/unparseable
+    target field or conflicting memo dates) so ``advance_notice_warnings`` emits a warning instead of passing silently."""
     for name in (printed[i:] for i in range(len(printed) - 2)):
         holder = next((s for s in slots if s.slot_id != own and name in explicit_aliases(s)), None)
-        hm = by_id.get(holder.slot_id) if holder is not None else None
-        hv = (hm.filled_value if hm.is_written else (hm.suggested_value or "")) if hm is not None else ""
-        other = check_full_date(hv.strip())[0] if hv else None
-        if other is not None:
-            return name, other, hv, f"field «{holder.label}»"  # type: ignore[union-attr]
+        if holder is not None:
+            hm = by_id.get(holder.slot_id)
+            hv = hm.filled_value.strip() if (hm is not None and hm.is_written and hm.filled_value) else ""
+            other = _parse_deadline_field_date(hv) if hv else None
+            if other is not None:
+                return name, other, hv, f"field «{holder.label}»"
+            raw_v = ((hm.filled_value or hm.suggested_value or "").strip()) if hm is not None else ""
+            return name, None, raw_v or "—", f"field «{holder.label}» (not yet confirmed)"
         found = _memo_date_for(memo, name)
-        if found is not None:
-            return name, found[0], found[1], f"memo L{found[2]}"
+        if len(found) == 1:
+            return name, found[0][0], found[0][1], f"memo L{found[0][2]}"
+        if len(found) > 1:
+            joined_txt = " / ".join(f"{t} (memo L{ln})" for _dt, t, ln in found)
+            return name, None, joined_txt, "conflicting memo dates"
     return None
 
 
@@ -1550,10 +1582,12 @@ def advance_notice_warnings(slots: list[FormSlot], mappings: list[FieldMapping],
     """Check printed deadlines that relate two dates (「変更予定日の30日前までに提出すること」, recorded by the scanner
     as ``constraints["advance_notice"]`` on the submission-date field) against the final values.
 
-    The other date comes from the field that holds it, or else from the memo (「変更予定日（2026年12月15日（火））」).
-    When it is fewer than N days after the submission date, the submission-date mapping gets a warning (prefix
-    ``ADVANCE_NOTICE_PREFIX``) that the HITL checklist shows: the value is kept — it is what the memo states — and
-    the reviewer decides. Idempotent: earlier advance-notice warnings are replaced."""
+    The other date comes from the field that holds it (single date or start of a valid period), or else from the memo
+    (「変更予定日（2026年12月15日（火））」) when no field holds it. When it is fewer than N days after the submission
+    date, or when the target field is unconfirmed/invalid or the memo gives conflicting dates for the target label,
+    the submission-date mapping gets a warning (prefix ``ADVANCE_NOTICE_PREFIX``) that the HITL checklist shows:
+    the value is kept — it is what the memo states — and the reviewer decides. Idempotent: earlier advance-notice
+    warnings are replaced."""
     by_id = {m.slot_id: m for m in mappings}
     out: list[FieldMapping] = []
     for m in mappings:
@@ -1568,17 +1602,35 @@ def advance_notice_warnings(slots: list[FormSlot], mappings: list[FieldMapping],
             if found is None:  # the other date is in no field and the memo does not give it: nothing to compare
                 continue
             target, other, when, where = found
+            if other is None:
+                if where == "conflicting memo dates":
+                    warnings.append(
+                        f"{ADVANCE_NOTICE_PREFIX} the form requires 「{rule.get('printed') or target}」 ({days} days before "
+                        f"{target}) — the memo gives multiple conflicting dates for {target} ({when}); check {slot.label} "  # type: ignore[union-attr]
+                        f"and {target} / 様式の注意事項「{target}の{days}日前までに{rule.get('action') or '提出'}」に対し、"
+                        f"メモ内に異なる複数の{target}（{when}）があるため期限を判定できません。"
+                        f"{slot.label}と{target}を確認してください")  # type: ignore[union-attr]
+                else:
+                    warnings.append(
+                        f"{ADVANCE_NOTICE_PREFIX} the form requires 「{rule.get('printed') or target}」 ({days} days before "
+                        f"{target}) — {target} in {where} («{when}») could not be verified as a date/period; check "
+                        f"{slot.label} and {target} / 様式の注意事項「{target}の{days}日前までに{rule.get('action') or '提出'}」"  # type: ignore[union-attr]
+                        f"に対し、{target}（{when}）が未確定または日付・期間として検証できないため期限を判定できません。"
+                        f"{slot.label}と{target}を確認してください")  # type: ignore[union-attr]
+                continue
             diff = (other - submitted).days
             if diff >= days:
                 continue
-            en_gap = (f"only {diff} day(s) after" if diff >= 0 else f"{-diff} day(s) before")
-            ja_gap = (f"{target}（{when}）まで{diff}日しかありません" if diff >= 0
-                      else f"{target}（{when}）が{slot.label}より{-diff}日前です")  # type: ignore[union-attr]
+            en_gap = ("on the same day as" if diff == 0
+                      else (f"only {diff} day(s) after" if diff > 0 else f"{-diff} day(s) before"))
+            ja_gap = (f"{target}（{when}）が{slot.label}と同日（0日前）です" if diff == 0  # type: ignore[union-attr]
+                      else (f"{target}（{when}）まで{diff}日しかありません" if diff > 0
+                            else f"{target}（{when}）が{slot.label}より{-diff}日前です"))  # type: ignore[union-attr]
             warnings.append(
                 f"{ADVANCE_NOTICE_PREFIX} the form requires 「{rule.get('printed') or target}」 ({days} days before "
                 f"{target}) — {target} {when} ({where}) is {en_gap} {slot.label} {value}; check both dates "  # type: ignore[union-attr]
                 f"/ 様式の注意事項「{target}の{days}日前までに{rule.get('action') or '提出'}」に対し、{ja_gap}。"
-                f"提出日と{target}を確認してください")
+                f"{slot.label}と{target}を確認してください")  # type: ignore[union-attr]
         out.append(m if warnings == list(m.warnings) else m.model_copy(update={"warnings": warnings}))
     return out
 

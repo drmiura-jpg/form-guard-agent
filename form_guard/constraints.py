@@ -258,9 +258,13 @@ def finish_checkbox_constraints(c: dict[str, Any], options: list[dict[str, Any]]
     return out
 
 
+_PRINTED_NOTE_RE = re.compile(r"^(.*?)(?:[ 　]*[（(][^）)]*[）)])+$")
+
+
 def normalize_checkbox_value(value: str, options: list[str]) -> list[str]:
     """The option labels a value names: '☑ 合意済み', '■合意済み', '合意済み' and '協議中（協議予定日…）' all name their
-    printed option. Recognised options come in printed order; anything unrecognised is kept (validation rejects it)."""
+    printed option. Recognised options come in printed order; anything unrecognised (including negations or arbitrary
+    suffixes such as '合意済みではない') is kept so validation rejects it."""
     norm = lambda s: unicodedata.normalize("NFKC", s).strip()  # noqa: E731
     opts = {norm(o): o for o in options}
     text = value or ""
@@ -271,7 +275,11 @@ def normalize_checkbox_value(value: str, options: list[str]) -> list[str]:
         p = norm(piece)
         if not p:
             continue
-        hit = opts.get(p) or next((opts[o] for o in sorted(opts, key=len, reverse=True) if o and p.startswith(o)), None)
+        hit = opts.get(p)
+        if hit is None:
+            m = _PRINTED_NOTE_RE.match(p)
+            if m:
+                hit = opts.get(m.group(1).strip())
         if hit is not None:
             picked.append(hit)
         else:

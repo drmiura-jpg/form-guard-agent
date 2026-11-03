@@ -5716,6 +5716,119 @@ def test_cli_and_mcp_server_start_when_run_directly_as_scripts(script_rel):
     assert bad.returncode == 2 and "Traceback (most recent call last):" not in (bad.stdout + bad.stderr)
 
 
+def test_r1_1449_audit_regressions(tmp_path):
+    """Regression tests for R1-A1..A6, R1-O6, R1-O7 from 2026-11-03_1449 audit."""
+    from form_guard.constraints import (
+        advance_notice_rules,
+        checkbox_constraints,
+        normalize_checkbox_value,
+        parse_checkbox_options,
+    )
+    from form_guard.mapper import advance_notice_warnings, human_mapping
+    from form_guard.models import FieldMapping
+    from form_guard.textnorm import condense_extractive, find_amounts, protection, quantities, value_quantities
+
+    # R1-A1: negations and unknown suffixes on checkbox labels must never be normalised into the positive option
+    opts = parse_checkbox_options("□ 合意済み　　□ 協議中（協議予定日：　　　年　　月　　日）")
+    cb_slot = _text_slot("合意状況", fmt="choice", **checkbox_constraints(opts))
+    for neg in ("合意済みではない", "合意済み以外", "合意済みか不明", "■ 合意済みではない"):
+        assert normalize_checkbox_value(neg, ["合意済み", "協議中"]) == [neg.replace("■", "").strip()]
+        hm = human_mapping(cb_slot, neg)
+        assert not hm.validation_passed and hm.errors, (neg, hm)
+    for pos in ("合意済み", "☑ 合意済み", "■合意済み", "協議中（協議予定日：未定）"):
+        assert normalize_checkbox_value(pos, ["合意済み", "協議中"])[0] in ("合意済み", "協議中")
+
+    # R1-A2: negative signs and multi-dot numbers must be refused as a whole, never partially extracted as positive
+    for bad_amt in ("増減額：-1,000円", "増減額：−1,000円", "増減額：－1,000円", "増減額：▲1,000円", "増減額：1.2.5万円"):
+        assert find_amounts(bad_amt) == [], bad_amt
+        assert quantities(bad_amt) == set(), bad_amt
+        assert value_quantities(bad_amt) == [], bad_amt
+    assert [a.value for a in find_amounts("2千万円と3百万円と1億2千万円")] == [20_000_000, 3_000_000, 120_000_000]
+
+    # R1-A3, R1-A4, R1-O6: period start date, conflicting memo dates, custom slot label, 0-day gap
+    rules = advance_notice_rules("研究期間の30日前までに申請すること。")
+    s_sub = _text_slot("申請日", fmt="wareki_date", advance_notice=rules)
+    s_per = _text_slot("研究期間", fmt="wareki_period")
+    m_sub = FieldMapping(slot_id="申請日", status="filled", filled_value="令和8年12月1日（火）", validation_passed=True)
+    m_per_14 = FieldMapping(
+        slot_id="研究期間", status="filled",
+        filled_value="令和8年12月15日（火）～令和8年12月31日（木）", validation_passed=True,
+    )
+    w_14 = advance_notice_warnings([s_sub, s_per], [m_sub, m_per_14], "研究期間：2027年1月15日（金）～2027年3月31日（水）\n")[0].warnings
+    assert len(w_14) == 1 and "only 14 day(s) after" in w_14[0] and "申請日と研究期間を確認してください" in w_14[0]
+
+    # 0-day gap uses "on the same day as"
+    m_per_0 = FieldMapping(
+        slot_id="研究期間", status="filled",
+        filled_value="令和8年12月1日（火）～令和8年12月31日（木）", validation_passed=True,
+    )
+    w_0 = advance_notice_warnings([s_sub, s_per], [m_sub, m_per_0], "")[0].warnings
+    assert len(w_0) == 1 and "on the same day as" in w_0[0]
+
+    # unconfirmed / invalid period field does not silently fall back to older memo; emits warning
+    m_per_bad = FieldMapping(
+        slot_id="研究期間", status="needs_human_input", filled_value="", suggested_value="令和8年12月31日（木）～令和8年12月15日（火）",
+        validation_passed=False,
+    )
+    w_bad = advance_notice_warnings([s_sub, s_per], [m_sub, m_per_bad], "研究期間：2027年1月15日（金）\n")[0].warnings
+    assert len(w_bad) == 1 and "could not be verified" in w_bad[0]
+
+    # conflicting memo dates (when no field holds the target) warn regardless of order
+    rules_chg = advance_notice_rules("変更予定日の30日前までに提出すること。")
+    s_sub2 = _text_slot("提出日", fmt="wareki_date", advance_notice=rules_chg)
+    for memo_order in (
+        "変更予定日：2027年1月15日（金）\n変更予定日：2026年12月15日（火）\n",
+        "変更予定日：2026年12月15日（火）\n変更予定日：2027年1月15日（金）\n",
+    ):
+        w_conf = advance_notice_warnings([s_sub2], [m_sub.model_copy(update={"slot_id": "提出日"})], memo_order)[0].warnings
+        assert len(w_conf) == 1 and "multiple conflicting dates" in w_conf[0]
+
+    # R1-A5 & R1-O7: rich-text era skeleton in Excel is not overwritten as plain inlineStr; era-less skeleton is in rejected
+    form_docx = tmp_path / "eraless.docx"
+    _era_template_docx(form_docx)
+    d_docx = discover_blank_cells(form_docx)
+    assert any("era-less date skeleton" in r["reason"] for r in d_docx["rejected"])
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws["A1"], ws["A2"], ws["B2"] = "架空様式", "届出日", "令和　　年　　月　　日"
+    ws["A3"], ws["B3"] = "生年月日", "　　年　　月　　日"
+    ws.merge_cells("A1:B1")
+    xl_inline = tmp_path / "rich_era_inline.xlsx"
+    wb.save(xl_inline)
+    xl_sst = tmp_path / "rich_era_sst.xlsx"
+    to_shared_strings(xl_inline, xl_sst)
+    # Inject rich-text <r><rPr><b/></rPr><t>令和　　年　　月　　日</t></r> into inlineStr and sharedStrings for B2
+    rewrite_entry(
+        xl_inline, xl_inline, "xl/worksheets/sheet1.xml",
+        lambda b: re.sub(
+            rb'(<c r="B2"[^>]*><is>)<t[^>]*>.*?</t>(</is></c>)',
+            rb"\1<r><rPr><b/></rPr><t>" + "令和　　年　　月　　日".encode("utf-8") + rb"</t></r>\2",
+            b,
+        ),
+    )
+    rewrite_entry(
+        xl_sst, xl_sst, "xl/sharedStrings.xml",
+        lambda b: re.sub(
+            rb"<t[^>]*>" + "令和　　年　　月　　日".encode("utf-8") + rb"</t>",
+            "<r><rPr><b/></rPr><t>令和　　年　　月　　日</t></r>".encode("utf-8"),
+            b,
+        ),
+    )
+    for xl_path in (xl_inline, xl_sst):
+        d_xl = discover_blank_cells(xl_path)
+        assert [c["slot_id"] for c in d_xl["candidates"]] == []
+        assert any("era-less date skeleton" in r["reason"] for r in d_xl["rejected"])
+        assert any(("rich-text" in r["reason"] or "already holds content" in r["reason"]) for r in d_xl["rejected"])
+
+    # R1-A6: restriction sentence starting with 「なお、」 keeps protection > 0 and triggers unsafe=True if dropped
+    assert protection("なお、利用は平日のみ。") == 1
+    assert protection("なお、フィルター清掃のみで異常なし。") == 0
+    res_cond = condense_extractive("設備を導入する。なお、利用は平日のみ。", 8)
+    assert res_cond.text == "設備を導入する。" and res_cond.removed and res_cond.unsafe is True
+
+
+
 
 
 

@@ -482,7 +482,7 @@ def inline_string_issues(c_el: Any) -> list[str]:
 
 
 def audit_sheet_cells(part: str, oidx: PartIndex, data_f: bytes, cells: dict[str, str],
-                      prepared: dict[str, str]) -> SheetCellAudit:
+                      prepared: dict[str, str], sst_idx: Optional[PartIndex] = None) -> SheetCellAudit:
     """Check the designated cells (ref -> slot id) of a filled worksheet and revert them to the blank form's bytes.
 
     A written cell must be ``<c …same attributes… t="inlineStr"><is><t>value</t></is></c>`` — in the spreadsheetml
@@ -538,6 +538,11 @@ def audit_sheet_cells(part: str, oidx: PartIndex, data_f: bytes, cells: dict[str
             got = fidx.container_text(ic)
             if got != exp:
                 audit.text.append(f"{sid}: {ref} expected «{exp}» got «{got}»")
+        if oc is not None and oc.children:
+            from .writer import _is_plain_sheet_template_cell
+
+            if not _is_plain_sheet_template_cell(oidx, oc, sst_idx):
+                audit.struct.append(f"{sid}: {ref} blank cell holds rich text or non-plain content — cannot be overwritten as an inline string")
         expected = dict(oc.attrs) if oc is not None else {"r": ref}
         if oc is None:
             style = inherited_cell_style(oidx, fc.row, fc.col)
@@ -763,7 +768,8 @@ def verify(
                 box_text += issues
                 box_marks.update(marks)
             if part in sheet_cells:
-                audit = audit_sheet_cells(part, scan.parts[part], data_f, sheet_cells[part], prepared)
+                audit = audit_sheet_cells(part, scan.parts[part], data_f, sheet_cells[part], prepared,
+                                          sst_idx=scan.parts.get("xl/sharedStrings.xml"))
                 sheet_audits[part] = audit
                 cell_struct += audit.struct
                 filled_parts[part] = index_part(part, audit.reverted, profile)  # compare the rest of the sheet as-is
