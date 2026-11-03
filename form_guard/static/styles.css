@@ -39,6 +39,7 @@ html[data-lang="ja"] [data-l="en"], html[data-lang="en"] [data-l="ja"] { display
 .topbar { position: sticky; top: 0; z-index: 20; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
   gap: 10px 16px; padding: 10px 20px; background: var(--surface); border-bottom: 1px solid var(--line); }
 .brand { display: flex; align-items: center; gap: 12px; }
+.brand-portal { margin-left: 14px; }
 .logo { width: 34px; height: 34px; fill: none; stroke: var(--ink); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .logo .tick { stroke: var(--good); stroke-width: 2.4; }
 .brand-name { font-weight: 750; font-size: 17px; letter-spacing: .01em; }
@@ -67,6 +68,10 @@ html[data-lang="ja"] [data-l="en"], html[data-lang="en"] [data-l="ja"] { display
 .demo-org { color: var(--muted); font-size: 11.5px; margin-top: 2px; }
 .demo-cta { font-size: 12px; font-weight: 650; color: var(--accent); margin-top: 4px; }
 .ftype { flex: none; font: 700 10px/1 var(--mono); padding: 4px 6px; border-radius: 5px; border: 1px solid var(--line); color: var(--ink-2); }
+.ftype-pdf { color: #b42318; border-color: #f1b8b3; }
+.demo-pdf { border-style: solid; border-width: 1.5px; }
+.rail-link { display: block; margin-top: 8px; font-size: 12.5px; font-weight: 650; color: var(--accent); text-decoration: none; }
+.rail-link:hover { text-decoration: underline; }
 .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .chip { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 999px; background: var(--surface-2); color: var(--ink-2); border: 1px solid var(--line); }
 .upload { display: flex; flex-direction: column; gap: 10px; }
@@ -128,9 +133,9 @@ textarea { resize: vertical; font-size: 12.5px; }
   background: var(--accent-soft); color: var(--accent); font-weight: 700; font-size: 12px; margin-bottom: 6px; }
 .steps b { display: block; } .steps span { color: var(--muted); font-size: 12px; }
 .run-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
-.run-title { display: flex; gap: 14px; align-items: flex-start; }
+.run-title { display: flex; gap: 14px; align-items: flex-start; flex: 1 1 0; min-width: 0; }
 .run-title h1 { margin: 0; font-size: 19px; line-height: 1.3; }
-.run-links { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+.run-links { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; max-width: 48%; }
 .status { flex: none; display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 999px; font-weight: 750; font-size: 12.5px; }
 .st-pass { background: var(--good-soft); color: var(--good-ink); }
 .st-need { background: var(--warn-soft); color: var(--warn-ink); }

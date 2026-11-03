@@ -7,7 +7,7 @@
 Stage 1 — PreToolUse, BEFORE anything reaches the disk (a violation exits with code 2 and prints a
 ``permissionDecision: "deny"`` decision, so the tool call never runs):
 
-* Blank-template guard. The blank forms in samples/blank_forms/ (*.docx, *.xlsx) are the untouched "before" of
+* Blank-template guard. The blank forms in samples/blank_forms/ (*.docx, *.xlsx, *.pdf) are the untouched "before" of
   every structural proof. A Write / Edit / MultiEdit / NotebookEdit of such a file, or a shell command that writes,
   copies over, moves or deletes one (redirection, cp/mv/rm, tee, Set-Content, Copy-Item, sed -i, an inline
   python / node / .NET write …), is refused — and so is deleting, moving or renaming the samples/blank_forms
@@ -69,7 +69,7 @@ from typing import Iterable, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parent.parent
 OVERRIDE_ENV = "FORM_GUARD_ALLOW_TEMPLATE_WRITE"
-TEMPLATE_EXTS = (".docx", ".xlsx", ".docm", ".xlsm")
+TEMPLATE_EXTS = (".docx", ".xlsx", ".docm", ".xlsm", ".pdf")
 GENERATOR_FLAGS = ("--generate-samples", "--regenerate-samples")
 POST_BUDGET_S = 1.8  # py_compile + import smoke test must finish well under 2 seconds
 WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
@@ -219,9 +219,9 @@ def _hygiene_exempt(path: Path) -> bool:
 
 # ------------------------------------------------------------------ stage 1a: blank-template guard
 
-TEMPLATE_RE = re.compile(r"samples[\\/]+blank_forms[\\/]+[^\s\"'`<>|;&()]*?\.(?:docx|xlsx|docm|xlsm)(?![\w.])", re.I)
+TEMPLATE_RE = re.compile(r"samples[\\/]+blank_forms[\\/]+[^\s\"'`<>|;&()]*?\.(?:docx|xlsx|docm|xlsm|pdf)(?![\w.])", re.I)
 TEMPLATE_DIR_RE = re.compile(r"(?:^|[\\/])samples[\\/]+blank_forms[\\/]*$", re.I)
-_LIT = r"[\"'][^\"']*samples[\\/]+blank_forms[\\/][^\"']*\.(?:docx|xlsx|docm|xlsm)[\"']"
+_LIT = r"[\"'][^\"']*samples[\\/]+blank_forms[\\/][^\"']*\.(?:docx|xlsx|docm|xlsm|pdf)[\"']"
 INLINE_WRITES = [  # write calls whose own argument is a template path literal
     re.compile(r"\bopen\(\s*" + _LIT + r"\s*,\s*(?:mode\s*=\s*)?[\"'][^\"']*[wax+]", re.I),
     re.compile(r"\.save(?:_?as)?\(\s*(?:filename\s*=\s*)?" + _LIT, re.I),
@@ -397,7 +397,7 @@ def _native(raw: str) -> str:
 
 
 def _could_hold_template(name: str) -> bool:
-    """A (lower-case) file name — or a wildcard for one — that is or can match a blank template (.docx / .xlsx …)."""
+    """A (lower-case) file name — or a wildcard for one — that is or can match a blank template (.docx / .xlsx / .pdf …)."""
     if not _GLOB_RE.search(name):
         return name.endswith(TEMPLATE_EXTS)
     ext = re.search(r"\.[a-z0-9]+$", name)  # a literal extension at the end of the wildcard decides

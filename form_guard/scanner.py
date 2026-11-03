@@ -106,6 +106,7 @@ class ScanResult:
     spec: dict
     warnings: list[str] = field(default_factory=list)
     sheets: list[tuple[int, str, str]] = field(default_factory=list)
+    pdf: Any = None  # fixed PDF forms: the parsed form (pdf_support.PDFForm) the slots were found on
 
     @property
     def target_parts(self) -> list[str]:
@@ -142,10 +143,24 @@ def load_spec(form_path: Path, spec: Union[dict, str, Path, None]) -> dict:
     return {}
 
 
+def is_pdf(path: Union[str, Path]) -> bool:
+    with open(path, "rb") as fh:
+        return fh.read(5) == b"%PDF-"
+
+
 def detect_file_type(path: Path) -> str:
-    """docx | xlsx — after the archive safety gate (path traversal, ZIP bomb, DTD / entity declarations)."""
+    """docx | xlsx | pdf — after the archive safety gate (path traversal, ZIP bomb, DTD / entity declarations) or,
+    for a PDF, the PDF gate (encryption, active content, compressed cross-references, decompression bombs)."""
     from .ziputil import check_archive
 
+    if is_pdf(path):
+        from .pdf_core import PDFError, check_pdf
+
+        try:
+            check_pdf(Path(path))
+        except PDFError as exc:
+            raise ValueError(f"{Path(path).name}: {exc}") from exc
+        return "pdf"
     names = {i.filename for i in check_archive(Path(path))}
     if "word/document.xml" in names:
         return "docx"
@@ -169,6 +184,10 @@ def scan(path: Union[str, Path], spec: Union[dict, str, Path, None] = None) -> S
                          "version of this form)")
     if file_type == "docx":
         result = _scan_docx(path, spec_d)
+    elif file_type == "pdf":
+        from .pdf_support import scan_pdf
+
+        result = scan_pdf(path, spec_d)
     else:
         result = _scan_xlsx(path, spec_d)
     _finalise_slots(result)
@@ -362,6 +381,9 @@ def _add_coordinate_target(idx: Optional[PartIndex], tgt: dict, accs: dict, warn
         warnings.append(f"coordinate target {slot_id!r}: cell (table={tgt.get('table')}, row={tgt.get('row')}, "
                         f"col={tgt.get('col')}) not found")
         return
+    if is_checkbox_target(tgt):
+        _add_docx_checkbox(idx, cell, slot_id, tgt, accs, warnings)
+        return
     template = _template_container(idx, cell) if _cell_text(idx, cell) else None
     if _cell_text(idx, cell) and template is None:
         warnings.append(f"coordinate target {slot_id!r}: cell is not empty — refusing to overwrite printed text")
@@ -389,6 +411,46 @@ def _add_coordinate_target(idx: Optional[PartIndex], tgt: dict, accs: dict, warn
     acc.labels += labels + ([col_header] if col_header else []) + ([tgt["label"]] if tgt.get("label") else [])
     acc.hints += hints + ([section] if section else [])
     acc.context_label = acc.context_label or " › ".join(labels + ([col_header] if col_header else []))
+
+
+def is_checkbox_target(tgt: dict) -> bool:
+    return str(tgt.get("kind") or tgt.get("type") or "").lower() in ("checkbox_text", "checkbox")
+
+
+def _add_docx_checkbox(idx: PartIndex, cell: CellInfo, slot_id: str, tgt: dict, accs: dict, warnings: list[str]) -> None:
+    """A Word cell printing "□ 選択肢　□ 選択肢": the slot ticks one option by turning its □ into ■ in place."""
+    from .constraints import parse_checkbox_options
+
+    hits = [(ci, parse_checkbox_options(idx.container_text(idx.containers[ci]))) for ci in cell.containers]
+    hits = [(ci, opts) for ci, opts in hits if opts]
+    if len(hits) != 1:
+        warnings.append(f"coordinate target {slot_id!r}: the cell prints {'no' if not hits else 'several lines of'} "
+                        f"□ options — a checkbox needs exactly one line of options")
+        return
+    ci, options = hits[0]
+    if any(o["checked"] for o in options):
+        warnings.append(f"coordinate target {slot_id!r}: an option is already printed as ■ — refusing to change it")
+        return
+    if cell.vmerge == "continue":
+        warnings.append(f"coordinate target {slot_id!r}: cell is a vertically merged continuation — designate the "
+                        f"first cell of the merge")
+        return
+    c = idx.containers[ci]
+    if any(tok in idx.data[c.span[0] : c.span[1]] for tok in _UNSAFE_PARAGRAPH_TOKENS):
+        warnings.append(f"coordinate target {slot_id!r}: the cell holds a field, content control or object — "
+                        f"refusing to write into it")
+        return
+    text = idx.container_text(c)
+    acc = accs.setdefault(slot_id, _Acc(slot_id))
+    occ = _docx_occurrence(idx, c, "document", text, "checkbox_text", text)
+    occ.location_path += " (printed □ options designated by coordinates)"
+    occ.checkbox_options = options
+    acc.occurrences.append(occ)
+    labels, col_header, section, _hints = _docx_cell_context(idx, cell)
+    acc.labels += labels + ([col_header] if col_header else []) + ([tgt["label"]] if tgt.get("label") else [])
+    acc.hints += [section] if section else []
+    acc.context_label = acc.context_label or " › ".join(labels + ([col_header] if col_header else []))
+    acc.__dict__["allowed"] = [o["label"] for o in options]
 
 
 # ------------------------------------------------------------------------ xlsx
@@ -560,6 +622,9 @@ def _scan_xlsx(path: Path, spec: dict) -> ScanResult:
         if (el is not None and "f" in el.children) or (oc is not None and oc.data_type == "f"):
             warnings.append(f"coordinate target {slot_id!r}: {ref} contains a formula — formulas are never fill targets")
             return
+        if is_checkbox_target(tgt):
+            add_checkbox(tgt, slot_id, sidx, sname, part, ref, el)
+            return
         template = xlsx_template_cell(el, oc)
         if not template and ((el is not None and el.children) or (oc is not None and oc.value not in (None, ""))):
             warnings.append(f"coordinate target {slot_id!r}: {ref} is not empty — refusing to overwrite printed text")
@@ -583,6 +648,59 @@ def _scan_xlsx(path: Path, spec: dict) -> ScanResult:
             acc.__dict__.setdefault("allowed", opts)
         if mlen:
             acc.__dict__.setdefault("maxlen", mlen)
+
+    def add_checkbox(tgt: dict, slot_id: str, sidx: int, sname: str, part: str, ref: str, el) -> None:
+        """A worksheet cell printing "□ 選択肢　□ 選択肢" (inline string, or a shared string no other cell uses)."""
+        from .constraints import parse_checkbox_options
+
+        if el is None:
+            warnings.append(f"coordinate target {slot_id!r}: {ref} is empty — a checkbox cell prints its □ options")
+            return
+        cont_part, ci = None, None
+        if el.attrs.get("t") == "inlineStr" and el.is_container is not None:
+            cont_part, ci = part, el.is_container
+        elif el.attrs.get("t") == "s" and "xl/sharedStrings.xml" in parts:
+            si = next((k for k, refs in sst_refs.items() for (s_i, _n, _p, rr) in refs if s_i == sidx and rr == ref), None)
+            if si is None:
+                warnings.append(f"coordinate target {slot_id!r}: {ref} shared string not found")
+                return
+            if len(sst_refs.get(si, [])) != 1:
+                warnings.append(f"coordinate target {slot_id!r}: {ref} shares its text with {len(sst_refs[si]) - 1} other "
+                                f"cell(s) — ticking it would change them too; refused")
+                return
+            cont_part = "xl/sharedStrings.xml"
+            ci = next((c.idx for c in parts[cont_part].containers if c.si_index == si), None)
+        if cont_part is None or ci is None:
+            warnings.append(f"coordinate target {slot_id!r}: {ref} is not a text cell — a checkbox cell prints its □ "
+                            f"options as text")
+            return
+        cidx = parts[cont_part]
+        text = cidx.container_text(cidx.containers[ci])
+        options = parse_checkbox_options(text)
+        if not options:
+            warnings.append(f"coordinate target {slot_id!r}: {ref} prints no □ options — not a checkbox")
+            return
+        if any(o["checked"] for o in options):
+            warnings.append(f"coordinate target {slot_id!r}: an option in {ref} is already printed as ■ — refusing to "
+                            f"change it")
+            return
+        if cidx.containers[ci].runs or len(cidx.container_nodes(cidx.containers[ci])) != 1:
+            warnings.append(f"coordinate target {slot_id!r}: {ref} holds rich text — a checkbox needs one plain text node")
+            return
+        if (part, ref) in claimed:
+            warnings.append(f"coordinate target {slot_id!r}: {ref} is already designated for {claimed[(part, ref)]!r}")
+            return
+        claimed[(part, ref)] = slot_id
+        acc = accs.setdefault(slot_id, _Acc(slot_id))
+        labels, header, box, _opts, _mlen = context(sidx, sname, ref)
+        acc.occurrences.append(SlotOccurrence(
+            part_name=cont_part, container_index=ci, marker=text, marker_kind="checkbox_text", cell_ref=ref,
+            sheet_name=sname, sheet_index=sidx, box_id=box, context_text=text, checkbox_options=options,
+            location_path=f"{part} › sheet '{sname}' › {ref} (printed □ options designated by coordinates)",
+        ))
+        acc.labels += labels + ([header] if header else []) + ([tgt["label"]] if tgt.get("label") else [])
+        acc.context_label = acc.context_label or " › ".join(labels + ([header] if header else []))
+        acc.__dict__["allowed"] = [o["label"] for o in options]
 
     for tgt in spec.get("targets", []) or []:
         add_target(tgt)
@@ -660,6 +778,8 @@ def _dedupe(items: list[str]) -> list[str]:
 
 
 def _finalise_slots(result: ScanResult) -> None:
+    from .constraints import checkbox_constraints, finish_checkbox_constraints
+
     spec_slots: dict[str, Any] = result.spec.get("slots", {}) or {}
     for slot in result.slots:
         labels = slot.constraints.pop("_labels", [])
@@ -673,6 +793,11 @@ def _finalise_slots(result: ScanResult) -> None:
         slot.max_chars = inferred["max_chars"]
         slot.constraints = inferred["constraints"]
         slot.importance = inferred["importance"]
+        box = next((o for o in slot.occurrences if o.marker_kind == "checkbox_text"), None)
+        if box is not None:  # printed □ options: a choice among exactly what the form prints
+            slot.required_format, slot.importance, slot.max_chars = "choice", "high", None
+            slot.constraints = checkbox_constraints(box.checkbox_options)
+            slot.current_text = box.context_text
         ov = spec_slots.get(slot.slot_id, {})
         if ov:
             slot.aliases = list(ov.get("aliases", []))
@@ -690,6 +815,9 @@ def _finalise_slots(result: ScanResult) -> None:
                 slot.constraints = dict(ov["constraints"])  # a complete rule set (e.g. a confirmed discovery spec)
             else:
                 slot.constraints.update(ov.get("constraints", {}))
+        if box is not None:  # whatever the spec says, the options are the printed ones and the field stays a choice
+            slot.required_format, slot.max_chars = "choice", None
+            slot.constraints = finish_checkbox_constraints(slot.constraints, box.checkbox_options)
     order = {s: i for i, s in enumerate(spec_slots)}
     result.slots.sort(key=lambda s: (order.get(s.slot_id, 10_000), _first_pos(s)))
 
@@ -737,6 +865,7 @@ class _Cand:
     allowed: Optional[list[str]] = None
     maxlen: Optional[int] = None
     template: str = ""  # the printed era-date skeleton the cell holds (「令和　　年　　月　　日」), "" for an empty cell
+    options: list[dict] = field(default_factory=list)  # printed □ options: a checkbox candidate
 
 
 def _label_parts(text: str) -> tuple[str, list[str]]:
@@ -790,7 +919,7 @@ def _docx_blank_candidates(path: Path) -> tuple[list[_Cand], str]:
 
     def label_for(t: TableInfo, cell: CellInfo) -> tuple[Optional[CellInfo], str]:
         left = _cell_at(t, cell.row_idx, cell.col_idx - 1) if cell.col_idx > 0 else None
-        if left is not None and text_of(t, left) and not era_date_template(text_of(t, left)):
+        if left is not None and text_of(t, left) and not era_date_template(text_of(t, left)) and not options_of(left):
             return left, "left"
         r = cell.row_idx - 1
         while r >= 0 and not is_banner(t, r):  # column-header table: walk up through empty cells
@@ -808,17 +937,27 @@ def _docx_blank_candidates(path: Path) -> tuple[list[_Cand], str]:
                 return _cell_text(idx, t.rows[r][0])
         return ""
 
+    from .constraints import parse_checkbox_options
+
+    def options_of(cell: CellInfo) -> list[dict]:
+        hits = [parse_checkbox_options(idx.container_text(idx.containers[ci])) for ci in cell.containers]
+        hits = [h for h in hits if h]
+        return hits[0] if len(hits) == 1 and not any(o["checked"] for o in hits[0]) else []
+
     cands: list[_Cand] = []
     for t in idx.tables:
         for ri, row in enumerate(t.rows):
             if is_banner(t, ri):
                 continue
             for cell in row:
+                options: list[dict] = []
                 if not cell.containers:
                     continue
                 template_ci = _template_container(idx, cell) if _cell_text(idx, cell) else None
                 if _cell_text(idx, cell) and template_ci is None:
-                    continue  # printed text, not a field (a printed 「令和　　年　　月　　日」 is one: it is completed)
+                    options = options_of(cell) if cell.vmerge != "continue" else []
+                    if not options:
+                        continue  # printed text, not a field (a printed 「令和　　年　　月　　日」 or □ line is one)
                 origin = _resolve_vmerge(t, cell)
                 if origin is not cell and _cell_text(idx, origin):
                     continue  # the lower part of a vertically merged printed label
@@ -847,7 +986,7 @@ def _docx_blank_candidates(path: Path) -> tuple[list[_Cand], str]:
                     "docx", (0, t.table_idx, ri, cell.col_idx), label_text, base, hints, group, section_of(t, ri),
                     direction, f"word/document.xml › tbl[{t.table_idx}] › tr[{ri}] › tc[grid {cell.col_idx}{span}]",
                     {"part": "word/document.xml", "table": t.table_idx, "row": ri, "col": cell.col_idx}, rejected,
-                    template=_cell_text(idx, cell) if template_ci is not None else ""))
+                    template=_cell_text(idx, cell) if template_ci is not None else "", options=options))
     return cands, doc_text
 
 
@@ -855,10 +994,15 @@ def _xlsx_blank_candidates(path: Path) -> tuple[list[_Cand], str]:
     import openpyxl
     from openpyxl.utils import get_column_letter
 
+    from .constraints import parse_checkbox_options
+
     with zipfile.ZipFile(path) as zf:
         sheets = xlsx_sheet_parts(zf)
         check_xlsx_limits(zf, sheets)
         raw = {part: index_part(part, zf.read(part), "sheet") for _, _, part in sheets if part in zf.namelist()}
+        sst_users = {(s, ref): len(refs) for refs in (_shared_string_refs(zf, sheets).values()
+                                                      if "xl/sharedStrings.xml" in zf.namelist() else [])
+                     for s, _n, _p, ref in refs}
     wb = openpyxl.load_workbook(path, data_only=False)
     cands: list[_Cand] = []
     texts: list[str] = []
@@ -904,7 +1048,8 @@ def _xlsx_blank_candidates(path: Path) -> tuple[list[_Cand], str]:
         def is_label(r: int, c: int) -> bool:
             x = origin_cell(r, c)
             return (x is not None and x.data_type != "f" and isinstance(x.value, str) and bool(x.value.strip())
-                    and not _is_sentence(x.value) and not era_date_template(x.value))
+                    and not _is_sentence(x.value) and not era_date_template(x.value)
+                    and not parse_checkbox_options(x.value))
 
         def template_of(r: int, c: int) -> str:
             b = box(r, c)
@@ -930,7 +1075,9 @@ def _xlsx_blank_candidates(path: Path) -> tuple[list[_Cand], str]:
 
         def consider(r: int, c: int, label_rc: tuple[int, int], direction: str) -> None:
             template = template_of(r, c)
-            if (r, c) in seen or (literal(r, c) and not template):
+            lit = "" if template else literal(r, c)
+            options = parse_checkbox_options(lit) if lit and (box(r, c)[:2] == (r, c)) else []
+            if (r, c) in seen or (lit and (not options or any(o["checked"] for o in options))):
                 return
             seen.add((r, c))
             b = box(r, c)
@@ -950,6 +1097,9 @@ def _xlsx_blank_candidates(path: Path) -> tuple[list[_Cand], str]:
                 rejected = f"formula cell ({origin_cell(r, c).value}) — formulas are never fill targets"
             elif sheet_idx.implicit_refs:
                 rejected = "the worksheet has rows/cells without an r attribute — cells cannot be addressed safely"
+            elif options:
+                if sst_users.get((sidx, ref), 1) > 1:
+                    rejected = "the □ options are a shared string other cells use too — ticking one would tick them all"
             else:
                 el = sheet_idx.cells.get(ref)
                 if el is not None and el.children and not template:
@@ -957,7 +1107,8 @@ def _xlsx_blank_candidates(path: Path) -> tuple[list[_Cand], str]:
             cands.append(_Cand(
                 "xlsx", (sidx, 0, r, c), label_text, base, hints, group, section_of(r), direction,
                 f"{part} › sheet '{sname}' › {ref}", {"sheet": sidx, "sheet_name": sname, "cell": ref}, rejected,
-                merged_range=rng, allowed=rule_for("list", r, c), maxlen=rule_for("len", r, c), template=template))
+                merged_range=rng, allowed=rule_for("list", r, c), maxlen=rule_for("len", r, c), template=template,
+                options=options))
 
         cells = sorted(ws._cells.values(), key=lambda x: (x.row, x.column))
         for x in cells:  # (a) the cell right of a printed label (each row of a multi-row label)
@@ -1011,7 +1162,8 @@ def _assign_slot_ids(cands: list[_Cand]) -> list[str]:
 
 
 def discover_blank_cells(path: Union[str, Path], mode: str = "demo", client: Any = None,
-                         model_tier: Optional[str] = "auto") -> dict[str, Any]:
+                         model_tier: Optional[str] = "auto",
+                         expected_sha256: Optional[str] = None) -> dict[str, Any]:
     """Propose fillable empty cells of an *unmarked* blank form (no {{markers}}, no .slots.json).
 
     Returns a discovery report for the human pre-fill confirmation gate; nothing is written.
@@ -1020,8 +1172,18 @@ def discover_blank_cells(path: Union[str, Path], mode: str = "demo", client: Any
     """
     path = Path(path)
     file_type = detect_file_type(path)
+    if file_type == "pdf":  # fixed PDF: boxes rebuilt from the ruled lines (pdf_support), same report format
+        from .pdf_support import discover_pdf
+
+        return discover_pdf(path, mode=mode, client=client, model_tier=model_tier, expected_sha256=expected_sha256)
+    from .constraints import checkbox_constraints
+
     form_sha = sha256_file(path)
+    if expected_sha256 and expected_sha256.strip().lower() != form_sha.lower():
+        raise ValueError("blank form SHA-256 does not match expected_sha256 — the file changed before discovery")
     found, doc_text = _docx_blank_candidates(path) if file_type == "docx" else _xlsx_blank_candidates(path)
+    if sha256_file(path) != form_sha:
+        raise ValueError("blank form changed during discovery — re-run discovery on a stable file")
     found.sort(key=lambda c: c.order)
     kept = [c for c in found if not c.rejected]
     slot_ids = _assign_slot_ids(kept)
@@ -1033,6 +1195,9 @@ def discover_blank_cells(path: Union[str, Path], mode: str = "demo", client: Any
         inferred = infer_slot_constraints(sid, labels, c.hints, doc_text, c.allowed, c.maxlen)
         if c.template:  # 「令和　　年　　月　　日」 printed in the cell: a 和暦 date, completed by replacing the skeleton
             inferred = infer_template_constraints(sid, doc_text, inferred)
+        if c.options:  # printed □ options: tick one by turning its □ into ■
+            inferred.update(required_format="choice", importance="high", max_chars=None,
+                            constraints=checkbox_constraints(c.options))
         aliases = ([c.base] if base_counts[c.base] == 1 else []) + ([c.group + c.base, c.group] if c.group else [])
         cand: dict[str, Any] = {
             "candidate_id": f"c{i:02d}", "slot_id": sid, "label": sid.replace("_", " "), "file_type": file_type,
@@ -1040,17 +1205,21 @@ def discover_blank_cells(path: Union[str, Path], mode: str = "demo", client: Any
             "label_direction": c.direction, "location": c.location, **c.coords,
             "merged_range": c.merged_range, "office_only": bool(hits), "applicant_fillable": not hits,
             "recommended": not hits,
-            "reason": OFFICE_REASON if hits else (TEMPLATE_REASON if c.template else APPLICANT_REASON),
+            "reason": OFFICE_REASON if hits else (TEMPLATE_REASON if c.template else (
+                "applicant field — printed checkbox options next to a printed label" if c.options else APPLICANT_REASON)),
             "category": "office_only" if hits else "applicant_fillable", "classified": True,
             "office_keywords": hits, "required_format": inferred["required_format"],
             "max_chars": inferred["max_chars"], "constraints": inferred["constraints"],
             "aliases": [a for a in dict.fromkeys(aliases) if a and a != sid],
             "classified_by": "rules",
-            "safety": {"empty": not c.template, "formula": False, "merged_continuation": False},
+            "safety": {"empty": not (c.template or c.options), "formula": False, "merged_continuation": False},
         }
         if c.template:
             cand["printed_template"] = c.template
             cand["safety"]["printed_template"] = True
+        if c.options:
+            cand["kind"] = "checkbox_text"
+            cand["options"] = [{k: o[k] for k in ("label", "detail", "needs_input")} for o in c.options]
         candidates.append(cand)
     engine = _classify_with_claude(candidates, _package_title(path), mode, client, model_tier)
     # a live classification that failed after the API answered: its calls and tokens stay on record
@@ -1159,6 +1328,9 @@ def _cand_key(c: dict[str, Any]) -> Optional[tuple]:
         if c.get("file_type") == "xlsx":
             return ("xlsx", int(c["sheet"]), str(c.get("sheet_name") or ""),
                     str(c["cell"]).replace("$", "").strip().upper())
+        if c.get("file_type") == "pdf":
+            rect = [round(float(v), 1) for v in c["rect"]]
+            return ("pdf", int(c.get("page", 0)), *rect) if len(rect) == 4 else None
     except (KeyError, TypeError, ValueError):
         pass
     return None
@@ -1223,8 +1395,12 @@ def build_confirmed_slot_spec(discovery: dict[str, Any], confirmed_ids: list[str
         if c["file_type"] == "docx":
             targets.append({"slot_id": c["slot_id"], "part": c.get("part", "word/document.xml"), "table": c["table"],
                             "row": c["row"], "col": c["col"], "label": c["label"]})
+        elif c["file_type"] == "pdf":
+            targets.append({"slot_id": c["slot_id"], "page": c["page"], "rect": list(c["rect"]), "label": c["label"]})
         else:
             targets.append({"slot_id": c["slot_id"], "sheet": c["sheet"], "cell": c["cell"], "label": c["label"]})
+        if c.get("kind") == "checkbox_text":
+            targets[-1]["kind"] = "checkbox_text"
         slots[c["slot_id"]] = {
             "label": c["label"], "aliases": list(c.get("aliases", [])),
             "description": " › ".join(x for x in (_section_name(c.get("section", "")), c.get("group_label", ""),
@@ -1324,6 +1500,10 @@ def office_only_targets(form_path: Union[str, Path], spec: Union[dict, str, Path
     if not targets:
         return []
     file_type = detect_file_type(path)
+    if file_type == "pdf":
+        from .pdf_support import office_only_pdf_targets
+
+        return office_only_pdf_targets(path, spec_d)
     found, _ = _docx_blank_candidates(path) if file_type == "docx" else _xlsx_blank_candidates(path)
     known = {_cand_key({"file_type": c.file_type, **c.coords}): c for c in found}
     out: list[str] = []

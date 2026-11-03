@@ -37,7 +37,7 @@ FORMAT_GUIDE = {
 _MAXCHARS_RE = re.compile(r"([0-9０-９]+)\s*(?:字|文字)以内")
 _DIGITS_RE = re.compile(r"([0-9０-９]+)\s*桁")
 _EXAMPLE_RE = re.compile(r"例\s*[:：]\s*([A-Za-z0-9][A-Za-z0-9\-_/.]*[A-Za-z0-9])")
-_CAP_RE = re.compile(r"上限\s*(?:額)?\s*[:：]?\s*((?:[0-9０-９][0-9０-９,，]*\s*[万千億]?\s*)+)円")
+_CAP_RE = re.compile(r"上限\s*(?:額)?\s*[:：]?\s*((?:[0-9０-９][0-9０-９,，]*\s*[兆億万千百十]+\s*)*[0-9０-９][0-9０-９,，]*\s*[兆億万千百十]*)\s*円")
 _OPTIONS_SLASH_RE = re.compile(
     r"([^\s※（）()「」:：、。／/]+(?:[／/][^\s※（）()「」／/:：、。]+)+)\s*(?:のうち|から|より|のいずれか)"
 )
@@ -188,6 +188,122 @@ def split_choice(value: str, slot: FormSlot) -> list[str]:
     if slot.constraints.get("multi_select"):
         return [p.strip() for p in re.split(r"[、,，・／/]", value) if p.strip()]
     return [value.strip()]
+
+
+# Text checkboxes printed as "□ 合意済み　　□ 協議中（…）" or "☐ 合意済み　　☐ 協議中（…）": the value names the option(s) to tick.
+CHECK_OFF, CHECK_ON = "□", "■"   # □ U+25A1 (JIS X 0208 2-2, UTF-8 E2 96 A1) / ■ U+25A0 (2-3, E2 96 A0)
+CHECK_OFF_CHARS = ("□", "☐")     # U+25A1 white square & U+2610 ballot box (both 3-byte UTF-8: E2 96 A1 / E2 98 90)
+CHECK_ON_CHARS = ("■", "☑", "☒")
+CHECKBOX_MARKS = "□■☐☑☒✓✔✅√"
+_CHECKBOX_SPLIT = re.compile(r"[、,，／/\n\s]+")
+_OPTION_RE = re.compile(r"[ 　]*([^ 　（(□■☐☑☒\n]+)")
+_NEEDS_INPUT_RE = re.compile(
+    r"[：:][ 　_＿]*[ 　_＿][ 　_＿]*[年月日]?"
+    r"|[：:][ 　_＿]*[）)]"
+    r"|[ 　_＿]{2,}[年月日]"
+    r"|[_＿]{2,}"
+    r"|[（(][ 　_＿]{2,}[）)]"
+    r"|具体的に|理由[：:]|内容[：:]|内訳[：:]|詳細[：:]"
+)
+
+
+def parse_checkbox_options(text: str) -> list[dict[str, Any]]:
+    """Options printed as ``□ 合意済み　　□ 協議中（協議予定日：　　年　　月　　日）`` (or with ``☐`` U+2610) — each with the
+    character offset of its square in ``text``, the printed label, the printed note after it, and whether that note
+    asks for more input (a blank date, a blank bracket). Empty if the text prints no options or repeats a label."""
+    pos = [i for i, ch in enumerate(text) if ch in CHECK_OFF_CHARS or ch in CHECK_ON_CHARS]
+    out: list[dict[str, Any]] = []
+    for k, i in enumerate(pos):
+        end = pos[k + 1] if k + 1 < len(pos) else len(text)
+        seg = text[i + 1 : end]
+        m = _OPTION_RE.match(seg)
+        if not m:
+            continue
+        label = m.group(1).strip("・、,，:：")
+        if not label:
+            continue
+        detail = seg[m.end() :].rstrip(" 　\n")
+        needs_in = bool(_NEEDS_INPUT_RE.search(detail)) or (label in ("その他", "Other", "other") and bool(detail.strip()))
+        out.append({"label": label, "offset": i, "checked": text[i] in CHECK_ON_CHARS, "detail": detail,
+                    "needs_input": needs_in})
+    labels = [o["label"] for o in out]
+    return out if out and len(set(labels)) == len(labels) else []
+
+
+def checkbox_constraints(options: list[dict[str, Any]], exclusive: bool = True) -> dict[str, Any]:
+    """The rule set of a text checkbox: a choice among the printed options (one only, unless not exclusive); an
+    option whose printed note asks for more input (協議予定日：　年　月　日) is never ticked automatically."""
+    c: dict[str, Any] = {"allowed_values": [o["label"] for o in options], "multi_select": not exclusive,
+                         "checkbox": True, "exclusive": exclusive,
+                         "requires_human_if_selected": [o["label"] for o in options if o.get("needs_input")]}
+    if not exclusive:
+        c["separator"] = "、"
+    return c
+
+
+def finish_checkbox_constraints(c: dict[str, Any], options: list[dict[str, Any]]) -> dict[str, Any]:
+    """Re-impose the printed options after a slot spec override: the allowed values are what the form prints, a
+    single-choice box stays single-choice unless the spec says ``exclusive: false``."""
+    out = dict(c)
+    out["checkbox"] = True
+    out["allowed_values"] = [o["label"] for o in options]
+    out["exclusive"] = bool(out.get("exclusive", True))
+    out["multi_select"] = not out["exclusive"]
+    if out["multi_select"]:
+        out.setdefault("separator", "、")
+    printed_req = [o["label"] for o in options if o.get("needs_input") or o.get("label") in ("その他", "Other", "other")]
+    req = out.get("requires_human_if_selected") or []
+    merged_req = list(dict.fromkeys(list(printed_req) + list(req)))
+    out["requires_human_if_selected"] = [r for r in merged_req if r in out["allowed_values"]]
+    return out
+
+
+def normalize_checkbox_value(value: str, options: list[str]) -> list[str]:
+    """The option labels a value names: '☑ 合意済み', '■合意済み', '合意済み' and '協議中（協議予定日…）' all name their
+    printed option. Recognised options come in printed order; anything unrecognised is kept (validation rejects it)."""
+    norm = lambda s: unicodedata.normalize("NFKC", s).strip()  # noqa: E731
+    opts = {norm(o): o for o in options}
+    text = value or ""
+    for mark in CHECKBOX_MARKS:
+        text = text.replace(mark, "、")
+    picked, unknown = [], []
+    for piece in _CHECKBOX_SPLIT.split(text):
+        p = norm(piece)
+        if not p:
+            continue
+        hit = opts.get(p) or next((opts[o] for o in sorted(opts, key=len, reverse=True) if o and p.startswith(o)), None)
+        if hit is not None:
+            picked.append(hit)
+        else:
+            unknown.append(piece.strip())
+    ordered = [o for o in options if o in picked]
+    return ordered + [u for u in dict.fromkeys(unknown)]
+
+
+def canonical_checkbox_value(value: str, slot: FormSlot) -> str:
+    """The value a checkbox slot stores: its option label(s) joined in printed order (unchanged if unrecognised)."""
+    c = slot.constraints
+    if not c.get("checkbox"):
+        return value
+    allowed = list(c.get("allowed_values") or [])
+    items = normalize_checkbox_value(value, allowed)
+    if not items or any(i not in allowed for i in items):
+        return value.strip()
+    return c.get("separator", "、").join(items)
+
+
+def checkbox_hold(slot: FormSlot, value: str) -> list[ValidationIssue]:
+    """An option whose printed note asks for more input (協議中（協議予定日：　年　月　日）) is never ticked by the AI."""
+    c = slot.constraints
+    if not c.get("checkbox"):
+        return []
+    need = [o for o in normalize_checkbox_value(value, list(c.get("allowed_values") or []))
+            if o in (c.get("requires_human_if_selected") or [])]
+    if not need:
+        return []
+    joined = "、".join(need)
+    return [_issue("requires_human", f"ticking «{joined}» needs information the form asks for on the same line (a date …) "
+                                     f"— a human must decide / 「{joined}」を選ぶと同じ行の追記（日付など）が必要なため、人が判断してください")]
 
 
 _PERIOD_SEP = re.compile(r"\s*[～〜~]\s*")

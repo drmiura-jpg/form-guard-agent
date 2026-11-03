@@ -10,10 +10,11 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-FileType = Literal["docx", "xlsx"]
+FileType = Literal["docx", "xlsx", "pdf"]
 # date_template = a cell printed as an era-date skeleton (「令和　　年　　月　　日」), designated by coordinates: Word replaces
 # the skeleton's characters like a marker; Excel rewrites the cell as one inline string
-MarkerKind = Literal["braces", "kinyuran", "empty_cell", "date_template"]
+# checkbox_text: a printed "□ 選択肢　□ 選択肢" line whose □ of the chosen option becomes ■ (Word / Excel / PDF)
+MarkerKind = Literal["braces", "kinyuran", "empty_cell", "date_template", "checkbox_text"]
 # recovered = a value read back from a filled file whose provenance is unknown (CLI --verify without memo / audit log)
 MappingStatus = Literal["filled", "needs_human_input", "human_entered", "recovered"]
 Severity = Literal["critical", "major", "minor", "info"]
@@ -36,6 +37,12 @@ class SlotOccurrence(BaseModel):
     sheet_index: Optional[int] = None
     box_id: str = ""
     context_text: str = ""
+    # fixed PDF forms: the page and the ruled box (PDF user space, points, origin bottom-left: x0, y0, x1, y1)
+    page_index: Optional[int] = None
+    rect: Optional[list[float]] = None
+    # checkbox_text: every printed option — label, character offset of its □ in the container text, and for PDF the
+    # origin / size / font of the printed □ glyph
+    checkbox_options: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class FormSlot(BaseModel):
@@ -166,14 +173,17 @@ class EntryHash(BaseModel):
 
 
 class PatchRecord(BaseModel):
-    """A byte-range edit made by the surgical writer (offsets refer to the original part)."""
+    """A byte-range edit made by the surgical writer (OOXML: offsets refer to the original part; PDF: the slot's block
+    inside the overlay stream of the appended incremental update — no original byte is rewritten)."""
 
     part_name: str
     slot_id: str
     # text / attr: marker characters (or a Word 「令和　　年　　月　　日」 skeleton); insert_run / expand_empty: a run in an
     # empty Word cell; fill_cell: an existing empty worksheet <c>; fill_template_cell: a worksheet <c> printed as
-    # 「令和　　年　　月　　日」, rewritten as the date; insert_cell: a worksheet <c> (and row) that did not exist yet
-    kind: Literal["text", "attr", "insert_run", "expand_empty", "fill_cell", "fill_template_cell", "insert_cell"]
+    # 「令和　　年　　月　　日」, rewritten as the date; insert_cell: a worksheet <c> (and row) that did not exist yet;
+    # checkbox: one printed □ replaced by ■ (same byte length); pdf_text / pdf_mark: a value / a ■ in the PDF overlay
+    kind: Literal["text", "attr", "insert_run", "expand_empty", "fill_cell", "fill_template_cell", "insert_cell",
+                  "checkbox", "pdf_text", "pdf_mark"]
     byte_start: int
     byte_end: int
     old_text: str

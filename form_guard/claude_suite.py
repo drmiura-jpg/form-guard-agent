@@ -22,8 +22,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 HOOK_SCRIPT = "scripts/hook_guard.py"
 HOOK_CHECKS: dict[str, tuple[tuple[str, str, str], ...]] = {
     "pre-tool-use": (
-        ("def template_violation", "blank-template guard: no write, copy-over, move or delete of samples/blank_forms/*.docx|*.xlsx",
-         "白紙様式（samples/blank_forms/*.docx・*.xlsx）の書き込み・上書きコピー・移動・削除を阻止"),
+        ("def template_violation", "blank-template guard: no write, copy-over, move or delete of "
+                                   "samples/blank_forms/*.docx|*.xlsx|*.pdf",
+         "白紙様式（samples/blank_forms/*.docx・*.xlsx・*.pdf）の書き込み・上書きコピー・移動・削除を阻止"),
         ("API_KEY_RE", "Anthropic API key pattern (before it is written)", "書き込む前に API キーらしき文字列を検出"),
         ("KEY_ASSIGN_RE", "literal API key assignment (before it is written)", "書き込む前に API キーの直書きを検出"),
         ("WIN_PROFILE_RE", "local user-profile paths (before they are written)", "書き込む前にローカルのユーザーフォルダのパスを検出"),
@@ -48,11 +49,12 @@ HOOK_STAGES = {
 
 # How the pieces work together in a Claude Code session; every name refers to an asset listed by describe_suite().
 FLOW: list[dict[str, Any]] = [
-    {"step": 1, "ja": "「この様式には何を書く？」— 欄とルールを読む。マーカーなし様式は空欄候補を出し、記入する欄は人が確定",
-     "en": "\"What does this form need?\" — list slots and printed rules; for an unmarked form propose empty cells, "
-           "and the user confirms which ones to fill",
-     "uses": [("skill", "form-scan"), ("mcp", "form_guard_list_demos"), ("mcp", "form_guard_scan"),
-              ("mcp", "form_guard_discover_blank_cells")]},
+    {"step": 1, "ja": "「この様式には何を書く？」— 欄とルールを読む。マーカーなし様式・固定PDFは空欄候補を出し、記入する欄は人が確定。"
+                      "公募ポータル（/portal）からの様式取得も一言で",
+     "en": "\"What does this form need?\" — list slots and printed rules; for an unmarked form or a fixed PDF propose "
+           "empty boxes, and the user confirms which ones to fill; a form can be fetched from the grant portal (/portal)",
+     "uses": [("skill", "form-scan"), ("skill", "portal-form-fill"), ("mcp", "form_guard_list_demos"),
+              ("mcp", "form_guard_scan"), ("mcp", "form_guard_discover_blank_cells")]},
     {"step": 2, "ja": "「メモから記入して」— 原文引用だけを抽出する別エージェントが独立に読み、外科的記入で未承認の下書きを作る",
      "en": "\"Fill it from my notes\" — a read-only subagent extracts verbatim evidence independently; the surgical "
            "fill writes an unapproved draft",

@@ -12,6 +12,11 @@ no ``.slots.json`` — for blank-cell discovery: a research-equipment applicatio
 (.docx) and a disaster-stockpile loan application (.xlsx), each with an office-only
 area, merged cells and (in the workbook) a SUM formula.
 
+A sixth form is a *fixed PDF* (A4, ruled table, no form fields): a study-group research grant application with a
+printed ``□ 合意済み　　□ 協議中`` checkbox line and an office-only area, the kind of PDF people otherwise fill by
+placing text boxes by hand in a PDF editor. Its sidecar ``.slots.json`` designates the boxes by page coordinates;
+blank-box discovery finds the same boxes from the ruled lines alone.
+
 Generation is deterministic: ZIP timestamps and document properties are fixed,
 so re-running the generator reproduces byte-identical files on the same machine.
 """
@@ -92,11 +97,41 @@ UNMARKED_FORMS = [
 ]
 
 
+PDF_FORMS = [
+    {
+        "id": "form6",
+        "title": "次世代AI・分散システム研究会 研究助成申請書（様式第6号・固定PDF様式）",
+        "title_en": "Next-Gen AI & Distributed Systems Study Group — Research Grant Application (Form No. 6, fixed PDF)",
+        "org": "次世代AI・分散システム研究会（fictional study group）",
+        "file_type": "pdf",
+        "form": "form6_study_group_grant.pdf",
+        "memo": "memo6_study_group_grant.txt",
+        "naive": "broken_naive_ai_form6.pdf",
+        "highlights": ["fixed PDF — 7 boxes found from the ruled lines", "□ 合意済み → ■ (one glyph)",
+                       "original bytes kept as an exact prefix (incremental update)",
+                       "事務局受付欄・受付印 locked"],
+    },
+]
+
+
 def demo_by_id(demo_id: str) -> dict:
     for d in DEMOS:
         if d["id"] == demo_id:
             return d
     raise KeyError(demo_id)
+
+
+def pdf_by_id(form_id: str) -> dict:
+    for p in PDF_FORMS:
+        if p["id"] == form_id:
+            return p
+    raise KeyError(form_id)
+
+
+def pdf_paths(item: dict, samples_dir: Path | None = None) -> dict[str, Path]:
+    base = Path(samples_dir) if samples_dir else default_samples_dir()
+    return {"form": base / "blank_forms" / item["form"], "memo": base / "memos" / item["memo"],
+            "naive": base / "broken_before" / item["naive"]}
 
 
 def unmarked_by_id(form_id: str) -> dict:
@@ -233,9 +268,26 @@ MEMO5 = """架空市 防災課への防災備蓄品 貸出・返却管理票 記
 ・決裁印・受付番号・返却確認の欄は事務局が記入するため、空欄のままにしておく。
 """
 
+MEMO6 = """件名：研究助成の申請準備メモ（次世代AI・分散システム研究会 様式第6号・固定PDF）
+作成：2026年11月3日（火）　作成者：見本 六郎（架空情報大学）
+
+■ 申請内容
+・申請日：2026年11月3日（火）
+・研究課題名：分散エッジ推論における通信量削減手法の比較検証
+・申請代表者氏名：見本 六郎（准教授）
+・所属機関・部局・職名：架空情報大学 大学院情報科学研究科 准教授
+・助成申請金額：税込で48万円（公募要領の上限は50万円）
+・共同研究先との合意状況：共同研究先の架空ネットワーク研究所とは2026年10月30日（金）の打合せで合意済み。
+・研究概要：複数の小型計算機で推論を分担する分散エッジ推論について、通信量を減らす三つの手法を同じ条件で比較する。架空の模擬データを用いた実験環境で精度・遅延・通信量を測定し、結果を研究会の共有ベンチマークとして公開する。
+
+■ メモ
+・様式は架空学術振興ポータルからダウンロードした固定PDF（様式第6号）。
+・事務局受付欄（受付番号）と受付印・審査結果欄は事務局が記入するので、空欄のままにする。
+"""
+
 MEMOS = {"memo1_research_change.txt": MEMO1, "memo2_subsidy_application.txt": MEMO2,
          "memo3_safety_inspection.txt": MEMO3, "memo4_equipment_use.txt": MEMO4,
-         "memo5_stockpile_loan.txt": MEMO5}
+         "memo5_stockpile_loan.txt": MEMO5, "memo6_study_group_grant.txt": MEMO6}
 
 # ======================================================================= slot specs
 
@@ -1015,6 +1067,242 @@ def build_form5() -> bytes:
     return _finalise_xlsx(buf.getvalue())
 
 
+# ================================================================ fixed PDF form (form6)
+#
+# One A4 page drawn like a PDF exported from a word processor: label cells shaded, a ruled table (outer border 1 pt,
+# inner rules 0.5 pt), two non-embedded Adobe-Japan1 fonts (UniJIS-UCS2-H) and no AcroForm fields. The same layout
+# function places the printed text and computes the box coordinates of the sidecar .slots.json, so both always agree.
+
+A4_PT = (595.28, 841.89)
+FORM6_FONTS = {"F1": ("HeiseiKakuGo-W5", 4, [-92, -250, 1010, 922], 752, -221, 737, 114),
+               "F2": ("HeiseiMin-W3", 6, [-123, -257, 1001, 910], 723, -241, 709, 69)}
+FORM6_X = (56.69, 186.69, 538.58)          # table left edge, label | value divider, table right edge
+FORM6_TOP = 190.0                          # distance of the table's top border from the top of the page (pt)
+FORM6_ROWS = [  # (printed label lines, slot id, kind, row height in pt)
+    (("申請日",), "申請日", "box", 26.0),
+    (("研究課題名",), "研究課題名", "box", 30.0),
+    (("申請代表者氏名",), "申請代表者氏名", "box", 26.0),
+    (("所属機関・部局・職名",), "所属機関・部局・職名", "box", 30.0),
+    (("助成申請金額", "（上限500,000円・税込）"), "助成申請金額", "box", 34.0),
+    (("共同研究先との合意状況",), "共同研究先との合意状況", "checkbox_text", 28.0),
+    (("研究概要", "（150字以内）"), "研究概要", "box", 96.0),
+]
+FORM6_CHECKBOX_LINE = "□ 合意済み　　□ 協議中（協議予定日：　　年　　月　　日）"
+FORM6_OFFICE_COLS = (56.69, 186.69, 306.69, 416.69, 538.58)
+FORM6_OFFICE_BANNER = "事務局使用欄（申請者は記入しないでください）"
+FORM6_OFFICE_LABELS = ("事務局受付欄（受付番号）", "受付印・審査結果欄")
+FORM6_NOTES = [
+    "1　日付は和暦で記入すること。",
+    "2　助成申請金額は上限500,000円（税込）以内とし、円単位で記入すること。",
+    "3　共同研究先との合意状況は、該当する□を■にすること。協議中の場合は協議予定日を記入すること。",
+    "4　研究概要は150字以内で記入すること。",
+    "5　事務局使用欄には記入しないこと。",
+    "6　本様式の書式（罫線・欄の配置・注意事項の文言）は変更しないこと。",
+]
+
+
+def _pdf_width(text: str, size: float) -> float:
+    """Advance width of ``text`` in the form fonts (/DW 1000, printable ASCII declared half-width)."""
+    return sum(0.5 if 0x20 <= ord(ch) <= 0x7E else 1.0 for ch in text) * size
+
+
+def form6_layout() -> dict:
+    """Geometry of form6 in PDF user space (origin bottom-left, pt): table rows, value boxes, office boxes."""
+    _, h = A4_PT
+    x0, x1, x2 = FORM6_X
+    rows, top = [], FORM6_TOP
+    for labels, slot_id, kind, height in FORM6_ROWS:
+        y1, y0 = h - top, h - top - height
+        rows.append({"labels": labels, "slot_id": slot_id, "kind": kind, "label_rect": [x0, round(y0, 2), x1, round(y1, 2)],
+                     "rect": [x1, round(y0, 2), x2, round(y1, 2)]})
+        top += height
+    main_bottom = top
+    office_top = main_bottom + 16.0
+    banner = [x0, round(h - office_top - 20.0, 2), x2, round(h - office_top, 2)]
+    oy1, oy0 = banner[1], round(banner[1] - 54.0, 2)
+    c = FORM6_OFFICE_COLS
+    office = [{"label": FORM6_OFFICE_LABELS[0], "label_rect": [c[0], oy0, c[1], oy1], "rect": [c[1], oy0, c[2], oy1]},
+              {"label": FORM6_OFFICE_LABELS[1], "label_rect": [c[2], oy0, c[3], oy1], "rect": [c[3], oy0, c[4], oy1]}]
+    return {"page": list(A4_PT), "rows": rows, "table_top": round(h - FORM6_TOP, 2), "table_bottom": round(h - main_bottom, 2),
+            "banner": banner, "office": office, "office_bottom": oy0}
+
+
+def form6_spec() -> dict:
+    """The sidecar .slots.json: the seven applicant boxes by page coordinates (never the office-only boxes)."""
+    lay = form6_layout()
+    descriptions = {
+        "申請日": ("申請書の提出日（和暦）", ["申請日"]),
+        "研究課題名": ("研究課題の名称", ["研究課題名", "課題名"]),
+        "申請代表者氏名": ("申請代表者の氏名のみ（職名は含めない）", ["申請代表者氏名", "申請代表者", "代表者氏名"]),
+        "所属機関・部局・職名": ("申請代表者の所属機関・部局・職名", ["所属機関・部局・職名", "所属機関"]),
+        "助成申請金額": ("申請する助成額（税込・上限500,000円）", ["助成申請金額", "申請金額", "申請額"]),
+        "共同研究先との合意状況": ("該当する□を■にする（合意済み／協議中のいずれか一つ）", ["共同研究先との合意状況", "合意状況"]),
+        "研究概要": ("研究の概要（150字以内）", ["研究概要", "概要"]),
+    }
+    slots, targets = {}, []
+    for row in lay["rows"]:
+        sid = row["slot_id"]
+        desc, aliases = descriptions[sid]
+        slots[sid] = {"aliases": aliases, "description": desc}
+        tgt = {"slot_id": sid, "page": 0, "rect": row["rect"], "label": row["labels"][0]}
+        if row["kind"] == "checkbox_text":
+            tgt["kind"] = "checkbox_text"
+            slots[sid]["constraints"] = {"requires_human_if_selected": ["協議中"]}
+        targets.append(tgt)
+    return {"form_title": "次世代AI・分散システム研究会 研究助成申請書（様式第6号・固定PDF様式）",
+            "form_title_en": "Next-Gen AI & Distributed Systems Study Group — Research Grant Application (fixed PDF)",
+            "slots": slots, "targets": targets}
+
+
+SPECS["form6_study_group_grant"] = form6_spec()
+
+
+def _pdf_info(builder, title: str, author: str = "Form-Guard Agent sample generator"):
+    from .pdf_core import Name
+
+    stamp = b"D:20261102000000+09'00'"
+    return builder.add({"Title": title, "Author": author, "Subject": "Fictional sample form (Form-Guard Agent demo)",
+                        "Keywords": "fictional; sample; Form-Guard", "Creator": "Form-Guard Agent sample generator",
+                        "Producer": "form_guard.pdf_core (standard library)", "CreationDate": stamp, "ModDate": stamp,
+                        "Trapped": Name("False")})
+
+
+def _pdf_fonts(builder, names=("F1", "F2")) -> dict:
+    from .pdf_core import Name
+
+    fonts = {}
+    for res in names:
+        base, flags, bbox, ascent, descent, cap, stemv = FORM6_FONTS[res]
+        fd = builder.add({"Type": Name("FontDescriptor"), "FontName": Name(base), "Flags": flags, "FontBBox": bbox,
+                          "ItalicAngle": 0, "Ascent": ascent, "Descent": descent, "CapHeight": cap, "StemV": stemv})
+        cid = builder.add({"Type": Name("Font"), "Subtype": Name("CIDFontType0"), "BaseFont": Name(base),
+                           "CIDSystemInfo": {"Registry": b"Adobe", "Ordering": b"Japan1", "Supplement": 2},
+                           "FontDescriptor": fd, "DW": 1000, "W": [1, 95, 500, 97, [500], 100, [500]]})
+        fonts[res] = builder.add({"Type": Name("Font"), "Subtype": Name("Type0"), "BaseFont": Name(base),
+                                  "Encoding": Name("UniJIS-UCS2-H"), "DescendantFonts": [cid]})
+    return fonts
+
+
+def _ucs2(text: str) -> bytes:
+    return b"".join(ord(ch).to_bytes(2, "big") for ch in text)
+
+
+def build_form6() -> bytes:
+    from .pdf_core import Canvas, Name, PDFBuilder
+
+    w, h = A4_PT
+    lay = form6_layout()
+    x0, x1, x2 = FORM6_X
+    cv = Canvas()
+    cv.raw("% Form-Guard sample: fixed PDF form (fictional) - shading, printed text, ruled table")
+    shade = 0.93
+    for row in lay["rows"]:
+        cv.rect(*row["label_rect"], fill=shade, stroke=False)
+    cv.rect(*lay["banner"], fill=0.86, stroke=False)
+    for box in lay["office"]:
+        cv.rect(*box["label_rect"], fill=shade, stroke=False)
+
+    def text(s: str, size: float, x: float, y: float, font: str = "F2", gray: float = 0.0) -> None:
+        cv.text(font, size, x, y, _ucs2(s), gray)
+
+    def centered(s: str, size: float, y: float, font: str = "F1") -> None:
+        text(s, size, (w - _pdf_width(s, size)) / 2, y, font)
+
+    def in_cell(lines, rect, size: float, font: str = "F1", pad: float = 6.0, sizes=None) -> None:
+        a, b, c, d = rect
+        sizes = sizes or [size] * len(lines)
+        lead = [s * 1.32 for s in sizes]
+        total = sum(lead[:-1]) + sizes[-1]
+        y = (b + d) / 2 + total / 2 - sizes[0] * 0.88
+        for k, (ln, s) in enumerate(zip(lines, sizes)):
+            text(ln, s, a + pad, y, font)
+            y -= lead[k] if k < len(lead) else 0
+
+    text("架空学術振興ポータル　配布様式（ダウンロード版）", 7.5, x2 - _pdf_width("架空学術振興ポータル　配布様式（ダウンロード版）", 7.5),
+         h - 34, "F1", 0.35)
+    text("様式第6号（次世代AI・分散システム研究会 研究助成規程第4条関係）", 9, x0, h - 56)
+    centered("次世代AI・分散システム研究会", 13, h - 88)
+    centered("研究助成申請書（様式第6号・固定PDF様式）", 15.5, h - 110)
+    text("次世代AI・分散システム研究会　会長　殿", 10.5, x0, h - 140)
+    text("　研究助成規程第4条の規定により、下記のとおり研究助成を申請します。", 10.5, x0, h - 160)
+    centered("記", 10.5, h - 180, "F2")
+    for row in lay["rows"]:
+        lines = list(row["labels"])
+        in_cell(lines, row["label_rect"], 9.5, "F1", sizes=[9.5] + [8.0] * (len(lines) - 1))
+        if row["kind"] == "checkbox_text":
+            in_cell([FORM6_CHECKBOX_LINE], row["rect"], 10.0, "F2", pad=8.0)
+    in_cell([FORM6_OFFICE_BANNER], lay["banner"], 9.5, "F1")
+    for box in lay["office"]:
+        in_cell([box["label"]], box["label_rect"], 9.0, "F1", pad=5.0)
+    ny = lay["office_bottom"] - 26
+    text("（注意事項）", 9.5, x0, ny, "F1")
+    for n in FORM6_NOTES:
+        ny -= 14.5
+        text(n, 9, x0 + 6, ny)
+    centered("※本様式は架空の組織を想定したデモ用サンプルです（Fictional sample — not a real form）", 7.5, 30, "F2")
+
+    top, bottom = lay["table_top"], lay["table_bottom"]
+    for row in lay["rows"][1:]:  # inner horizontal rules of the main table
+        cv.line(x0, row["rect"][3], x2, row["rect"][3], 0.5)
+    cv.line(x1, bottom, x1, top, 0.5)
+    cv.rect(x0, bottom, x2, top, width=1.0)
+    bx = lay["banner"]
+    cv.line(x0, bx[1], x2, bx[1], 0.5)
+    for xv in FORM6_OFFICE_COLS[1:-1]:
+        cv.line(xv, lay["office_bottom"], xv, bx[1], 0.5)
+    cv.rect(x0, lay["office_bottom"], x2, bx[3], width=1.0)
+
+    pb = PDFBuilder("1.7")
+    catalog, pages, page = pb.reserve(), pb.reserve(), pb.reserve()
+    fonts = _pdf_fonts(pb)
+    resources = pb.add({"Font": dict(fonts), "ProcSet": [Name("PDF"), Name("Text")]})
+    content = pb.add({}, cv.data(), compress=True)
+    pb.set(page, {"Type": Name("Page"), "Parent": pages, "MediaBox": [0, 0, w, h], "Resources": resources,
+                  "Contents": content})
+    pb.set(pages, {"Type": Name("Pages"), "Kids": [page], "Count": 1})
+    pb.set(catalog, {"Type": Name("Catalog"), "Pages": pages, "Lang": b"ja-JP",
+                     "ViewerPreferences": {"DisplayDocTitle": True}})
+    info = _pdf_info(pb, "次世代AI・分散システム研究会 研究助成申請書（様式第6号・固定PDF様式）")
+    return pb.build(catalog, info)
+
+
+def build_naive_form6() -> bytes:
+    """A from-scratch regeneration of form6: US Letter, no ruled table, paraphrased notes, invented numbers, the
+    checkbox reduced to a word and the office-only reception number filled in."""
+    from .pdf_core import Canvas, Name, PDFBuilder
+
+    w, h = 612.0, 792.0
+    cv = Canvas()
+    y = h - 72
+
+    def line(s: str, size: float = 11.0, font: str = "F1") -> None:
+        nonlocal y
+        cv.text(font, size, 72, y, _ucs2(s))
+        y -= size * 1.9
+
+    line("研究助成申請書", 16)
+    line("申請日：2026年11月3日")
+    line("研究課題名：分散エッジ推論の通信量削減手法の研究")
+    line("代表者：見本 六郎 准教授（架空情報大学 情報科学研究科）")
+    line("申請金額：600,000円")
+    line("共同研究先：合意済み")
+    line("研究概要：分散エッジ推論で通信量を約40%削減できる見込みであり、2年間で実用化を目指す。")
+    line("受付番号：R8-0001")
+    y -= 10
+    line("※日付と金額は正しく記入してください。事務局の欄は空けておいてください。", 9)
+    b = PDFBuilder("1.7")
+    catalog, pages, page = b.reserve(), b.reserve(), b.reserve()
+    fonts = _pdf_fonts(b, ("F1",))
+    resources = b.add({"Font": fonts, "ProcSet": [Name("PDF"), Name("Text")]})
+    content = b.add({}, cv.data(), compress=True)
+    b.set(page, {"Type": Name("Page"), "Parent": pages, "MediaBox": [0, 0, w, h], "Resources": resources,
+                 "Contents": content})
+    b.set(pages, {"Type": Name("Pages"), "Kids": [page], "Count": 1})
+    b.set(catalog, {"Type": Name("Catalog"), "Pages": pages})
+    info = _pdf_info(b, "研究助成申請書", "naive-regeneration simulation")
+    return b.build(catalog, info)
+
+
 # ============================================================ naive "regeneration"
 
 NAIVE_NOTE = "naive-regeneration simulation (scripted to reproduce common failure modes; values intentionally flawed)"
@@ -1147,6 +1435,12 @@ UNMARKED_BUILDERS = {  # no slot spec: the cells to fill come from discovery + h
     "form4_unmarked_blank.docx": build_form4,
     "form5_unmarked_blank.xlsx": build_form5,
 }
+PDF_BUILDERS = {  # fixed PDF form: a sidecar spec by page coordinates, and blank-box discovery finds the same boxes
+    "form6_study_group_grant.pdf": build_form6,
+}
+PDF_NAIVE_BUILDERS = {
+    "broken_naive_ai_form6.pdf": build_naive_form6,
+}
 
 
 def generate_samples(samples_dir: Path | str | None = None, with_comparisons: bool = True,
@@ -1176,9 +1470,13 @@ def generate_samples(samples_dir: Path | str | None = None, with_comparisons: bo
         put(blank / f"{Path(name).stem}.slots.json", lambda spec=spec: json.dumps(spec, ensure_ascii=False, indent=2) + "\n")
     for name, fn in UNMARKED_BUILDERS.items():
         put(blank / name, fn)
+    for name, fn in PDF_BUILDERS.items():
+        put(blank / name, fn)
+        spec = SPECS[Path(name).stem]
+        put(blank / f"{Path(name).stem}.slots.json", lambda spec=spec: json.dumps(spec, ensure_ascii=False, indent=2) + "\n")
     for name, text in MEMOS.items():
         put(memos / name, lambda text=text: text)
-    for name, fn in NAIVE_BUILDERS.items():
+    for name, fn in {**NAIVE_BUILDERS, **PDF_NAIVE_BUILDERS}.items():
         put(broken / name, fn)
     if with_comparisons:
         from .report import write_naive_comparisons
@@ -1190,9 +1488,9 @@ def generate_samples(samples_dir: Path | str | None = None, with_comparisons: bo
 def ensure_samples(samples_dir: Path | str | None = None) -> Path:
     """Make sure the sample set exists; a missing file is created, nothing that exists is overwritten."""
     base = Path(samples_dir) if samples_dir else default_samples_dir()
-    needed = [base / "blank_forms" / d["form"] for d in DEMOS + UNMARKED_FORMS] + \
-             [base / "memos" / d["memo"] for d in DEMOS + UNMARKED_FORMS] + \
-             [base / "broken_before" / d["naive"] for d in DEMOS]
+    needed = [base / "blank_forms" / d["form"] for d in DEMOS + UNMARKED_FORMS + PDF_FORMS] + \
+             [base / "memos" / d["memo"] for d in DEMOS + UNMARKED_FORMS + PDF_FORMS] + \
+             [base / "broken_before" / d["naive"] for d in DEMOS + PDF_FORMS]
     if not all(p.exists() for p in needed):
         generate_samples(base, overwrite=False)
     return base

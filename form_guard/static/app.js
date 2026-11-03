@@ -21,7 +21,7 @@ function h(tag, attrs = {}, ...kids) {
 }
 
 const S = {
-  demos: [], unmarked: [], run: null, sel: null, cmp: "naive", layout: "split", checked: new Set(), health: null,
+  demos: [], unmarked: [], pdf: [], run: null, sel: null, cmp: "naive", layout: "split", checked: new Set(), health: null,
   activeDemo: null, view: "empty", tab: "visual", disc: null, suite: null, suitePromise: null, tour: 0, lang: "ja",
 };
 
@@ -73,6 +73,7 @@ const FLAG = {
   low_conf: ["低信頼度", "low confidence"], needs_input: ["要入力", "needs input"], has_suggestion: ["候補あり", "has a suggestion"],
   unsafe_condensation: ["要約で条件が欠ける", "condensing would drop a condition"], weekday: ["曜日を付記", "weekday added"],
   recovered_unverified: ["根拠未検証", "not verified"], advance_notice: ["提出期限を確認", "check the printed deadline"],
+  checkbox: ["□/■ 記号を除き選択肢名に統一", "checkbox mark removed"],
 };
 const flagText = (f) => (FLAG[f] ? L(...FLAG[f]) : f);
 const ATTENTION = new Set(["year_inferred", "low_conf", "needs_input", "re_extracted", "condensed", "unsafe_condensation", "re_anchored", "advance_notice"]);
@@ -336,9 +337,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     renderEngineBadge();
   } catch (e) { toast(L(`ヘルスチェックに失敗: ${e.message}`, `Health check failed: ${e.message}`)); }
   try {
-    const all = await api("/api/demos");  // デモ1–5: marked forms and unmarked blank forms (blank-cell discovery)
+    const all = await api("/api/demos");  // デモ1–6: marked forms, unmarked blank forms, the fixed PDF form
     S.demos = all.filter((d) => !d.unmarked);
-    S.unmarked = all.filter((d) => d.unmarked);
+    S.unmarked = all.filter((d) => d.unmarked && !d.pdf);
+    S.pdf = all.filter((d) => d.pdf);
     renderDemos();
   } catch (e) { toast(L(`デモを読み込めません: ${e.message}`, `Could not load demos: ${e.message}`)); }
   if (!(await openRunFromQuery())) await handleDeepLink();
@@ -367,13 +369,16 @@ async function openRunFromQuery() {
 }
 
 // Deep links for demos / recordings: /#demo=form2&tab=hitl&slot=法人番号&layout=slider, #unmarked=form4,
-// #tour=3, #view=claude, #lang=en
+// #pdf=form6 (the portal's 🚀 button), #tour=3, #view=claude, #lang=en
 async function handleDeepLink() {
   const params = new URLSearchParams(location.hash.slice(1));
   if (["ja", "en"].includes(params.get("lang")) && params.get("lang") !== S.lang) setLang(params.get("lang"));
   if (params.get("layout") === "slider") S.layout = "slider";
+  const pdfId = params.get("pdf") || params.get("unmarked") || params.get("demo");
   if (params.get("tour")) {
     await startTour(Number(params.get("tour")));
+  } else if (pdfId && S.pdf.some((d) => d.id === pdfId)) {  // a fixed PDF: discover its boxes first
+    await discoverDemo(pdfId);
   } else if (params.get("demo") && S.demos.some((d) => d.id === params.get("demo"))) {
     await runDemo(params.get("demo"));
     if (params.get("slot")) selectSlot(params.get("slot"), true);
@@ -462,7 +467,8 @@ const TOUR = [
     ja: "マーカーも設定ファイルも無い白紙様式から、印字ラベルの横の空欄を自動で発見。申請者欄（✓）は推奨、事務局専用欄（⊘）はロックされ選べません。計算式・結合セルの続きは除外し、確定した欄だけに記入します。",
     en: "From a blank form with no markers and no slot file, the empty cells next to printed labels are discovered. Applicant cells (✓) are recommended, office-only cells (⊘) are locked, formulas and merged continuations are rejected — and only confirmed cells are filled.",
     async go() { await discoverDemo("form4"); },
-    links: () => [[L("Excel 版（form5）も見る", "Try the Excel form (form5)"), () => discoverDemo("form5")]],
+    links: () => [[L("Excel 版（form5）も見る", "Try the Excel form (form5)"), () => discoverDemo("form5")],
+      [L("固定PDF版（form6・□→■）も見る", "Try the fixed PDF (form6, □→■)"), () => discoverDemo("form6")]],
   },
   {
     ja: "黄色の原文「483万6千円」から「4,836,000円」へ。補助金申請額は様式に印刷された上限で 1,612,000円 → 1,000,000円 に再抽出。メモに無い法人番号は推測せず、人の入力待ちです。",
@@ -526,19 +532,26 @@ function renderTourBar() {
 /* ---------------------------------------------------------------- demos */
 
 function demoButton(d, onclick, unmarked) {
-  return h("button", { class: `demo${unmarked ? " demo-unmarked" : ""}${S.activeDemo === d.id ? " active" : ""}`, type: "button", onclick },
+  const pdf = Boolean(d.pdf);
+  return h("button", { class: `demo${unmarked ? " demo-unmarked" : ""}${pdf ? " demo-pdf" : ""}${S.activeDemo === d.id ? " active" : ""}`, type: "button", onclick },
     h("div", { class: "demo-top" }, d.label ? h("span", { class: "demo-no" }, L(d.label, `Demo ${d.number}`)) : null,
-      h("span", { class: "ftype" }, `.${d.file_type}`), h("span", { class: "demo-title" }, d.title),
-      unmarked ? h("span", { class: "badge-auto", title: L("マーカーの無い白紙様式。空欄を自動検出し、人が確定した欄だけに記入します",
-        "No markers: blank cells are discovered, and only the cells you confirm are filled") }, L("空欄自動検出", "auto-detect")) : null),
+      h("span", { class: `ftype${pdf ? " ftype-pdf" : ""}` }, `.${d.file_type}`), h("span", { class: "demo-title" }, d.title),
+      unmarked ? h("span", { class: "badge-auto", title: pdf
+        ? L("フィールドの無い固定PDF。罫線から記入枠を復元して自動発見し、人が確定した枠だけに重ね書きします（原本のバイト列は不変）",
+          "A fixed PDF without fields: boxes are rebuilt from the ruled lines, and only the boxes you confirm are overlaid (original bytes unchanged)")
+        : L("マーカーの無い白紙様式。空欄を自動検出し、人が確定した欄だけに記入します",
+          "No markers: blank cells are discovered, and only the cells you confirm are filled") },
+        pdf ? L(d.badge || "固定PDF・空欄自動検出", "fixed PDF · auto-detect") : L("空欄自動検出", "auto-detect")) : null),
     h("div", { class: "demo-org" }, `${d.org} · ${d.title_en}`),
-    unmarked ? h("div", { class: "demo-cta" }, "🔍 ", B("空欄を自動発見 → 人が確定 → 記入", "discover → you confirm → fill")) : null,
+    unmarked ? h("div", { class: "demo-cta" }, "🔍 ", pdf ? B("罫線から記入枠を自動発見 → 人が確定 → 重ね書き", "find boxes → you confirm → overlay")
+      : B("空欄を自動発見 → 人が確定 → 記入", "discover → you confirm → fill")) : null,
     h("div", { class: "chips" }, (d.highlights || []).map((x) => h("span", { class: "chip" }, x))));
 }
 
 function renderDemos() {
   $("#demoList").replaceChildren(...S.demos.map((d) => demoButton(d, () => runDemo(d.id), false)));
   $("#unmarkedList").replaceChildren(...S.unmarked.map((d) => demoButton(d, () => discoverDemo(d.id), true)));
+  $("#pdfList").replaceChildren(...S.pdf.map((d) => demoButton(d, () => discoverDemo(d.id), true)));
 }
 
 async function runDemo(id) {
@@ -608,7 +621,7 @@ async function discoverDemo(id) {
 
 async function onDiscoverUpload() {
   const f = $("#fileInput").files[0];
-  if (!f) { toast(L("先に .docx / .xlsx の様式を選んでください。", "Choose a .docx / .xlsx form first.")); return; }
+  if (!f) { toast(L("先に .docx / .xlsx / .pdf の様式を選んでください。", "Choose a .docx / .xlsx / .pdf form first.")); return; }
   const fd = new FormData();
   fd.append("file", f);
   fd.append("mode", mode());
@@ -631,6 +644,12 @@ function setDiscovery(d, preview) {
 }
 
 function cellWhere(c) {
+  if (c.file_type === "pdf" || c.rect) {  // a box of a fixed PDF, in points (origin bottom-left)
+    const [x0, y0, x1, y1] = (c.rect || []).map((v) => Number(v).toFixed(0));
+    return [h("b", { class: "mono" }, L(`p.${(c.page ?? 0) + 1} 枠`, `p.${(c.page ?? 0) + 1} box`)),
+      h("div", { class: "f-ctx mono" }, `(${x0}, ${y0})–(${x1}, ${y1}) pt`),
+      c.kind === "checkbox_text" ? h("div", { class: "f-ctx" }, L("□ 選択肢の行", "□ options line")) : null];
+  }
   if (c.file_type === "xlsx" || c.cell) {
     return [h("b", { class: "mono" }, c.cell || "?"),
       c.merged_range ? h("div", { class: "f-ctx" }, L(`結合 ${c.merged_range}`, `merged ${c.merged_range}`)) : null,
@@ -640,9 +659,17 @@ function cellWhere(c) {
 }
 
 function ruleText(c) {
+  const k = c.constraints || {};
+  if (k.checkbox) {  // printed □ options: the chosen one becomes ■
+    const parts = [L("□→■ チェック", "□→■ checkbox"), (k.allowed_values || []).join("／"),
+      k.exclusive === false ? L("複数可", "several allowed") : L("一つだけ", "one only")];
+    if ((k.requires_human_if_selected || []).length) parts.push(L(`${k.requires_human_if_selected.join("・")}は人が選択`, `${k.requires_human_if_selected.join(", ")}: human only`));
+    return parts.join(" · ");
+  }
   const parts = [fmtLabel(c.required_format)];
   if (c.max_chars) parts.push(L(`${c.max_chars}字以内`, `≤ ${c.max_chars} chars`));
-  const opts = (c.constraints || {}).allowed_values;
+  if (k.max_value != null) parts.push(L(`上限${Number(k.max_value).toLocaleString()}円`, `cap ${Number(k.max_value).toLocaleString()} yen`));
+  const opts = k.allowed_values;
   if (opts && opts.length) parts.push(opts.join("／"));
   return parts.join(" · ");
 }
@@ -672,9 +699,11 @@ function renderDiscovery() {
   $("#discTitle").textContent = d.title || d.form_title || d.form;
   $("#discSub").textContent = [d.title_en, d.org, d.form, `${L("第2段階", "stage 2")}: ${engineText(d.engine.label)}`].filter(Boolean).join(" · ");
   const found = (st[1] || {}).found ?? cands.length + d.rejected.length;
+  const pdf = d.file_type === "pdf";
   fill($("#discStages"),
-    stageCard("1", "ヒューリスティック抽出", "Heuristic extraction", L(`${found} 個の空欄`, `${found} empty cells`),
-      L("印字ラベルの右・列見出しの下の空欄", "next to a printed label / under a column header")),
+    stageCard("1", "ヒューリスティック抽出", "Heuristic extraction", L(`${found} 個の${pdf ? "記入枠" : "空欄"}`, `${found} empty ${pdf ? "boxes" : "cells"}`),
+      pdf ? L("PDF の罫線から枠を復元し、印字ラベルの右の空き枠・□ 選択肢の行を抽出", "boxes rebuilt from the PDF's ruled lines; empty boxes and □ option lines next to a printed label")
+        : L("印字ラベルの右・列見出しの下の空欄", "next to a printed label / under a column header")),
     stageCard("2", "意味分類・ルール推定", "Classification & rule inference",
       L(`申請者 ${applicant}・事務局 ${office}`, `${applicant} applicant · ${office} office-only`), engineText(d.engine.label)),
     stageCard("3", "決定論的安全検査", "Deterministic safety check",
@@ -716,7 +745,7 @@ function renderDiscovery() {
   fill($("#discRejected"),
     h("div", { class: "card-h" }, B("除外したセル（第3段階）", "Rejected cells (stage 3)")),
     d.rejected.length ? h("ul", { class: "rej" }, d.rejected.map((r) => h("li", {},
-      h("b", { class: "mono" }, r.cell || L(`表${r.table}・行${r.row}・列${r.col}`, `tbl ${r.table} · r${r.row} · c${r.col}`)),
+      h("b", { class: "mono" }, r.cell || (r.table == null ? r.location : L(`表${r.table}・行${r.row}・列${r.col}`, `tbl ${r.table} · r${r.row} · c${r.col}`))),
       ` ${String(r.evidence_label || "").split("\n")[0]}`, h("div", { class: "f-ctx", title: r.reason }, reasonText(r.reason)))))
       : h("p", { class: "muted" }, L("なし", "none")));
   if ($("#discMemo").value !== D.memo) $("#discMemo").value = D.memo;
@@ -863,6 +892,8 @@ function renderKpis() {
   const untouchedAll = rep.entry_hashes.filter((e) => e.role === "untouched").length;
   const untouched = rep.entry_hashes.filter((e) => e.role === "untouched" && e.identical && e.raw_identical).length;
   const vis = r.visual || {};
+  const pdf = r.form.file_type === "pdf";
+  const px = vis.pixel_diff || {};
   $("#kpis").replaceChildren(
     tile(B("記入済み", "Fields filled", "stack"), `${filled}/${r.mappings.length}`, humanFilled > 0
       ? L(`AI記入（原文照合済み）${aiFilled}件・人の入力（本人確認）${humanFilled}件`, `${aiFilled} AI (verbatim source) · ${humanFilled} human-entered`)
@@ -871,13 +902,21 @@ function renderKpis() {
       pending ? L("メモに無いので推測しない", "not in the memo — never guessed") : L("なし", "none"), pending ? "⚠" : "✓", pending ? "icon-warn" : "icon-good"),
     tile(B("合格した検査", "Checks passed", "stack"), `${rep.passed_count}/${total}`, L("構造＋根拠の決定論的検査", "structural + grounding"),
       rep.failed_count ? "✗" : "✓", rep.failed_count ? "icon-bad" : "icon-good"),
-    tile(B("無変更のパーツ", "Parts byte-identical", "stack"), untouched === untouchedAll ? String(untouched) : `${untouched}/${untouchedAll}`,
-      untouched === untouchedAll ? L("ZIP 内パーツをバイト単位で複製", "ZIP entries copied verbatim")
-        : L(`対象外パーツが ${untouchedAll - untouched} 個変化`, `${untouchedAll - untouched} non-target part(s) changed`),
-      untouched === untouchedAll ? null : "✗", "icon-bad"),
-    tile(B("指定欄以外のずれ", "Layout drift outside fields", "stack"), `${vis.max_shift_px ?? 0} px`,
-      L(`${vis.boxes_compared ?? 0} 個の枠を比較`, `${vis.boxes_compared ?? 0} boxes compared`),
-      vis.identical_outside_slots ? "✓" : "✗", vis.identical_outside_slots ? "icon-good" : "icon-bad"),
+    pdf ? tile(B("無変更のオブジェクト", "Objects byte-identical", "stack"),
+      untouched === untouchedAll ? String(untouched) : `${untouched}/${untouchedAll}`,
+      L("原本のバイト列を先頭に保持（増分更新）", "original bytes kept as a prefix (incremental update)"),
+      untouched === untouchedAll ? null : "✗", "icon-bad")
+      : tile(B("無変更のパーツ", "Parts byte-identical", "stack"), untouched === untouchedAll ? String(untouched) : `${untouched}/${untouchedAll}`,
+        untouched === untouchedAll ? L("ZIP 内パーツをバイト単位で複製", "ZIP entries copied verbatim")
+          : L(`対象外パーツが ${untouchedAll - untouched} 個変化`, `${untouchedAll - untouched} non-target part(s) changed`),
+        untouched === untouchedAll ? null : "✗", "icon-bad"),
+    pdf && px.method === "pixel"
+      ? tile(B("枠の外の画素差分", "Pixel diff outside the boxes", "stack"), `${px.outside ?? 0} px`,
+        L(`枠の内側 ${px.inside ?? 0} px のみ変化`, `only ${px.inside ?? 0} px inside the boxes changed`),
+        vis.identical_outside_slots ? "✓" : "✗", vis.identical_outside_slots ? "icon-good" : "icon-bad")
+      : tile(B("指定欄以外のずれ", "Layout drift outside fields", "stack"), `${vis.max_shift_px ?? 0} px`,
+        L(`${vis.boxes_compared ?? 0} 個の枠を比較`, `${vis.boxes_compared ?? 0} boxes compared`),
+        vis.identical_outside_slots ? "✓" : "✗", vis.identical_outside_slots ? "icon-good" : "icon-bad"),
     tile(B("根拠のない記入", "Ungrounded claims", "stack"), String(rep.ungrounded_claims_count), L("AI記入値の根拠違反", "ungrounded AI values"),
       rep.ungrounded_claims_count ? "✗" : "✓", rep.ungrounded_claims_count ? "icon-bad" : "icon-good"),
   );
@@ -1178,11 +1217,16 @@ function editControl(s, m) {
 
 /* ---------------------------------------------------------------- audit */
 
+// A PDF maps its container / content-stream checks onto the same ids: the groups are named for what they check.
+const PDF_GROUPS = { zip: ["PDF container (incremental update)", "PDFコンテナ（増分更新）"], xml: ["Page content streams", "ページ内容"] };
+
 function renderAudit() {
   const r = S.run;
+  const pdf = r.form.file_type === "pdf";
   const byCat = {};
   r.report.checks.forEach((c) => { (byCat[c.category] = byCat[c.category] || []).push(c); });
-  $("#auditGroups").replaceChildren(...GROUPS.filter(([k]) => byCat[k]).map(([k, en, ja]) => {
+  $("#auditGroups").replaceChildren(...GROUPS.filter(([k]) => byCat[k]).map(([k, en0, ja0]) => {
+    const [en, ja] = pdf && PDF_GROUPS[k] ? PDF_GROUPS[k] : [en0, ja0];
     const items = byCat[k];
     const ok = items.filter((c) => c.passed).length;
     return h("div", { class: "ag" },
@@ -1192,7 +1236,10 @@ function renderAudit() {
   }));
   $("#entryRows").replaceChildren(...r.report.entry_hashes.map((e) => {
     let res = h("span", { class: "res-bad" }, L("✗ 変更あり", "✗ changed"));
-    if (e.role === "target") res = h("span", { class: "res-target" }, e.identical ? L("対象 · 変更なし", "target · unchanged") : L("対象 · 欄の文字のみ", "target · slot text only"));
+    if (e.role === "target") {
+      res = h("span", { class: "res-target" }, e.identical ? L("対象 · 変更なし", "target · unchanged")
+        : pdf ? L("対象 · /Contents だけ追記（新しい版）", "target · /Contents only (new revision)") : L("対象 · 欄の文字のみ", "target · slot text only"));
+    } else if (pdf && e.role === "added") res = h("span", { class: "res-target" }, L("追加 · 重ね書き（増分更新）", "added · overlay (incremental update)"));
     else if (e.identical && e.raw_identical) res = h("span", { class: "res-ok" }, L("✓ バイト単位で同一", "✓ byte-identical"));
     const role = { target: ["記入対象", "target"], untouched: ["対象外", "untouched"] }[e.role];
     return h("tr", {}, h("td", {}, e.name), h("td", {}, role ? L(...role) : e.role), h("td", {}, `${e.original_sha256.slice(0, 20)}…`), h("td", {}, res));

@@ -2,8 +2,8 @@
 
     python -m form_guard.cli --all-demos                 # run the 3 marked fictional demos -> output/
     python -m form_guard.cli --form F --memo M --out-dir D [--mode demo|live|auto] [--set 法人番号=...]
-    python -m form_guard.cli --scan FORM [--json]        # list the slots a form exposes
-    python -m form_guard.cli --discover-blanks FORM      # unmarked blank form: propose empty cells to fill
+    python -m form_guard.cli --scan FORM [--json]        # list the slots a form exposes (.docx / .xlsx / .pdf)
+    python -m form_guard.cli --discover-blanks FORM      # unmarked blank form or fixed PDF: propose boxes to fill
     python -m form_guard.cli --form F --memo M --discovery F.discovery.json --confirm c01,c02   # fill confirmed cells
     python -m form_guard.cli --verify ORIGINAL FILLED [--memo M]  # audit any filled copy against its blank original
     python -m form_guard.cli --generate-samples          # (re)write samples/ deterministically
@@ -22,6 +22,14 @@ import json
 import sys
 from pathlib import Path
 from typing import Optional
+
+if __package__ in (None, ""):  # python form_guard/cli.py: run the package module itself
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    if __name__ == "__main__":
+        from form_guard.cli import main as _main
+
+        raise SystemExit(_main())
+    __package__ = "form_guard"
 
 from . import DEFAULT_MODEL, __version__
 
@@ -127,8 +135,14 @@ def _print_discovery(d: dict) -> None:
     print(f"   blank form SHA-256 {d['form_sha256'][:16]}… (confirmation is refused if the form changes)")
     for c in cands:
         mark = "✓" if c["recommended"] else "✗"
-        where = c.get("cell") or f"table {c.get('table')} row {c.get('row')} col {c.get('col')}"
+        if c.get("file_type") == "pdf":
+            x0, y0, x1, y1 = c["rect"]
+            where = f"page {c['page'] + 1} box ({x0:.1f}, {y0:.1f})–({x1:.1f}, {y1:.1f}) pt"
+        else:
+            where = c.get("cell") or f"table {c.get('table')} row {c.get('row')} col {c.get('col')}"
         rule = c["required_format"] + (f", ≤{c['max_chars']} chars" if c.get("max_chars") else "")
+        if c.get("kind") == "checkbox_text":
+            rule = "checkbox □→■ " + "/".join(c["constraints"].get("allowed_values") or [])
         note = "" if c["recommended"] else f"  — {c['reason']}"
         print(f"   {c['candidate_id']} {mark} {c['slot_id']:<14} {rule:<22} {where}{note}")
     for r in d["rejected"]:
@@ -149,10 +163,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                                  "prove nothing else changed, keep a human in the loop.")
     act = ap.add_mutually_exclusive_group()
     act.add_argument("--all-demos", action="store_true", help="run the 3 fictional demo forms end-to-end")
-    act.add_argument("--form", type=Path, help="blank .docx/.xlsx form to fill")
+    act.add_argument("--form", type=Path, help="blank .docx/.xlsx form or fixed .pdf form to fill")
     act.add_argument("--scan", type=Path, metavar="FORM", help="list the slots discovered in a form")
     act.add_argument("--discover-blanks", type=Path, metavar="FORM",
-                     help="unmarked blank form: propose the empty cells to fill (nothing is written)")
+                     help="unmarked blank form or fixed PDF: propose the empty cells / boxes to fill (nothing is written)")
     act.add_argument("--verify", nargs=2, type=Path, metavar=("ORIGINAL", "FILLED"), help="audit a filled copy")
     act.add_argument("--generate-samples", action="store_true", help="(re)generate samples/ deterministically")
     act.add_argument("--serve", action="store_true", help="start the web UI")

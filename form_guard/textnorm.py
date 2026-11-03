@@ -237,12 +237,13 @@ _NUM = "[0-9０-９][0-9０-９,，]*(?:[.．][0-9０-９]+)?"
 _KANJI_DIGITS = {"〇": 0, "零": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
 _KANJI_SMALL = {"十": 10, "百": 100, "千": 1000}
 _KANJI_BIG = {"万": 10_000, "億": 100_000_000, "兆": 1_000_000_000_000}
-_UNIT_MULT = {"千": 1_000, "万": 10_000, "億": 100_000_000}
+_UNIT_MULT = {**_KANJI_SMALL, **_KANJI_BIG}
+_COMPOUND_NUM_PAT = rf"(?:{_NUM}\s*[兆億万千百十]+)+(?:{_NUM})?"
 
 _AMOUNT_RE = re.compile(
-    rf"(?P<approx>約|およそ|おおよそ|概ね)?\s*(?P<num>(?:{_NUM}\s*[億万千]\s*)+(?:{_NUM})?|{_NUM})\s*(?P<k>千)?円"
+    rf"(?P<approx>約|およそ|おおよそ|概ね)?\s*(?P<num>{_COMPOUND_NUM_PAT}|{_NUM})\s*(?P<k>千)?円"
 )
-_KANJI_AMOUNT_RE = re.compile(r"(?P<approx>約|およそ)?(?P<num>[〇一二三四五六七八九十百千万億]+)円")
+_KANJI_AMOUNT_RE = re.compile(r"(?P<approx>約|およそ)?(?P<num>[〇一二三四五六七八九十百千万億兆]+)円")
 _PLAIN_NUM_RE = re.compile(r"[0-9][0-9,]*(?:\.[0-9]+)?")
 
 
@@ -265,22 +266,31 @@ def _decimal_term(tok: str) -> Decimal:
 
 
 def parse_compound(num: str) -> int:
-    """Parse '483万6千' / '1,612,000' / '1億2,000万' / '1.5万' / '0万5千' into an integer.
+    """Parse '483万6千' / '1,612,000' / '1億2,000万' / '2千万' / '3百万' / '1億2千万' / '1.5万' / '0万5千' into an integer.
 
+    十 / 百 / 千 build a section that the next 万 / 億 / 兆 multiplies (2千万 = 2,000 × 10,000; 1千2百万 = 1,200万).
     Exact decimal arithmetic: malformed comma grouping (52,00 / 1,,000) and a total that is not a whole number
     (1.5 / 0.5) raise ValueError instead of being read as another number or rounded. An explicit 0 before a unit
     stays 0 (0万 = 0); only a unit with nothing before it counts as one (万 = 10,000)."""
     num = unicodedata.normalize("NFKC", num).replace(" ", "")
-    total = Decimal(0)
+    total = section = Decimal(0)
+    has_section = False  # the section states a number (0万 = 0, 万 = 1万)
     cur = ""
     for ch in num:
         if ch.isdigit() or ch in ".,":
             cur += ch
-        elif ch in _UNIT_MULT:
-            total += (_decimal_term(cur) if cur else Decimal(1)) * Decimal(_UNIT_MULT[ch])
-            cur = ""
+        elif ch in _KANJI_SMALL:
+            section += (_decimal_term(cur) if cur else Decimal(1)) * _KANJI_SMALL[ch]
+            has_section, cur = True, ""
+        elif ch in _KANJI_BIG:
+            if cur:
+                section += _decimal_term(cur)
+                has_section = True
+            total += (section if has_section else Decimal(1)) * _KANJI_BIG[ch]
+            section, has_section, cur = Decimal(0), False, ""
     if cur:
-        total += _decimal_term(cur)
+        section += _decimal_term(cur)
+    total += section
     if total != int(total):
         raise ValueError(f"{num!r} is not a whole number")
     return int(total)
@@ -367,7 +377,7 @@ def quantities(text: str) -> set[float]:
     for a in find_amounts(t):
         vals.add(float(a.value))
         covered.append((a.start, a.end))
-    for m in re.finditer(rf"(?:{_NUM}\s*[億万千]\s*)+(?:{_NUM})?", t):
+    for m in re.finditer(_COMPOUND_NUM_PAT, t):
         try:
             vals.add(float(parse_compound(m.group(0))))
         except ValueError:  # 52,00万 / 1.23456万: states no number — its digits do not support anything either
@@ -393,7 +403,7 @@ def value_quantities(text: str) -> list[tuple[str, float]]:
     for a in find_amounts(t):
         out.append((a.text, float(a.value)))
         covered.append((a.start, a.end))
-    for m in re.finditer(rf"(?:{_NUM}\s*[億万千]\s*)+(?:{_NUM})?", t):
+    for m in re.finditer(_COMPOUND_NUM_PAT, t):
         if any(s <= m.start() < e for s, e in covered):
             continue
         try:

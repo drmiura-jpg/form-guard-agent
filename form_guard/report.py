@@ -240,14 +240,15 @@ def build_index_html(summaries: list[dict[str, Any]]) -> str:
 def write_naive_comparisons(samples_dir: Path, overwrite: bool = True) -> dict[str, Path]:
     """Render blank vs naive-regeneration comparisons into samples/broken_before/. With ``overwrite=False`` only
     comparison files that do not exist yet are written."""
+    from .pdf_support import layout_pdf, naive_pdf_overlays
     from .pipeline import naive_overlays
-    from .samples import DEMOS, read_memo
+    from .samples import DEMOS, PDF_FORMS, read_memo
     from .scanner import scan
     from .verifier import compare_naive
     from .visual_diff import layout_docx, layout_xlsx, svg_document
 
     written: dict[str, Path] = {}
-    for demo in DEMOS:
+    for demo in DEMOS + PDF_FORMS:
         stem = Path(demo["naive"]).stem
         sp = samples_dir / "broken_before" / f"{stem}.svg"
         hp = samples_dir / "broken_before" / f"comparison_{demo['id']}.html"
@@ -258,9 +259,10 @@ def write_naive_comparisons(samples_dir: Path, overwrite: bool = True) -> dict[s
         memo = read_memo(samples_dir / "memos" / demo["memo"])
         sc = scan(form)
         rep = compare_naive(sc, naive, memo)
-        lay = (lambda p: layout_docx(p)[0]) if sc.file_type == "docx" else layout_xlsx
+        lay = {"docx": lambda p: layout_docx(p)[0], "xlsx": layout_xlsx, "pdf": layout_pdf}[sc.file_type]
         blank_l, naive_l = lay(form), lay(naive)
-        ovs, banner = naive_overlays(sc, blank_l, naive_l, rep)
+        ovs, banner = (naive_pdf_overlays(blank_l, naive_l, rep) if sc.file_type == "pdf"
+                       else naive_overlays(sc, blank_l, naive_l, rep))
         naive_svg = svg_document(naive_l, ovs, "Naive AI regeneration (simulated)", banner, "bad")
         blank_svg = svg_document(blank_l, [], "Blank original form", "Blank original / 原本", "info")
         if overwrite or not sp.exists():
