@@ -35,8 +35,11 @@ curl -s -D output/portal/headers.txt -o output/portal/form6_study_group_grant.pd
 ```
 
 Compare the file's SHA-256 with the portal's (`X-Form-Guard-SHA256` header / `data-sha256`). A mismatch means a
-different file: stop and tell the user. The blank templates in `samples/blank_forms/` are protected by the
-PreToolUse hook — download copies only into `output/`.
+different file: stop and tell the user. When downloading a form from an external grant or study-group portal that does
+not publish an `X-Form-Guard-SHA256` header, compute the SHA-256 immediately upon download (`sha256sum` /
+`hashlib.sha256`), record it alongside the portal URL and form version title, and let `form_guard_discover_blank_cells`
+bind `form_sha256` to that initial download so any change between discovery and fill is refused. The blank templates in
+`samples/blank_forms/` are protected by the PreToolUse hook — download copies only into `output/`.
 
 ## 3. Discover the boxes — the user confirms
 

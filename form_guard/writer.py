@@ -67,20 +67,27 @@ def prepare_value(value: str, file_type: str) -> str:
     return v
 
 
-CHECK_OFF_BYTES = {b"\xe2\x96\xa1": b"\xe2\x96\xa0", b"&#9633;": b"&#9632;", b"&#x25A1;": b"&#x25A0;",
-                   b"&#x25a1;": b"&#x25a0;"}
+CHECK_OFF_BYTES = {
+    b"\xe2\x96\xa1": b"\xe2\x96\xa0",
+    b"\xe2\x98\x90": b"\xe2\x96\xa0",
+    b"&#9633;": b"&#9632;",
+    b"&#x25A1;": b"&#x25A0;",
+    b"&#x25a1;": b"&#x25a0;",
+    b"&#9744;": b"&#9632;",
+    b"&#x2610;": b"&#x25A0;",
+}
 
 
 def checkbox_offsets(text: str, options: list[dict], value: str) -> list[int]:
-    """Character offsets (in the container text) of the □ of every option the value ticks."""
-    from .constraints import CHECK_OFF, normalize_checkbox_value
+    """Character offsets (in the container text) of the □ / ☐ of every option the value ticks."""
+    from .constraints import CHECK_OFF_CHARS, normalize_checkbox_value
 
     labels = [o["label"] for o in options]
     picked = set(normalize_checkbox_value(value, labels))
     out = []
     for o in options:
         if o["label"] in picked:
-            if o["offset"] >= len(text) or text[o["offset"]] != CHECK_OFF:
+            if o["offset"] >= len(text) or text[o["offset"]] not in CHECK_OFF_CHARS:
                 raise UnsupportedXMLError(f"checkbox option «{o['label']}»: no printed □ at its position")
             out.append(o["offset"])
     return out

@@ -798,6 +798,17 @@ def test_r1_a1_grounding_rejects_wrong_names_ids_options_and_composite_parts(sam
     assert "number_unsupported" in errors(ground_value("483円", ["税抜で483万6千円"], memo2))
     # (d) the legitimate conversions still pass
     assert errors(ground_value("4,836,000円", ["税抜で483万6千円"], memo2)) == []
+    # (e) sub-multiplier compounds (2千万円, 3百万円, 1億2千万円, 上限2千万円) parse and ground as single totals
+    from form_guard.constraints import infer_slot_constraints
+    for raw, expected in (("2千万円", 20_000_000), ("3百万円", 3_000_000), ("50百万円", 50_000_000),
+                          ("1億2千万円", 120_000_000), ("１億２千万", 120_000_000), ("1千2百万円", 12_000_000),
+                          ("500千円", 500_000), ("483万6千円", 4_836_000)):
+        assert parse_compound(raw.rstrip("円")) == expected and quantities(raw) == {float(expected)}, raw
+    assert infer_slot_constraints("補助金申請額", ["補助金申請額"], ["上限2千万円（千円未満切捨て）"], "")["constraints"]["max_value"] == 20_000_000
+    memo_sub = "今年度の研究費申請額は 2千万円（内訳：設備費 3百万円、人件費 1千7百万円）とする。\n"
+    yen_slot = _text_slot("補助金申請額", fmt="yen")
+    assert errors(ground_value("20,000,000円", ["研究費申請額は 2千万円"], memo_sub, yen_slot)) == []
+    assert errors(ground_value("3,000,000円", ["設備費 3百万円"], memo_sub, yen_slot)) == []
 
 
 def test_r1_a1_verifier_fails_a_value_that_contradicts_its_quote(demo_runs, tmp_path):
@@ -5001,3 +5012,26 @@ def test_p4_portal_form_fill_skill_and_docs_describe_the_pdf_checkbox_and_portal
         for needle in ("incremental update", "増分更新", "portal-form-fill", "GET /api/portal/forms", "pdf_support.py",
                        "requires_human_if_selected", "VIS-01"):
             assert needle in text, needle
+
+
+def test_p4_ballot_box_u2610_checkbox_is_parsed_written_as_u25a0_and_verified(tmp_path):
+    from docx import Document
+
+    from form_guard.constraints import parse_checkbox_options
+    from form_guard.pipeline import run_pipeline
+
+    opts = parse_checkbox_options("☐ 合意済み　　☐ 協議中（協議予定日：　　年　　月　　日）")
+    assert [o["label"] for o in opts] == ["合意済み", "協議中"] and not opts[0]["checked"] and opts[1]["needs_input"]
+    doc = Document()
+    tbl = doc.add_table(rows=1, cols=2)
+    tbl.cell(0, 0).text = "共同研究先との合意"
+    tbl.cell(0, 1).text = "☐ 合意済み　　☐ 協議中（協議予定日：　　年　　月　　日）"
+    form_path = tmp_path / "ballot_box_form.docx"
+    doc.save(form_path)
+    spec = {"targets": [{"slot_id": "共同研究先との合意", "table": 0, "row": 0, "col": 1, "kind": "checkbox_text"}]}
+    res = run_pipeline(form_path, "共同研究先との合意：合意済み\n", tmp_path / "out", mode="demo", slot_spec=spec)
+    assert res.report.overall_status == "PASS" and res.report.passed_count == 21
+    filled_doc = Document(res.filled_path)
+    assert filled_doc.tables[0].cell(0, 1).text == "■ 合意済み　　☐ 協議中（協議予定日：　　年　　月　　日）"
+
+

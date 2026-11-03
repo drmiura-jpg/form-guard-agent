@@ -216,12 +216,13 @@ _NUM = "[0-9０-９][0-9０-９,，]*(?:[.．][0-9０-９]+)?"
 _KANJI_DIGITS = {"〇": 0, "零": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
 _KANJI_SMALL = {"十": 10, "百": 100, "千": 1000}
 _KANJI_BIG = {"万": 10_000, "億": 100_000_000, "兆": 1_000_000_000_000}
-_UNIT_MULT = {"千": 1_000, "万": 10_000, "億": 100_000_000}
+_UNIT_MULT = {**_KANJI_SMALL, **_KANJI_BIG}
+_COMPOUND_NUM_PAT = rf"(?:{_NUM}\s*(?:[兆億万千百十]\s*)+)+(?:{_NUM})?"
 
 _AMOUNT_RE = re.compile(
-    rf"(?P<approx>約|およそ|おおよそ|概ね)?\s*(?P<num>(?:{_NUM}\s*[億万千]\s*)+(?:{_NUM})?|{_NUM})\s*(?P<k>千)?円"
+    rf"(?P<approx>約|およそ|おおよそ|概ね)?\s*(?P<num>{_COMPOUND_NUM_PAT}|{_NUM})\s*(?P<k>千)?円"
 )
-_KANJI_AMOUNT_RE = re.compile(r"(?P<approx>約|およそ)?(?P<num>[〇一二三四五六七八九十百千万億]+)円")
+_KANJI_AMOUNT_RE = re.compile(r"(?P<approx>約|およそ)?(?P<num>[〇一二三四五六七八九十百千万億兆]+)円")
 _PLAIN_NUM_RE = re.compile(r"[0-9][0-9,]*(?:\.[0-9]+)?")
 
 
@@ -231,19 +232,25 @@ def _to_float(s: str) -> float:
 
 
 def parse_compound(num: str) -> int:
-    """Parse '483万6千' / '1,612,000' / '1億2,000万' into an integer."""
+    """Parse '483万6千' / '1,612,000' / '1億2,000万' / '2千万' / '3百万' / '1億2千万' into an integer."""
     num = unicodedata.normalize("NFKC", num).replace(",", "").replace(" ", "")
     total = 0
+    section = 0.0
     cur = ""
     for ch in num:
         if ch.isdigit() or ch == ".":
             cur += ch
-        elif ch in _UNIT_MULT:
-            total += round(float(cur or "1") * _UNIT_MULT[ch])
+        elif ch in _KANJI_SMALL:
+            section += float(cur or "1") * _KANJI_SMALL[ch]
+            cur = ""
+        elif ch in _KANJI_BIG:
+            section += float(cur) if cur else 0.0
+            total += round((section if section else 1.0) * _KANJI_BIG[ch])
+            section = 0.0
             cur = ""
     if cur:
-        total += round(float(cur))
-    return int(total)
+        section += float(cur)
+    return int(total + round(section))
 
 
 def kanji_to_int(s: str) -> Optional[int]:
@@ -322,7 +329,7 @@ def quantities(text: str) -> set[float]:
     for a in find_amounts(t):
         vals.add(float(a.value))
         covered.append((a.start, a.end))
-    for m in re.finditer(rf"(?:{_NUM}\s*[億万千]\s*)+(?:{_NUM})?", t):
+    for m in re.finditer(_COMPOUND_NUM_PAT, t):
         try:
             vals.add(float(parse_compound(m.group(0))))
         except ValueError:
@@ -348,7 +355,7 @@ def value_quantities(text: str) -> list[tuple[str, float]]:
     for a in find_amounts(t):
         out.append((a.text, float(a.value)))
         covered.append((a.start, a.end))
-    for m in re.finditer(rf"(?:{_NUM}\s*[億万千]\s*)+(?:{_NUM})?", t):
+    for m in re.finditer(_COMPOUND_NUM_PAT, t):
         if any(s <= m.start() < e for s, e in covered):
             continue
         out.append((m.group(0), float(parse_compound(m.group(0)))))

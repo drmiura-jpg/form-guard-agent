@@ -30,7 +30,7 @@ FORMAT_GUIDE = {
 _MAXCHARS_RE = re.compile(r"([0-9０-９]+)\s*(?:字|文字)以内")
 _DIGITS_RE = re.compile(r"([0-9０-９]+)\s*桁")
 _EXAMPLE_RE = re.compile(r"例\s*[:：]\s*([A-Za-z0-9][A-Za-z0-9\-_/.]*[A-Za-z0-9])")
-_CAP_RE = re.compile(r"上限\s*(?:額)?\s*[:：]?\s*((?:[0-9０-９][0-9０-９,，]*\s*[万千億]?\s*)+)円")
+_CAP_RE = re.compile(r"上限\s*(?:額)?\s*[:：]?\s*((?:[0-9０-９][0-9０-９,，]*\s*(?:[兆億万千百十]\s*)*)+)円")
 _OPTIONS_SLASH_RE = re.compile(
     r"([^\s※（）()「」:：、。／/]+(?:[／/][^\s※（）()「」／/:：、。]+)+)\s*(?:のうち|から|より|のいずれか)"
 )
@@ -139,8 +139,10 @@ def split_choice(value: str, slot: FormSlot) -> list[str]:
     return [value.strip()]
 
 
-# Text checkboxes printed as "□ 合意済み　　□ 協議中（…）": the value names the option(s) to tick.
+# Text checkboxes printed as "□ 合意済み　　□ 協議中（…）" or "☐ 合意済み　　☐ 協議中（…）": the value names the option(s) to tick.
 CHECK_OFF, CHECK_ON = "□", "■"   # □ U+25A1 (JIS X 0208 2-2, UTF-8 E2 96 A1) / ■ U+25A0 (2-3, E2 96 A0)
+CHECK_OFF_CHARS = ("□", "☐")     # U+25A1 white square & U+2610 ballot box (both 3-byte UTF-8: E2 96 A1 / E2 98 90)
+CHECK_ON_CHARS = ("■", "☑", "☒")
 CHECKBOX_MARKS = "□■☐☑☒✓✔✅√"
 _CHECKBOX_SPLIT = re.compile(r"[、,，／/\n\s]+")
 _OPTION_RE = re.compile(r"[ 　]*([^ 　（(□■☐☑☒\n]+)")
@@ -148,10 +150,10 @@ _NEEDS_INPUT_RE = re.compile(r"[：:][ 　]*[ 　][ 　]*[年月日]|[（(][ 　
 
 
 def parse_checkbox_options(text: str) -> list[dict[str, Any]]:
-    """Options printed as ``□ 合意済み　　□ 協議中（協議予定日：　　年　　月　　日）`` — each with the character offset
-    of its square in ``text``, the printed label, the printed note after it, and whether that note asks for more
-    input (a blank date, a blank bracket). Empty if the text prints no options or repeats a label."""
-    pos = [i for i, ch in enumerate(text) if ch in (CHECK_OFF, CHECK_ON)]
+    """Options printed as ``□ 合意済み　　□ 協議中（協議予定日：　　年　　月　　日）`` (or with ``☐`` U+2610) — each with the
+    character offset of its square in ``text``, the printed label, the printed note after it, and whether that note
+    asks for more input (a blank date, a blank bracket). Empty if the text prints no options or repeats a label."""
+    pos = [i for i, ch in enumerate(text) if ch in CHECK_OFF_CHARS or ch in CHECK_ON_CHARS]
     out: list[dict[str, Any]] = []
     for k, i in enumerate(pos):
         end = pos[k + 1] if k + 1 < len(pos) else len(text)
@@ -163,7 +165,7 @@ def parse_checkbox_options(text: str) -> list[dict[str, Any]]:
         if not label:
             continue
         detail = seg[m.end() :].rstrip(" 　\n")
-        out.append({"label": label, "offset": i, "checked": text[i] == CHECK_ON, "detail": detail,
+        out.append({"label": label, "offset": i, "checked": text[i] in CHECK_ON_CHARS, "detail": detail,
                     "needs_input": bool(_NEEDS_INPUT_RE.search(detail))})
     labels = [o["label"] for o in out]
     return out if out and len(set(labels)) == len(labels) else []

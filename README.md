@@ -94,7 +94,7 @@ pip install -r requirements.txt
 
 python -m form_guard.cli --all-demos     # runs the 3 fictional demos -> output/index.html
 python -m form_guard.cli --serve         # web UI on http://127.0.0.1:8000 (grant portal: /portal)
-pytest -v                                # 244 tests
+pytest -v                                # 245 tests
 ```
 
 Requires Python 3.10+. Without `ANTHROPIC_API_KEY` everything runs on the deterministic **offline demo engine**, so the
@@ -324,21 +324,22 @@ inside its box, `■ 合意済み`, office-only boxes empty. The simulated naive
 (`samples/broken_before/broken_naive_ai_form6.pdf`) fails: US Letter instead of A4, the ruled boxes gone, the notes
 rewritten, `600,000円` over the cap and the office-only 受付番号 filled in.
 
-### Printed checkboxes: □ → ■ (Word, Excel and PDF)
+### Printed checkboxes: □ / ☐ → ■ (Word, Excel and PDF)
 
-Japanese forms print their checkboxes as text — `□ 合意済み　　□ 協議中（協議予定日：　　　年　　月　　日）` in one `<w:t>`.
+Japanese forms print their checkboxes as text — `□ 合意済み　　□ 協議中（協議予定日：　　　年　　月　　日）` (or `☐` `U+2610`) in one `<w:t>`.
 A slot of kind `checkbox_text` (`{"slot_id": …, "table": 0, "row": 10, "col": 2, "kind": "checkbox_text"}` for Word,
 `"sheet"` + `"cell"` for Excel, `"page"` + `"rect"` for PDF — unmarked discovery proposes such cells too) is a choice
 among exactly the printed options. The value names the option (`☑ 合意済み` / `■ 合意済み` / `合意済み` → `合意済み`) and
-the writer replaces **only that option's □** — in Word / Excel the three UTF-8 bytes `E2 96 A1` become `E2 96 A0` (same
-length; `&#9633;` → `&#9632;` when the file uses character references), so the unselected □, the full-width spaces and
-the printed note stay byte-identical. The verifier puts only the approved `■` back to `□` before the skeleton and
+the writer replaces **only that option's □ / ☐** — in Word / Excel the three UTF-8 bytes `E2 96 A1` (`□`) or `E2 98 90` (`☐`) become `E2 96 A0` (`■`, same
+length; `&#9633;` / `&#9744;` → `&#9632;` when the file uses character references), so the unselected □ / ☐, the full-width spaces and
+the printed note stay byte-identical. The verifier puts only the approved `■` back to its original `□` / `☐` before the skeleton and
 boilerplate comparison: any other change in the cell fails **XML-03** and **TEXT-01**, **TEXT-02** requires `■` exactly
 on the approved option, **CON-03** enforces the printed options and `exclusive` (at most one `■`), and **GRD-01** requires
 a memo quote that affirms the option. An option listed in `requires_human_if_selected` — by default every option whose
 printed note asks for more input, such as 協議中 with its blank 協議予定日 — is never ticked by the AI (the field becomes
 `needs_human_input` with a suggestion); a reviewer may tick it. An Excel shared string used by more than one cell is
-refused, because ticking it would tick every cell that shares it.
+refused, because ticking it would tick every cell that shares it. Word `<w14:checkbox>` controls and Wingdings symbol
+fonts are not supported and are refused.
 
 ### The grant portal + Claude in Chrome + Claude Code: one sentence
 
@@ -433,9 +434,9 @@ with `--set SLOT=VALUE`.
 ## Verified on real machines (2026-11-03（火）)
 
 * **Claude Code CLI → MCP.** In a live Claude Code session (`claude-hackathon.cmd`), all five tools of the `.mcp.json`
-  server answered: `form_guard_list_demos` 5 demos, `form_guard_scan` 8 slots (form1), `form_guard_discover_blank_cells`
-  11 candidates (form4: 7 applicant, 4 office-only), `form_guard_fill` a `PASS` draft with its `review_url`, and
-  `form_guard_verify` `PASS` 21/21 + VIS-01. `GET /api/runs/<run_id>` then opened that exact draft (same SHA-256) in the
+  server answered: `form_guard_list_demos` 6 demos (incl. fixed PDF), `form_guard_scan` 8 slots (form1), `form_guard_discover_blank_cells`
+  11 candidates on form4 (7 applicant, 4 office-only) and 19 ruled boxes on form6 (7 applicant incl. `□ 合意済み　□ 協議中`, 2 office-only locked), `form_guard_fill` `PASS` drafts with their `review_url` (`form6` run `20261103-110647-a585b1`, `filled_sha256: dbb27d227ac7cc102aacecbc2cba5ce87e96034191878c2d0e169d2a3e3d1678`), and
+  `form_guard_verify` `PASS` 21/21 + VIS-01 (0 px drift). `GET /api/runs/<run_id>` then opened those exact drafts (same SHA-256) in the
   web UI without any AI regeneration.
 * **Microsoft Word 16.0 & Excel 16.0 (COM).** The blank and filled copies of all five forms opened with 0 warnings, kept
   their page counts (1 → 1 page for form1, form2, form4), exported to PDF, and recalculated the formulas to the expected
@@ -693,13 +694,13 @@ python -m form_guard.cli --form samples/blank_forms/form6_study_group_grant.pdf 
   描いて、**指定枠の外で変わった画素数**を数えます（form6 は 0 px）。デモ実行は `PASS` 21/21（令和8年11月3日（火）・
   税込で48万円 → 480,000円・■ 合意済み）。記入済み PDF は Microsoft Edge の PDF ビューアー（PDFium）でも表示を確認しました。
 
-**□ → ■ チェック（Word・Excel・PDF）**：`□ 合意済み　　□ 協議中（協議予定日：　　　年　　月　　日）` のように文字で印刷された
-チェック欄は、`"kind": "checkbox_text"` の欄（または空欄発見の候補）として扱い、選んだ選択肢の □ だけを ■ に置き換えます
-（UTF-8 の `E2 96 A1` → `E2 96 A0`、同じ長さ）。`☑ 合意済み`・`■ 合意済み` などの入力は選択肢名 `合意済み` に正規化します。
-検査では承認した選択肢の ■ だけを □ に戻してからバイト単位で比較するので、選ばなかった □ や注記の文字が 1 つでも変わると
+**□ / ☐ → ■ チェック（Word・Excel・PDF）**：`□ 合意済み　　□ 協議中（協議予定日：　　　年　　月　　日）`（または `☐` `U+2610`）のように文字で印刷された
+チェック欄は、`"kind": "checkbox_text"` の欄（または空欄発見の候補）として扱い、選んだ選択肢の □ / ☐ だけを ■ に置き換えます
+（UTF-8 の `E2 96 A1` / `E2 98 90` → `E2 96 A0`、同じ長さ）。`☑ 合意済み`・`■ 合意済み` などの入力は選択肢名 `合意済み` に正規化します。
+検査では承認した選択肢の ■ だけを元の □ / ☐ に戻してからバイト単位で比較するので、選ばなかった □ / ☐ や注記の文字が 1 つでも変わると
 XML-03・TEXT-01 が不合格、■ の位置が承認値と違えば TEXT-02、■ が 2 つ以上なら CON-03、引用が選択肢を肯定していなければ
 GRD-01 が不合格になります。協議中のように追記（協議予定日）が必要な選択肢（`requires_human_if_selected`）は AI が選ばず、
-人の入力待ち（needs_human_input）として人に回します。
+人の入力待ち（needs_human_input）として人に回します。複数セルで共有された Excel の共有文字列や、Word の `<w14:checkbox>`・Wingdings 記号は対象外として拒否します。
 
 ### 公募ポータル＋Claude in Chrome＋Claude Code（一言で）
 
@@ -746,9 +747,9 @@ Web 画面の承認へ引き継ぎます）・`form_guard_verify` の 5 ツー�
 ### 実機での検証（2026-11-03（火））
 
 - **Claude Code CLI → MCP**：ハッカソン用 CLI（`claude-hackathon.cmd`）で起動した Claude Code から、`.mcp.json` の 5 ツールを
-  すべて実行しました（`form_guard_list_demos` はデモ 5 件、`form_guard_scan` は form1 で 8 欄、`form_guard_discover_blank_cells` は
-  form4 で候補 11（申請者 7・事務局 4）、`form_guard_fill` は `PASS` の下書きと `review_url`、`form_guard_verify` は `PASS` 21/21 ＋
-  VIS-01）。`GET /api/runs/<run_id>` で、同じ SHA-256 の下書きを AI で作り直さずに Web 画面へ読み込みました。
+  すべて実行しました（`form_guard_list_demos` はデモ 6 件〔固定PDFを含む〕、`form_guard_scan` は form1 で 8 欄、`form_guard_discover_blank_cells` は
+  form4 で候補 11（申請者 7・事務局 4）および固定PDFの form6 で 2 表 19 枠（申請者 7 枠〔`□ 合意済み　□ 協議中` を含む〕・事務局 2 枠ロック）、`form_guard_fill` は form1 および form6（run `20261103-110647-a585b1`、`filled_sha256: dbb27d227ac7cc102aacecbc2cba5ce87e96034191878c2d0e169d2a3e3d1678`）で `PASS` の下書きと `review_url`、`form_guard_verify` は `PASS` 21/21 ＋
+  VIS-01〔0 px〕）。`GET /api/runs/<run_id>` で、同じ SHA-256 の下書きを AI で作り直さずに Web 画面へ読み込みました。
 - **Microsoft Word 16.0・Excel 16.0（COM）**：5 様式の白紙と記入済みを実機で開き、警告 0、ページ数不変（form1・form2・form4 は
   1 ページ → 1 ページ）、PDF への出力、計算式の再計算が期待値と一致（form3 の `COUNTIF` が 3・1・1、form5 の `=SUM(E13:E15)` が 17）。
 
