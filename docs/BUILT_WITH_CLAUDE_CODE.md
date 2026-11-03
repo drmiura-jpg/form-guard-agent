@@ -2,9 +2,10 @@
 
 Form-Guard Agent was written from scratch during **Built with Claude: Japan 2026** (development started Monday,
 2026-11-02 / 2026-11-02（月）) with **Claude Code** running `claude-opus-5-5`: the application code, the tests, the
-generators of the fictional sample forms and these documents. This page explains which Claude Code features ship with
-the repository, why each mechanism was chosen, and how the running application divides its work between three Claude
-models. [日本語 ↓](#日本語)
+generators of the fictional sample forms and these documents.
+
+This page explains which Claude Code features ship with the repository, why each mechanism was chosen, and how the
+running application divides its work between three Claude models. [日本語 ↓](#日本語)
 
 ## 1. The Claude Code extensibility suite in this repository
 
@@ -15,24 +16,22 @@ models. [日本語 ↓](#日本語)
 | **Hooks** (two-stage) | `.claude/settings.json` → `scripts/hook_guard.py` — `PreToolUse` on `Write\|Edit\|MultiEdit\|NotebookEdit\|Bash\|PowerShell`, `PostToolUse` on `Write\|Edit\|MultiEdit` | **Before** a tool runs, `PreToolUse` refuses (exit code 2 + `permissionDecision: "deny"`) any write, copy-over, move or delete of `samples/blank_forms/*.docx\|*.xlsx\|*.pdf` (redirection, cp/mv/rm, Set-Content, Copy-Item, sed -i, inline python / node / .NET writes …) — including deleting, moving or wildcard-removing the `samples/blank_forms` folder itself or a folder above it (`rm -rf samples/blank_forms`, `Remove-Item -LiteralPath samples/blank_forms -Recurse`, `rm samples/blank_forms/*`); only the real generator command (`python -m form_guard.cli --generate-samples`, never a flag inside a `# comment`) is exempt — and any write whose new text (`content`, `new_string`, `edits`, `new_source`) carries an Anthropic API key, a literal `ANTHROPIC_API_KEY = "sk-…"`, a personal user-profile path or an e-mail address outside the reserved example domains — so nothing reaches the disk. **After** a write, `PostToolUse` runs `py_compile` and an import smoke test of the edited module (< 1.8 s), validates JSON and re-scans the file; a finding goes back to Claude as `decision: "block"`. | A prompt can be ignored, a hook cannot: the blank templates are the "before" of every proof, and secrets must never be written in the first place. The commands — `python scripts/hook_guard.py pre-tool-use` / `post-tool-use` — contain no `$`, `%` or backtick, so they run identically in Git Bash, PowerShell, cmd, macOS and Linux; `CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR=1` keeps Claude at the project root so the relative path always resolves. Only a human can override the template guard (`FORM_GUARD_ALLOW_TEMPLATE_WRITE=1` in Claude Code's own environment); the git-ignored `.env` is the one place a key may go. No `bypassPermissions` anywhere. |
 | **MCP server** | `.mcp.json` → `python -m form_guard.mcp_server` (`form_guard/mcp_server.py`) | Five tools over stdio JSON-RPC 2.0: `form_guard_list_demos` (all six fictional demos: marked, unmarked and the fixed PDF), `form_guard_scan`, `form_guard_discover_blank_cells`, `form_guard_fill`, `form_guard_verify` (+ VIS-01), each with a full JSON Schema `inputSchema`. Newline-delimited and Content-Length framed messages; no dependencies (the official `mcp` SDK can be used with `--fastmcp`). File descriptor 1 is pointed at stderr while the server runs and every message is UTF-8 bytes, so neither a stray print nor a cp932 console can corrupt the stream. | Claude Code (or any MCP client) calls the deterministic engine directly and gets structured results. `form_guard_fill` only writes an **unapproved draft** under `output/mcp_runs/` (never inside `samples/`, never over a blank form), with `approval_status: UNAPPROVED_DRAFT_REQUIRES_HUMAN_SIGN_OFF` in the result, in `APPROVAL_STATUS.json` and in `audit_log.json` — not stamped into the document, which would break the structural proof. Its `review_url` (`http://127.0.0.1:8000/?run_id=…`, via `web_handoff.json`) opens that exact draft in the web app for the named reviewer's sign-off. Reviewer-entered values cannot be sent through MCP, office-only cells can be neither confirmed nor designated, `mode` defaults to `demo`, and paths must stay inside the project (never a `.env*`, `.git`, `.ssh` or `.claude-hackathon` component). |
 
-The web UI makes the suite inspectable without opening an editor: the tab **Claude Code 連携 · Architecture**
-(`GET /api/claude-suite`, `form_guard/claude_suite.py`) reads these files at request time — skill and subagent front
-matter (with each subagent's model and tools), each hook stage with the checks found in `scripts/hook_guard.py`, the
-permission denials, the MCP server registration and its tools — and shows how they work together, next to this run's
-per-field model routing, the routing policy and the measured workflow numbers of section 3.
+The web UI makes the suite inspectable without opening an editor:
+- The tab **Claude Code 連携 · Architecture** (`GET /api/claude-suite`, `form_guard/claude_suite.py`) reads these files at request time — skill and subagent front matter (with each subagent's model and tools), each hook stage with the checks found in `scripts/hook_guard.py`, the permission denials, the MCP server registration and its tools.
+- It shows how they work together, next to this run's per-field model routing, the routing policy and the measured workflow numbers of section 3.
 
 A typical Claude Code session with these assets:
 
-1. *"What does this form need?"* → skill `form-scan` (MCP `form_guard_list_demos`, `form_guard_scan`, or
-   `form_guard_discover_blank_cells` for an unmarked form). The **user** confirms which empty cells to fill.
-2. *"Fill it from my notes."* → subagent `memo-extractor` reads the memo blind, `field-mapper` proposes values under the
-   printed rules; skill `surgical-fill` / `form-fill-verify` runs the pipeline (MCP `form_guard_fill` → unapproved
-   draft).
-3. *"Check it."* → subagent `structure-auditor` (fast) or `form-auditor` (adversarial) re-verifies the draft (MCP
-   `form_guard_verify`, skill `structural-audit` / `visual-diff-audit`) and lists what the human must confirm.
-   Throughout, the `PreToolUse` hook keeps the blank templates and the repository's hygiene intact.
-4. A named human reviewer signs off in the web app (`python -m form_guard.cli --serve`). Nothing in Claude Code can
-   approve a file.
+- **1. *"What does this form need?"*** → skill `form-scan` (MCP `form_guard_list_demos`, `form_guard_scan`, or
+  `form_guard_discover_blank_cells` for an unmarked form). The **user** confirms which empty cells to fill.
+- **2. *"Fill it from my notes."*** → subagent `memo-extractor` reads the memo blind, `field-mapper` proposes values under the
+  printed rules; skill `surgical-fill` / `form-fill-verify` runs the pipeline (MCP `form_guard_fill` → unapproved
+  draft).
+- **3. *"Check it."*** → subagent `structure-auditor` (fast) or `form-auditor` (adversarial) re-verifies the draft (MCP
+  `form_guard_verify`, skill `structural-audit` / `visual-diff-audit`) and lists what the human must confirm.
+  Throughout, the `PreToolUse` hook keeps the blank templates and the repository's hygiene intact.
+- **4. Human sign-off:** A named human reviewer signs off in the web app (`python -m form_guard.cli --serve`). Nothing in Claude Code can
+  approve a file.
 
 ## 2. Multi-model routing inside the application
 
@@ -52,46 +51,27 @@ A Haiku or Sonnet draft that fails grounding or a printed rule is **escalated**:
 field, the tier it came from and the verifier's reason. `--model-tier opus|sonnet|haiku` (or `--model-tiering off`,
 which means one model — Opus — for every call) disables routing; `--model` or `FORM_GUARD_MODEL` pins any model id.
 
-**Model availability fallback.** A model id that does not exist and one an API organisation cannot use both return
-`404 not_found_error`. `ClaudeEngine` then retries along `MODEL_FALLBACK_CHAIN` — `claude-opus-5-5` → `claude-opus-5`
-→ `claude-opus-4-6`, `claude-sonnet-5` → `claude-sonnet-4-5`, `claude-haiku-4-5-20251001` → `claude-haiku-4-5` —
-rebuilding each request from the fallback model's capabilities. The
-first id that answers serves the rest of the run, and the audit log keeps both: `usage.model_fallbacks` (tier,
-requested id, unavailable ids, the id used), `usage.calls[].attempted_models`, and a `404 fallback` note in each
-field's `routed_model` reason.
+**Model availability fallback.**
+- A model id that does not exist and one an API organisation cannot use both return `404 not_found_error`. `ClaudeEngine` then retries along `MODEL_FALLBACK_CHAIN` — `claude-opus-5-5` → `claude-opus-5` → `claude-opus-4-6`, `claude-sonnet-5` → `claude-sonnet-4-5`, `claude-haiku-4-5-20251001` → `claude-haiku-4-5` — rebuilding each request from the fallback model's capabilities.
+- The first id that answers serves the rest of the run, and the audit log keeps both: `usage.model_fallbacks` (tier, requested id, unavailable ids, the id used), `usage.calls[].attempted_models`, and a `404 fallback` note in each field's `routed_model` reason.
 
-Request parameters are adapted per model via `model_capabilities()`, an explicit table of known model ids
-(`KNOWN_MODEL_VERSIONS`: `opus` / `sonnet` / `haiku` 4.5, 4.6, 4.7, 5, 5.5 and `fable` 5 / 5.1): adaptive thinking
-(`thinking={"type": "adaptive", "display": "summarized"}`) and `output_config.effort` are sent only to the table's
-4.6-and-later entries; legacy models such as `claude-haiku-4-5` — the Haiku tier `claude-haiku-4-5-20251001`
-included — get a plain structured-output request, and an
-unrecognised family (`claude-unrecognized-5-5`) or future version (`claude-opus-99-9`) gets no capability flags at all.
-Effort is clamped to a level the model supports, and the server-side refusal fallback is only requested where the
-table says it exists. Request formatting is verified against mock/transport tests; live API availability and
-model-specific features depend on the caller's Anthropic account tier. The audit log records which model handled which
-field and why, every served model id, per-call stop reasons and tokens, and the thinking summaries the API returned
-(labelled "API-returned thinking summary" — a summary written by the API, not the model's raw reasoning). The HTML
-report shows the routing table.
+Request parameters are adapted per model via `model_capabilities()`, an explicit table of known model ids (`KNOWN_MODEL_VERSIONS`: `opus` / `sonnet` / `haiku` 4.5, 4.6, 4.7, 5, 5.5 and `fable` 5 / 5.1):
+- Adaptive thinking (`thinking={"type": "adaptive", "display": "summarized"}`) and `output_config.effort` are sent only to the table's 4.6-and-later entries; legacy models such as `claude-haiku-4-5` — the Haiku tier `claude-haiku-4-5-20251001` included — get a plain structured-output request, and an unrecognised family (`claude-unrecognized-5-5`) or future version (`claude-opus-99-9`) gets no capability flags at all.
+- Effort is clamped to a level the model supports, and the server-side refusal fallback is only requested where the table says it exists. Request formatting is verified against mock/transport tests; live API availability and model-specific features depend on the caller's Anthropic account tier.
+- The audit log records which model handled which field and why, every served model id, per-call stop reasons and tokens, and the thinking summaries the API returned (labelled "API-returned thinking summary" — a summary written by the API, not the model's raw reasoning). The HTML report shows the routing table.
 
-Every `FieldMapping` carries `routed_model` and `route_reason`. In live mode `routed_model` is the model id the API
-actually served — `claude-haiku-4-5-20251001` for a date, `claude-sonnet-5 → claude-opus-5-5 (revision)` for a field
-the validator sent back — and a server-side fallback to another model is recorded as
-`(served by …; requested …)`. Offline, the deterministic engine records the plan live auto mode would follow
-(`offline (claude-haiku-4-5-20251001 in live auto)`, routing groups marked `planned_in_live_auto: True`), so a judge without an
-API key still sees the routing design while the UI, the report and the CLI never present a plan as a call. The web UI
-shows a model badge and the reason on every field (Fields & sources, with the API-returned thinking summary of the
-call that handled the field when there is one) and the whole run in the Claude Code tab; the top-bar **Model tier**
-selector (`Auto: Haiku / Sonnet / Opus`, `Opus 5.5 only`, `Sonnet 5 only`, `Haiku 4.5 only`) is sent with every run.
-A live run that fails part-way in `auto` mode falls back to the offline engine and keeps the calls that were made:
-`usage.live_attempt_failed`, the call list and the token counts stay in the audit log, and the UI and the report say
-that live API calls happened before the fallback instead of "no model was called".
+Every `FieldMapping` carries `routed_model` and `route_reason`:
+- In live mode `routed_model` is the model id the API actually served — `claude-haiku-4-5-20251001` for a date, `claude-sonnet-5 → claude-opus-5-5 (revision)` for a field the validator sent back — and a server-side fallback to another model is recorded as `(served by …; requested …)`.
+- Offline, the deterministic engine records the plan live auto mode would follow (`offline (claude-haiku-4-5-20251001 in live auto)`, routing groups marked `planned_in_live_auto: True`), so a judge without an API key still sees the routing design while the UI, the report and the CLI never present a plan as a call.
+- The web UI shows a model badge and the reason on every field (Fields & sources, with the API-returned thinking summary of the call that handled the field when there is one) and the whole run in the Claude Code tab; the top-bar **Model tier** selector (`Auto: Haiku / Sonnet / Opus`, `Opus 5.5 only`, `Sonnet 5 only`, `Haiku 4.5 only`) is sent with every run.
+- A live run that fails part-way in `auto` mode falls back to the offline engine and keeps the calls that were made: `usage.live_attempt_failed`, the call list and the token counts stay in the audit log, and the UI and the report say that live API calls happened before the fallback instead of "no model was called".
 
 ## 3. Measured workflow comparison
 
 Measured on 2026-11-02（月） on Windows 11 with Python 3.13, using the offline demo engine (no network; live Claude
-calls add API latency that is not included). The left-hand columns count the work a person would do by hand for each
-fictional form — they are counted from the files by the same script, **not** a timed study of a person. The
-Form-Guard columns are measured. Reproduce with `python docs/measure_workflow.py`.
+calls add API latency that is not included):
+- The left-hand columns count the work a person would do by hand for each fictional form — they are counted from the files by the same script, **not** a timed study of a person.
+- The Form-Guard columns are measured. Reproduce with `python docs/measure_workflow.py`.
 
 | Form | Fields to set up by hand | Characters to transcribe | Printed elements to re-check line by line | Form-Guard wall-clock (measured) | Automated checks | Left for human sign-off |
 |---|---|---|---|---|---|---|
@@ -101,11 +81,9 @@ Form-Guard columns are measured. Reproduce with `python docs/measure_workflow.py
 | form4 `form4_unmarked_blank.docx` | 7 (locate 11 empty cells, decide office vs applicant) | 113 | 503 XML tags · 38 printed text blocks · 24 merged cells/ranges · 10 border definitions · 18 package parts | 120 ms | 21/21 (PASS) | 9 checklist items |
 | form5 `form5_unmarked_blank.xlsx` | 5 (locate 6 empty cells, decide office vs applicant) | 52 | 282 XML tags · 30 printed text blocks · 34 merged cells/ranges · 269 border definitions · 9 package parts | 154 ms | 21/21 (PASS) | 7 checklist items |
 
-Across the five forms, Form-Guard wrote 40 values (844 characters) into 41 designated fields and compared 2,119 XML
-tags, 171 printed text blocks, 124 merged cells/ranges and 650 border definitions, in about 0.1–0.25 s per form
-(wall-clock varies with machine load; the counted columns do not). What is left for the person is the 51-item sign-off
-checklist (each value next to its verbatim source) and the one fact the memo does not contain (法人番号 in form2),
-which Form-Guard leaves empty instead of guessing. The same numbers are measured live in the web UI's Claude Code tab.
+Across the five forms:
+- Form-Guard wrote 40 values (844 characters) into 41 designated fields and compared 2,119 XML tags, 171 printed text blocks, 124 merged cells/ranges and 650 border definitions, in about 0.1–0.25 s per form (wall-clock varies with machine load; the counted columns do not).
+- What is left for the person is the 51-item sign-off checklist (each value next to its verbatim source) and the one fact the memo does not contain (法人番号 in form2), which Form-Guard leaves empty instead of guessing. The same numbers are measured live in the web UI's Claude Code tab.
 
 ## 4. Safety by design
 
@@ -165,24 +143,24 @@ which Form-Guard leaves empty instead of guessing. The same numbers are measured
 
 The git history shows the iterations, each one done with Claude Code and each one adding regression tests:
 
-1. **Core pipeline** — scanner, surgical writer, 21-check verifier, visual diff, web app with the HITL gate.
-2. **Audit fixes (R1)** — strict grounding, condition-safe condensation, approval bound to the verified bytes; one
-   test per finding that fails on the pre-fix code.
-3. **Phase 2** — the Claude Code suite (skills, subagents, hook, MCP server), multi-model routing, unmarked blank-form
-   discovery and strict checks of coordinate-designated cells.
-4. **Phase 3 (judging-criteria polish)** — MIT licence, interactive discovery of unmarked forms in the web UI,
-   `routed_model` / `route_reason` on every field, the Claude Code tab (`GET /api/claude-suite`), the Japanese-first
-   bilingual UI with the judge walkthrough, and this documentation.
-5. **Phase 2 integration** — the two-stage hook guard (`scripts/hook_guard.py`), four read-only subagents and five
-   skills, the fifth MCP tool `form_guard_list_demos` with fd-level stdout isolation and UTF-8 stdio, the 404 model
-   fallback chain and recorded escalations, all five demos in the web UI with one-click discovery + auto-preview, and
-   the archive gate against path traversal, ZIP bombs and XXE.
-6. **Phase 4 (fixed PDF forms, text checkboxes `□` → `■`, and the grant portal)** — `form_guard/pdf_support.py` for
-   fixed PDF forms (`form6_study_group_grant.pdf`), rebuilding ruled boxes, locking office-only boxes, writing values
-   and ticking text checkboxes (`□` → `■`, with `requires_human_if_selected` for options that require a date or manual
-   entry) via a pure-Python PDF incremental update (増分更新) that leaves the blank PDF as an exact byte prefix and
-   verifies all 21 checks + `VIS-01`; plus the local grant/study-group portal (`/portal` and `GET /api/portal/forms`)
-   and the `portal-form-fill` skill connecting **Claude in Chrome**, Claude Code and MCP.
+- **1. Core pipeline** — scanner, surgical writer, 21-check verifier, visual diff, web app with the HITL gate.
+- **2. Audit fixes (R1)** — strict grounding, condition-safe condensation, approval bound to the verified bytes; one
+  test per finding that fails on the pre-fix code.
+- **3. Phase 2** — the Claude Code suite (skills, subagents, hook, MCP server), multi-model routing, unmarked blank-form
+  discovery and strict checks of coordinate-designated cells.
+- **4. Phase 3 (judging-criteria polish)** — MIT licence, interactive discovery of unmarked forms in the web UI,
+  `routed_model` / `route_reason` on every field, the Claude Code tab (`GET /api/claude-suite`), the Japanese-first
+  bilingual UI with the judge walkthrough, and this documentation.
+- **5. Phase 2 integration** — the two-stage hook guard (`scripts/hook_guard.py`), four read-only subagents and five
+  skills, the fifth MCP tool `form_guard_list_demos` with fd-level stdout isolation and UTF-8 stdio, the 404 model
+  fallback chain and recorded escalations, all five demos in the web UI with one-click discovery + auto-preview, and
+  the archive gate against path traversal, ZIP bombs and XXE.
+- **6. Phase 4 (fixed PDF forms, text checkboxes `□` → `■`, and the grant portal)** — `form_guard/pdf_support.py` for
+  fixed PDF forms (`form6_study_group_grant.pdf`), rebuilding ruled boxes, locking office-only boxes, writing values
+  and ticking text checkboxes (`□` → `■`, with `requires_human_if_selected` for options that require a date or manual
+  entry) via a pure-Python PDF incremental update (増分更新) that leaves the blank PDF as an exact byte prefix and
+  verifies all 21 checks + `VIS-01`; plus the local grant/study-group portal (`/portal` and `GET /api/portal/forms`)
+  and the `portal-form-fill` skill connecting **Claude in Chrome**, Claude Code and MCP.
 
 The suite covers fake and mock-transport Claude clients (including the 404 fallback chain), tampering attacks, the
 archive gate, the web API's human gate, the MCP server over stdio on a cp932 console, and both hook stages. Claude Code made it practical to add regression tests in every
@@ -207,12 +185,9 @@ five tools:
 `GET /api/runs/<run_id>` — the draft's `review_url` — then loaded the exact same draft (same SHA-256) into the web UI
 without any AI regeneration, re-verified it against the blank form and left it unapproved for the named reviewer.
 
-**Live Microsoft Word 16.0 & Excel 16.0 COM verification.** The blank and filled copies of all five forms (form1–form5)
-were opened through COM automation in real Microsoft Word 16.0 and Excel 16.0: 0 warnings, exact page counts preserved
-(1 page → 1 page for form1, form2 and form4), clean PDF export, and Excel recalculated the formulas to the expected
-values — form3 `D13 =COUNTIF($F$8:$F$12,"良")` → 3, `F13 =COUNTIF($F$8:$F$12,"要注意")` → 1,
-`H13 =COUNTIF($F$8:$F$12,"要是正")` → 1; form5 `E16 =SUM(E13:E15)` → 17. This complements APP-01 (an independent OOXML
-library opens every file) and the built-in previews, which are close to, but not identical with, Word/Excel rendering.
+**Live Microsoft Word 16.0 & Excel 16.0 COM verification.**
+- The blank and filled copies of all five forms (form1–form5) were opened through COM automation in real Microsoft Word 16.0 and Excel 16.0: 0 warnings, exact page counts preserved (1 page → 1 page for form1, form2 and form4), clean PDF export, and Excel recalculated the formulas to the expected values — form3 `D13 =COUNTIF($F$8:$F$12,"良")` → 3, `F13 =COUNTIF($F$8:$F$12,"要注意")` → 1, `H13 =COUNTIF($F$8:$F$12,"要是正")` → 1; form5 `E16 =SUM(E13:E15)` → 17.
+- This complements APP-01 (an independent OOXML library opens every file) and the built-in previews, which are close to, but not identical with, Word/Excel rendering.
 
 The 3-minute Japanese demo video follows [DEMO_VIDEO_SCRIPT_JA.md](DEMO_VIDEO_SCRIPT_JA.md): 175 seconds, one step per
 guided-tour deep link `#tour=1` … `#tour=5` of the web UI.
@@ -258,29 +233,17 @@ Haiku・Sonnet の下書きが根拠確認や印刷されたルールで却下�
 （または「1 つのモデル（Opus）で通す」`--model-tiering off`）で振り分けを止められ、`--model` や `FORM_GUARD_MODEL` で任意の
 モデルを指定できます。
 
-**モデルが使えない場合のフォールバック。** 存在しないモデル ID と、その API 組織で使えないモデル ID は、どちらも
-`404 not_found_error` になります。そのとき `ClaudeEngine` は `MODEL_FALLBACK_CHAIN`（`claude-opus-5-5` → `claude-opus-5` →
-`claude-opus-4-6`、`claude-sonnet-5` → `claude-sonnet-4-5`、`claude-haiku-4-5-20251001` → `claude-haiku-4-5`）に沿って、
-各モデルの機能に合わせたリクエストで再試行します。最初に応答した
-ID がその実行の残りを担当し、監査ログには要求したモデルと実際に応答したモデルの両方（`usage.model_fallbacks`、
-`usage.calls[].attempted_models`、各欄の `routed_model` の注記）が残ります。
-adaptive thinking（`display: "summarized"`）と effort は、`model_capabilities()` の既知モデル表（`KNOWN_MODEL_VERSIONS`：
-`opus`・`sonnet`・`haiku` の 4.5・4.6・4.7・5・5.5 と `fable` 5・5.1）で対応しているモデルにだけ送り、`claude-haiku-4-5`
-などの旧モデル（Haiku の層の `claude-haiku-4-5-20251001` を含む）には送りません。表に無いファミリーや将来のバージョンには、どの機能フラグも付けません。
-モデル別に送信パラメータを切り替えます。確認済みなのはモックによるリクエスト形式で、実APIでの利用可否・対応機能はアカウント権限に依存します。
-どの欄をどのモデルが担当したか（理由つき）、実際に応答したモデル、
-API が返した思考の要約（「API-returned thinking summary」と明記）は監査ログに記録され、HTML レポートにも表示されます。
+**モデルが使えない場合のフォールバック。**
+- 存在しないモデル ID と、その API 組織で使えないモデル ID は、どちらも `404 not_found_error` になります。そのとき `ClaudeEngine` は `MODEL_FALLBACK_CHAIN`（`claude-opus-5-5` → `claude-opus-5` → `claude-opus-4-6`、`claude-sonnet-5` → `claude-sonnet-4-5`、`claude-haiku-4-5-20251001` → `claude-haiku-4-5`）に沿って、各モデルの機能に合わせたリクエストで再試行します。
+- 最初に応答した ID がその実行の残りを担当し、監査ログには要求したモデルと実際に応答したモデルの両方（`usage.model_fallbacks`、`usage.calls[].attempted_models`、各欄の `routed_model` の注記）が残ります。
+- adaptive thinking（`display: "summarized"`）と effort は、`model_capabilities()` の既知モデル表（`KNOWN_MODEL_VERSIONS`：`opus`・`sonnet`・`haiku` の 4.5・4.6・4.7・5・5.5 と `fable` 5・5.1）で対応しているモデルにだけ送り、`claude-haiku-4-5` などの旧モデル（Haiku の層の `claude-haiku-4-5-20251001` を含む）には送りません。表に無いファミリーや将来のバージョンには、どの機能フラグも付けません。
+- モデル別に送信パラメータを切り替えます。確認済みなのはモックによるリクエスト形式で、実APIでの利用可否・対応機能はアカウント権限に依存します。どの欄をどのモデルが担当したか（理由つき）、実際に応答したモデル、API が返した思考の要約（「API-returned thinking summary」と明記）は監査ログに記録され、HTML レポートにも表示されます。
 
-すべての `FieldMapping` に `routed_model` と `route_reason` を記録します。ライブでは API が実際に返したモデル ID
-（日付なら `claude-haiku-4-5-20251001`、検証器に差し戻された欄なら `claude-sonnet-5 → claude-opus-5-5 (revision)`）で、サーバー側の
-フォールバックで別のモデルが応答した場合も `(served by …; requested …)` と残ります。オフラインでは、ライブ auto 時の割り当て
-計画を `offline (claude-haiku-4-5-20251001 in live auto)`（ルーティングには `planned_in_live_auto: True`）として記録するので、API キーの
-無い審査員にも設計が見え、計画を「呼び出した」と表示することはありません。Web 画面では「記入値と根拠」で欄ごとにモデルの
-バッジと理由（その欄を処理した呼び出しの思考の要約があれば併記）を、Claude Code タブで実行全体の割り当てを表示し、右上の
-「モデル」選択（自動：Haiku / Sonnet / Opus、Opus 5.5 のみ、Sonnet 5 のみ、Haiku 4.5 のみ）は毎回の実行に送られます。
-`auto` モードでライブ実行が途中で失敗した場合はオフラインエンジンで続けますが、それまでの呼び出しは残します
-（`usage.live_attempt_failed`、呼び出し一覧とトークン数を監査ログに記録し、画面とレポートでも「モデルは呼び出していない」とは
-表示せず、ライブの API 呼び出しの後に切り替えたことを示します）。
+すべての `FieldMapping` に `routed_model` と `route_reason` を記録します：
+- ライブでは API が実際に返したモデル ID（日付なら `claude-haiku-4-5-20251001`、検証器に差し戻された欄なら `claude-sonnet-5 → claude-opus-5-5 (revision)`）で、サーバー側のフォールバックで別のモデルが応答した場合も `(served by …; requested …)` と残ります。
+- オフラインでは、ライブ auto 時の割り当て計画を `offline (claude-haiku-4-5-20251001 in live auto)`（ルーティングには `planned_in_live_auto: True`）として記録するので、API キーの無い審査員にも設計が見え、計画を「呼び出した」と表示することはありません。
+- Web 画面では「記入値と根拠」で欄ごとにモデルのバッジと理由（その欄を処理した呼び出しの思考の要約があれば併記）を、Claude Code タブで実行全体の割り当てを表示し、右上の「モデル」選択（自動：Haiku / Sonnet / Opus、Opus 5.5 のみ、Sonnet 5 のみ、Haiku 4.5 のみ）は毎回の実行に送られます。
+- `auto` モードでライブ実行が途中で失敗した場合はオフラインエンジンで続けますが、それまでの呼び出しは残します（`usage.live_attempt_failed`、呼び出し一覧とトークン数を監査ログに記録し、画面とレポートでも「モデルは呼び出していない」とは表示せず、ライブの API 呼び出しの後に切り替えたことを示します）。
 
 ### 3. 作業量の比較（計測）
 
@@ -344,21 +307,21 @@ Form-Guard はその欄を推測で埋めません。同じ数値は Web 画面�
 
 git の履歴に、Claude Code で進めた各段階が残っています。どの段階も回帰テストを追加しています。
 
-1. **基本パイプライン** — スキャン、外科的な書き込み、21 項目の検査、見た目の比較、人による承認ゲートつきの Web 画面。
-2. **監査指摘の修正（R1）** — 根拠の厳格化、条件を落とさない要約、検査済みバイト列に結び付けた承認。指摘ごとに、修正前の
-   コードでは失敗するテストを追加。
-3. **Phase 2** — Claude Code 拡張一式（Skills・サブエージェント・フック・MCP サーバー）、モデルの使い分け、マーカーなし白紙
-   様式の空欄発見、座標指定欄の厳格な検査。
-4. **Phase 3（審査基準に沿った仕上げ）** — MIT ライセンス、Web 画面でのマーカーなし様式の対話的な空欄発見、全欄の
-   `routed_model` / `route_reason`、Claude Code タブ（`GET /api/claude-suite`）、日本語を既定とする 2 言語 UI と審査員向け
-   ガイドツアー、このドキュメント。
-5. **Phase 2 の統合** — 2 段のフック（`scripts/hook_guard.py`）、読み取り専用のサブエージェント 4 種とスキル 5 種、5 つ目の
-   MCP ツール `form_guard_list_demos` とファイル記述子レベルの出力分離・UTF-8 の入出力、404 時のモデルフォールバックと
-   引き上げの記録、Web 画面での 5 デモと 1 クリックの空欄発見＋自動プレビュー、パストラバーサル・ZIP 爆弾・XXE を防ぐ関門。
-6. **Phase 4（固定PDF様式・文字型チェックボックス `□` → `■`・公募ポータル連携）** — 固定PDF様式（`form6_study_group_grant.pdf`）
-   の罫線矩形から空欄と事務局欄を検出し、元のPDFバイト列を完全な先頭一致（増分更新 / incremental update）のまま保持して
-   テキストと `□` → `■`（`requires_human_if_selected` 対応）をオーバーレイし、21項目＋`VIS-01` で検証する `pdf_support.py`、
-   および公募ポータル（`/portal`・`GET /api/portal/forms`）と **Claude in Chrome**・Claude Code を結ぶ `portal-form-fill` スキル。
+- **1. 基本パイプライン** — スキャン、外科的な書き込み、21 項目の検査、見た目の比較、人による承認ゲートつきの Web 画面。
+- **2. 監査指摘の修正（R1）** — 根拠の厳格化、条件を落とさない要約、検査済みバイト列に結び付けた承認。指摘ごとに、修正前の
+  コードでは失敗するテストを追加。
+- **3. Phase 2** — Claude Code 拡張一式（Skills・サブエージェント・フック・MCP サーバー）、モデルの使い分け、マーカーなし白紙
+  様式の空欄発見、座標指定欄の厳格な検査。
+- **4. Phase 3（審査基準に沿った仕上げ）** — MIT ライセンス、Web 画面でのマーカーなし様式の対話的な空欄発見、全欄の
+  `routed_model` / `route_reason`、Claude Code タブ（`GET /api/claude-suite`）、日本語を既定とする 2 言語 UI と審査員向け
+  ガイドツアー、このドキュメント。
+- **5. Phase 2 の統合** — 2 段のフック（`scripts/hook_guard.py`）、読み取り専用のサブエージェント 4 種とスキル 5 種、5 つ目の
+  MCP ツール `form_guard_list_demos` とファイル記述子レベルの出力分離・UTF-8 の入出力、404 時のモデルフォールバックと
+  引き上げの記録、Web 画面での 5 デモと 1 クリックの空欄発見＋自動プレビュー、パストラバーサル・ZIP 爆弾・XXE を防ぐ関門。
+- **6. Phase 4（固定PDF様式・文字型チェックボックス `□` → `■`・公募ポータル連携）** — 固定PDF様式（`form6_study_group_grant.pdf`）
+  の罫線矩形から空欄と事務局欄を検出し、元のPDFバイト列を完全な先頭一致（増分更新 / incremental update）のまま保持して
+  テキストと `□` → `■`（`requires_human_if_selected` 対応）をオーバーレイし、21項目＋`VIS-01` で検証する `pdf_support.py`、
+  および公募ポータル（`/portal`・`GET /api/portal/forms`）と **Claude in Chrome**・Claude Code を結ぶ `portal-form-fill` スキル。
 
 テストは、偽の Claude クライアントとモックの通信（404 フォールバックを含む）、改ざん攻撃、ファイルの関門、Web API の承認ゲート、
 cp932 環境での stdio 経由の MCP サーバー、2 段のフックを対象にしています。Claude Code によって、どの段階でも回帰テストを追加し、Phase 3 ではコミット前にヘッドレス
@@ -368,19 +331,15 @@ cp932 環境での stdio 経由の MCP サーバー、2 段のフックを対象
 
 オフラインのテストに加えて、2026-11-03（火）に実際のソフトウェアで次の 2 つを確認しました。
 
-**Claude Code CLI からの MCP 実行。** このリポジトリでハッカソン用 CLI（`claude-hackathon.cmd`）から起動した Claude Code の
-セッションで、`.mcp.json` に登録した `form-guard` サーバーの 5 ツールをすべて呼び出しました。`form_guard_list_demos` はデモ 6 件
-（マーカーあり 3・マーカーなし Word/Excel 2・固定PDF 1）、`form_guard_scan` は form1 で 8 欄、`form_guard_discover_blank_cells` は form4 で候補 11（申請者 7・
-事務局 4）および固定PDFの form6 で 2 表 19 枠（申請者 7 枠〔`□ 合意済み　□ 協議中` を含む〕・事務局 2 枠ロック）、`form_guard_fill` は form1 および form6（run `20261103-110647-a585b1`、`filled_sha256: dbb27d227ac7cc102aacecbc2cba5ce87e96034191878c2d0e169d2a3e3d1678`、`□ 合意済み` → `■ 合意済み`）で `PASS` の未承認下書き（`UNAPPROVED_DRAFT_REQUIRES_HUMAN_SIGN_OFF`）と `review_url`、
-`form_guard_verify` はそれらの下書きで `PASS`（21/21 合格、内蔵描画エンジンでの枠外の画素差分 0 px・はみ出しなし〔差分がある場合のみ VIS-01 を不合格として追加〕・白紙PDF先頭3,742バイト完全一致）を返しました。続けて `review_url` の
-`GET /api/runs/<run_id>` で、同じ SHA-256 の下書きを AI で作り直すことなく Web 画面に読み込み、白紙様式に対して再検査したうえで、
-確認者の承認待ちのまま表示しました。
+**Claude Code CLI からの MCP 実行。**
+- このリポジトリでハッカソン用 CLI（`claude-hackathon.cmd`）から起動した Claude Code のセッションで、`.mcp.json` に登録した `form-guard` サーバーの 5 ツールをすべて呼び出しました。
+- `form_guard_list_demos` はデモ 6 件（マーカーあり 3・マーカーなし Word/Excel 2・固定PDF 1）、`form_guard_scan` は form1 で 8 欄、`form_guard_discover_blank_cells` は form4 で候補 11（申請者 7・事務局 4）および固定PDFの form6 で 2 表 19 枠（申請者 7 枠〔`□ 合意済み　□ 協議中` を含む〕・事務局 2 枠ロック）を返しました。
+- `form_guard_fill` は form1 および form6（run `20261103-110647-a585b1`、`filled_sha256: dbb27d227ac7cc102aacecbc2cba5ce87e96034191878c2d0e169d2a3e3d1678`、`□ 合意済み` → `■ 合意済み`）で `PASS` の未承認下書き（`UNAPPROVED_DRAFT_REQUIRES_HUMAN_SIGN_OFF`）と `review_url`、`form_guard_verify` はそれらの下書きで `PASS`（21/21 合格、内蔵描画エンジンでの枠外の画素差分 0 px・はみ出しなし〔差分がある場合のみ VIS-01 を不合格として追加〕・白紙PDF先頭3,742バイト完全一致）を返しました。
+- 続けて `review_url` の `GET /api/runs/<run_id>` で、同じ SHA-256 の下書きを AI で作り直すことなく Web 画面に読み込み、白紙様式に対して再検査したうえで、確認者の承認待ちのまま表示しました。
 
-**Microsoft Word 16.0・Excel 16.0 での COM 検証。** form1〜form5 の白紙と記入済みを COM 経由で実機の Word 16.0・Excel 16.0 で
-開き、警告 0、ページ数不変（form1・form2・form4 は 1 ページ → 1 ページ）、PDF への出力、計算式の再計算が期待値と一致すること
-（form3：`D13 =COUNTIF($F$8:$F$12,"良")` → 3、`F13 =COUNTIF($F$8:$F$12,"要注意")` → 1、`H13 =COUNTIF($F$8:$F$12,"要是正")` → 1、
-form5：`E16 =SUM(E13:E15)` → 17）を確認しました。独立した OOXML ライブラリで開けることを確かめる APP-01 と、Word/Excel の描画に
-近いものの同一ではない内蔵プレビューを補う確認です。
+**Microsoft Word 16.0・Excel 16.0 での COM 検証。**
+- form1〜form5 の白紙と記入済みを COM 経由で実機の Word 16.0・Excel 16.0 で開き、警告 0、ページ数不変（form1・form2・form4 は 1 ページ → 1 ページ）、PDF への出力、計算式の再計算が期待値と一致すること（form3：`D13 =COUNTIF($F$8:$F$12,"良")` → 3、`F13 =COUNTIF($F$8:$F$12,"要注意")` → 1、`H13 =COUNTIF($F$8:$F$12,"要是正")` → 1、form5：`E16 =SUM(E13:E15)` → 17）を確認しました。
+- 独立した OOXML ライブラリで開けることを確かめる APP-01 と、Word/Excel の描画に近いものの同一ではない内蔵プレビューを補う確認です。
 
 3分のデモ動画（日本語ナレーション・175秒）は [DEMO_VIDEO_SCRIPT_JA.md](DEMO_VIDEO_SCRIPT_JA.md) の台本と絵コンテに沿って、
 Web 画面のガイドツアー `#tour=1`〜`#tour=5` を順にたどります。
