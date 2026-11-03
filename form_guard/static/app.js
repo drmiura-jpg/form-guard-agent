@@ -822,7 +822,7 @@ function captionNode(kind) {
   const r = S.run;
   if (kind === "naive") {
     const n = r.naive_report;
-    return [B("生成AIで作り直した版（再現）", "Naive AI regeneration (simulated)"),
+    return [B("生成AIで作り直した版（失敗を再現した模擬データ）", "Naive AI regeneration (simulated failure reproduction)"),
       h("span", { class: "st st-bad" }, L(`✗ ${n ? n.failed_count : "?"} 項目不合格`, `✗ ${n ? n.failed_count : "?"} checks failed`))];
   }
   if (kind === "blank") return [B("白紙の原本", "Blank original"), h("span", { class: "st st-human" }, L("▭ 指定欄", "▭ designated fields"))];

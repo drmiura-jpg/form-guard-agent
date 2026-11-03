@@ -96,8 +96,8 @@ python -m venv .venv
 .venv\Scripts\activate            # Windows cmd  (PowerShell: .venv\Scripts\Activate.ps1 · macOS/Linux: source .venv/bin/activate)
 pip install -r requirements.txt
 
-python -m form_guard.cli --all-demos     # runs the 3 fictional demos -> output/index.html
-python -m form_guard.cli --serve         # web UI on http://127.0.0.1:8000 (grant portal: /portal)
+python -m form_guard.cli --all-demos     # runs the 3 marked fictional demos -> output/index.html
+python -m form_guard.cli --serve         # web UI on http://127.0.0.1:8000 (all 6 demos + grant portal: /portal)
 pytest -v                                # 250 tests
 ```
 
@@ -581,8 +581,8 @@ Form-Guard Agent は次の流れで、**指定欄だけ**を書き換えます�
 python -m venv .venv
 .venv\Scripts\activate            # Windows cmd（PowerShell は .venv\Scripts\Activate.ps1、macOS/Linux は source .venv/bin/activate）
 pip install -r requirements.txt
-python -m form_guard.cli --all-demos     # 架空デモ3件を実行 → output/index.html
-python -m form_guard.cli --serve         # Web画面 http://127.0.0.1:8000
+python -m form_guard.cli --all-demos     # マーカーあり架空デモ3件を実行 → output/index.html
+python -m form_guard.cli --serve         # Web画面 http://127.0.0.1:8000（全6デモ＋公募ポータル /portal）
 pytest -v
 ```
 
