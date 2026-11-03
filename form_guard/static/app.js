@@ -453,8 +453,8 @@ function showTab(name) {
 
 const TOUR = [
   {
-    ja: "左＝生成AIで様式ごと作り直した版（罫線・結合セルの消失、定型文の言い換え、メモに無い数値）。右＝Form-Guard（指定欄以外のずれ 0 px）。スライダーを左右に動かして重ねて比べてください。",
-    en: "Left: a naive from-scratch regeneration (borders and merged cells lost, legal text paraphrased, numbers the memo never stated). Right: Form-Guard — 0 px drift outside the designated fields. Drag the slider to compare.",
+    ja: "左＝生成AIで様式ごと作り直した版（罫線・結合セルの消失、定型文の言い換え、メモに無い数値）。右＝Form-Guard（外科的差込＝書式はそのまま指定欄の文字だけ差し替え、指定欄以外のずれ 0 px）。スライダーを左右に動かして重ねて比べてください。",
+    en: "Left: a naive from-scratch regeneration (borders and merged cells lost, legal text paraphrased, numbers the memo never stated). Right: Form-Guard — surgical fill (only designated text replaced, 0 px drift outside the fields). Drag the slider to compare.",
     async go() {
       if (!(S.run && S.run.previews && S.run.previews.naive)) await runDemo("form1");
       if (!S.run || !S.run.previews.naive) return;
@@ -464,15 +464,15 @@ const TOUR = [
     links: () => [[L("左右に並べて比較", "Side by side"), () => { S.layout = "split"; renderVisual(); }]],
   },
   {
-    ja: "マーカーも設定ファイルも無い白紙様式から、印字ラベルの横の空欄を自動で発見。申請者欄（✓）は推奨、事務局専用欄（⊘）はロックされ選べません。計算式・結合セルの続きは除外し、確定した欄だけに記入します。",
-    en: "From a blank form with no markers and no slot file, the empty cells next to printed labels are discovered. Applicant cells (✓) are recommended, office-only cells (⊘) are locked, formulas and merged continuations are rejected — and only confirmed cells are filled.",
+    ja: "マーカーも設定ファイルも無い白紙様式から、印字ラベルの横の空欄を4段階で自動発見。申請者欄（✓）は推奨、事務局専用欄（⊘）は自動ロックされ選べません。計算式・結合セルの続きは除外し、人が確定した欄だけに記入します。",
+    en: "From a blank form with no markers and no slot file, the empty cells next to printed labels are discovered in 4 stages. Applicant cells (✓) are recommended, office-only cells (⊘) are locked, formulas and merged continuations are rejected — and only human-confirmed cells are filled.",
     async go() { await discoverDemo("form4"); },
     links: () => [[L("Excel 版（form5）も見る", "Try the Excel form (form5)"), () => discoverDemo("form5")],
       [L("固定PDF版（form6・□→■）も見る", "Try the fixed PDF (form6, □→■)"), () => discoverDemo("form6")]],
   },
   {
-    ja: "黄色の原文「483万6千円」から「4,836,000円」へ。補助金申請額は様式に印刷された上限で 1,612,000円 → 1,000,000円 に再抽出。メモに無い法人番号は推測せず、人の入力待ちです。",
-    en: "From the highlighted memo text 「483万6千円」 to 4,836,000円. The subsidy amount is re-extracted under the printed cap (1,612,000円 → 1,000,000円). The 法人番号 the memo never states is not guessed — it waits for a person.",
+    ja: "黄色の原文「483万6千円」から「4,836,000円」へ。補助金申請額は様式に印刷された上限で 1,612,000円 → 1,000,000円 に再抽出。メモに無い法人番号はAIが勝手に推測せず、人の入力待ちにします。",
+    en: "From the highlighted memo text 「483万6千円」 to 4,836,000円. The subsidy amount is re-extracted under the printed cap (1,612,000円 → 1,000,000円). The 法人番号 the memo never states is never guessed — it waits for a person.",
     async go() {
       if (!(S.run && S.run.demo_id === "form2" && S.run.revision === 0)) await runDemo("form2");
       if (!S.run || S.run.demo_id !== "form2") return;
@@ -484,8 +484,8 @@ const TOUR = [
     ],
   },
   {
-    ja: "欄ごとに Haiku（定型の日付・ID・選択肢）／Sonnet（文章・金額・氏名）／Opus（長文の要約・差し戻し後の自己修正）を割り当てます。開発では Skills・サブエージェント・Hook・MCP が連携します。",
-    en: "Each field goes to Haiku (structured dates, IDs, choices), Sonnet (text, amounts, names) or Opus (long-text condensation, self-correction). In development, Skills, subagents, a hook and an MCP server work together.",
+    ja: "欄ごとに Haiku（定型の日付・ID・選択肢）／Sonnet（文章・金額・氏名）／Opus 5.5（長文の要約・差し戻し後の自己修正）を割り当てます。開発では Skills・Edit/Writeツール無しの4サブエージェント（一部はフック付きBashを使用）・2段Hook（AIが動く前後に働く安全ブレーキ）・5ツールMCP（Claude Codeから直接呼べる専用道具箱）が連携します。",
+    en: "Each field goes to Haiku (structured dates, IDs, choices), Sonnet (text, amounts, names) or Opus 5.5 (long-text condensation, self-correction). In development, Skills, 4 subagents without Edit/Write tools (some use hook-guarded Bash), a 2-stage hook (pre/post-write safety brake) and a 5-tool MCP server (direct Claude Code toolbox) work together.",
     async go() {
       if (!(S.run && (S.run.engine.mode === "live" || S.run.demo_id === "form1"))) await runDemo("form1");
       if (!S.run) return;
@@ -494,8 +494,8 @@ const TOUR = [
     links: () => [[L("「記入値と根拠」で欄ごとのモデルを見る", "Per-field model in Fields & sources"), () => showTab("fields")]],
   },
   {
-    ja: "21項目の決定論的検査、ZIP 内パーツごとの SHA-256、実際に書き換えたバイト範囲。承認は画面上の版と SHA-256 に結び付き、人が全項目を確認するまでダウンロードはサーバー側でロックされます。",
-    en: "21 deterministic checks, per-part SHA-256 and the exact byte ranges rewritten. Approval is bound to the revision on screen and the SHA-256; the download stays locked on the server until a person confirms every item.",
+    ja: "21項目の決定論的検査と VIS-01（白紙と記入後の1ピクセル単位の見た目比較）、ZIP 内パーツごとの SHA-256（改ざん検知用の指紋データ）、実際に書き換えたバイト範囲。承認は画面上の版と SHA-256 に結び付き、人が全項目を確認するまでダウンロードはサーバー側でロックされます。",
+    en: "21 deterministic checks + VIS-01 (pixel-level visual comparison against the blank form), per-part SHA-256 (tamper-evident fingerprint) and the exact byte ranges rewritten. Approval is bound to the revision on screen and the SHA-256; the download stays locked on the server until a person confirms every item.",
     async go() {
       if (!S.run) await runDemo("form1");
       if (!S.run) return;
