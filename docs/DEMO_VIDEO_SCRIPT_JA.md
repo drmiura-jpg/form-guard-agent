@@ -129,7 +129,7 @@ Form-Guard Agent（Built with Claude: Japan 2026 提出作品）のデモ動画�
 |---|---|---|
 | 1:45–1:57 | ガイドツアー「④ Claude 活用・モデル使い分け」をクリック（= `/#tour=4`。Step 3 でデモ4・デモ5を見た直後でも自動でデモ1の実行に切り替わる）。デモ1 の「Claude Code 連携 · Architecture」タブ：「この実行のモデル割り当て」Haiku 4.5 ×3（提出日・研究課題番号・変更種別）／Sonnet 5 ×4／Opus 5.5 ×1（変更理由および予算影響）、その下の「ルーティング方針（--model-tier auto）」の表 | 欄ごとの3段モデル振り分け：Haiku（日付・番号・選択肢）／Sonnet（文章・金額・氏名）／Opus 5.5（adaptive thinking：条件を残す要約・差し戻し後の自己修正）＋ `MODEL_FALLBACK_CHAIN` |
 | 1:57–2:07 | 下へスクロール →「Claude Code 拡張の連携」（5ステップ）→「リポジトリ同梱の Claude Code 資産」。左の「フック（2 段）」カード：PreToolUse（書き込み前：白紙様式の改変・API キー・個人のパス・メールアドレスを阻止）／PostToolUse（書き込み後：`py_compile`・import・JSON を検査） | 2段フック `scripts/hook_guard.py`：書き込み前に阻止（終了コード 2＋deny）・書き込み後に検査 |
-| 2:07–2:15 | 同じ画面で中央と右のカード：「MCP サーバー」の 5 ツール（`form_guard_list_demos`・`form_guard_scan`・`form_guard_discover_blank_cells`・`form_guard_fill`・`form_guard_verify`）、「サブエージェント」4 種（Edit/Write ツールなし）、その下の Skills 6 種 | Skills 6 ・ サブエージェント 4（Edit/Write ツールなし。一部はフック付き Bash を使用） ・ 依存ゼロの MCP 5 ツール |
+| 2:07–2:15 | 同じ画面で中央と右のカード：「MCP サーバー」の 5 ツール（`form_guard_list_demos`・`form_guard_scan`・`form_guard_discover_blank_cells`・`form_guard_fill`・`form_guard_verify`）、「サブエージェント」4 種（Edit/Write ツールなし）、その下の Skills 6 種 | Skills 6 ・ サブエージェント 4（Edit/Write ツールなし。一部はフック付き Bash を使用） ・ MCP 5ツール（追加MCP SDK不要・本体の依存パッケージは必要） |
 | 2:15–2:25 | （任意カット）公募ポータル `/portal` から **Claude in Chrome** または Claude Code（`portal-form-fill`）で固定PDF様式 `form6_study_group_grant.pdf`（`□` → `■` チェック欄つき）や `form1` の `form_guard_fill` を実行し、結果の `review_url`（`/?run_id=…`）をブラウザで開く →「MCP の下書きを読み込みました（未承認）」→「人による最終確認」タブ | 公募ポータル `/portal` ＋ Claude in Chrome ＋ MCP の下書き → `web_handoff.json` → 同じ SHA-256 のまま Web で人が承認 |
 
 **ナレーション**（227字・約5.7字/秒。英語の固有名詞が多く、読み上げは表記より短い）
