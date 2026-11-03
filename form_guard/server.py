@@ -696,14 +696,21 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
 
     # ------------------------------------------------ 架空学術振興ポータル (fictional grant / study-group portal)
     portal_lock = threading.Lock()
-    app.state.portal = None  # built once per process from the blank forms themselves
+    app.state.portal = None
+    app.state.portal_sig = None
 
     def portal_forms() -> list[dict[str, Any]]:
         from .portal import build_portal
 
+        base = samples()
+        bf = base / "blank_forms"
+        sig = tuple(sorted((p.name, p.stat().st_mtime_ns, p.stat().st_size,
+                            hashlib.sha256(p.read_bytes()).hexdigest())
+                           for p in bf.iterdir() if p.is_file())) if bf.is_dir() else ()
         with portal_lock:
-            if app.state.portal is None:
-                app.state.portal = build_portal(samples(), app.state.project_root)
+            if app.state.portal is None or app.state.portal_sig != sig:
+                app.state.portal = build_portal(base, app.state.project_root)
+                app.state.portal_sig = sig
             return app.state.portal
 
     @app.get("/portal", response_class=HTMLResponse)

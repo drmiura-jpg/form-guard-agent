@@ -202,7 +202,7 @@ five tools:
 | `form_guard_scan` | form1 | 8 slots |
 | `form_guard_discover_blank_cells` | form4 · form6 (fixed PDF) | form4: 11 candidates (7 applicant, 4 office-only) · form6: 19 boxes in 2 tables (7 applicant incl. `□ 合意済み　□ 協議中`, 2 office-only locked) |
 | `form_guard_fill` | form1 + memo1 · form6 + memo6 (`mode: demo`) | `PASS` drafts (`UNAPPROVED_DRAFT_REQUIRES_HUMAN_SIGN_OFF`) with their `review_url` (`form6` run `20261103-110647-a585b1`, `filled_sha256: dbb27d227ac7cc102aacecbc2cba5ce87e96034191878c2d0e169d2a3e3d1678`, `□ 合意済み` → `■ 合意済み`) |
-| `form_guard_verify` | blank form1 / form6 vs. those drafts | `PASS` — 21/21 checks + VIS-01 (0 px drift outside slot boxes, blank PDF 3,742 bytes preserved as exact byte prefix) |
+| `form_guard_verify` | blank form1 / form6 vs. those drafts | `PASS` — 21/21 checks passed (0 px drift outside slot boxes in the built-in renderer; VIS-01 is appended as a failed check if drift or overflow occurs; blank PDF 3,742 bytes preserved as exact byte prefix) |
 
 `GET /api/runs/<run_id>` — the draft's `review_url` — then loaded the exact same draft (same SHA-256) into the web UI
 without any AI regeneration, re-verified it against the blank form and left it unapproved for the named reviewer.
@@ -372,7 +372,7 @@ cp932 環境での stdio 経由の MCP サーバー、2 段のフックを対象
 セッションで、`.mcp.json` に登録した `form-guard` サーバーの 5 ツールをすべて呼び出しました。`form_guard_list_demos` はデモ 6 件
 （マーカーあり 3・マーカーなし Word/Excel 2・固定PDF 1）、`form_guard_scan` は form1 で 8 欄、`form_guard_discover_blank_cells` は form4 で候補 11（申請者 7・
 事務局 4）および固定PDFの form6 で 2 表 19 枠（申請者 7 枠〔`□ 合意済み　□ 協議中` を含む〕・事務局 2 枠ロック）、`form_guard_fill` は form1 および form6（run `20261103-110647-a585b1`、`filled_sha256: dbb27d227ac7cc102aacecbc2cba5ce87e96034191878c2d0e169d2a3e3d1678`、`□ 合意済み` → `■ 合意済み`）で `PASS` の未承認下書き（`UNAPPROVED_DRAFT_REQUIRES_HUMAN_SIGN_OFF`）と `review_url`、
-`form_guard_verify` はそれらの下書きで `PASS`（21/21 ＋ VIS-01、枠外の画素差分 0 px・はみ出しなし・白紙PDF先頭3,742バイト完全一致）を返しました。続けて `review_url` の
+`form_guard_verify` はそれらの下書きで `PASS`（21/21 合格、内蔵描画エンジンでの枠外の画素差分 0 px・はみ出しなし〔差分がある場合のみ VIS-01 を不合格として追加〕・白紙PDF先頭3,742バイト完全一致）を返しました。続けて `review_url` の
 `GET /api/runs/<run_id>` で、同じ SHA-256 の下書きを AI で作り直すことなく Web 画面に読み込み、白紙様式に対して再検査したうえで、
 確認者の承認待ちのまま表示しました。
 

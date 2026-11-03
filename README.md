@@ -15,7 +15,7 @@ Built for **Built with Claude: Japan 2026** (development started Monday, 2026-11
 研究設備の利用申請), municipal subsidy and disaster-stockpile counters (補助金の交付申請, 備蓄品の貸出申請) and
 facility safety inspections (月次点検報告) all run on official `.docx` / `.xlsx` templates with strict cell grids,
 merged cells, `vMerge`, formulas, drop-down lists and printed legal boilerplate. One broken border, one paraphrased
-clause or one number the notes never stated means immediate administrative rejection (差し戻し) and another round
+clause or one number the notes never stated can lead to administrative rejection (差し戻し) and another round
 trip. The people who fill these forms every month — research administrators, municipal applicants and back-office
 staff, mostly not engineers — cannot safely use chat AI for it: asked to "fill in this form", it typically
 **re-creates the document**, and a re-created document can split merged cells, lose borders, paraphrase legal text,
@@ -94,7 +94,7 @@ pip install -r requirements.txt
 
 python -m form_guard.cli --all-demos     # runs the 3 fictional demos -> output/index.html
 python -m form_guard.cli --serve         # web UI on http://127.0.0.1:8000 (grant portal: /portal)
-pytest -v                                # 245 tests
+pytest -v                                # 246 tests
 ```
 
 Requires Python 3.10+. Without `ANTHROPIC_API_KEY` everything runs on the deterministic **offline demo engine**, so the
@@ -502,7 +502,7 @@ approves and downloads it like any web run.
   JavaScript / Launch / ImportData actions, embedded files, RichMedia, XFA, PDF 1.5 cross-reference and object streams,
   streams that inflate past 20 MB (100 MB in total — PDF bombs) and files over 30 MB are refused, and every object must
   parse at its cross-reference offset.
-* During development the `PreToolUse` hook makes it impossible for an agent to change a blank template or to write a
+* During development the `PreToolUse` hook blocks an agent before writing from changing a blank template or writing a
   secret, a personal path or a real e-mail address into the repository (see the Claude Code section above).
 * Office-only cells (受付番号・受付印・審査欄・決裁・検印・事務局 …) are never filled: a confirmed discovery is re-checked
   against a fresh deterministic discovery of the actual blank form (coordinates, office-only and `not_a_field`), and a
@@ -544,9 +544,12 @@ tests/            pytest suite (fake + mock-transport Claude, 404 fallback, tamp
 * In `.docx` slots, line breaks in a value are folded into one paragraph, so the run structure stays unchanged.
 * ZIP64 archives and UTF-16 XML parts are not supported (the tool refuses them rather than risk damage).
 * Fixed PDFs: the overlay reuses a Unicode-encoded CID font (`UniJIS-UCS2-H` …) from the page's own resources; a PDF
-  without one is refused, because Form-Guard never changes a page's `/Resources`. Only classic cross-reference tables
-  are read (PDF 1.5 compressed cross-references are refused), AcroForm fields are listed but not filled, and the PDF
-  preview is the built-in renderer — the demo PDF was also checked in Microsoft Edge's PDF viewer.
+  without one (such as PDFs exported with `Identity-H` glyph-ID fonts by Word/Acrobat, or scanned image-only PDFs
+  requiring OCR) is refused or finds no boxes, because Form-Guard never changes a page's `/Resources`. Only classic
+  cross-reference tables are read (PDF 1.5 compressed cross-references are refused), pages with `/CropBox != /MediaBox`,
+  `/Rotate != 0` or clipping operators (`W` / `W*`) are refused, AcroForm fields are listed (and excluded from overlay)
+  but not filled, and the PDF preview is the built-in renderer — the demo PDF was also checked in Microsoft Edge's PDF
+  viewer.
 
 License: MIT (see [LICENSE](LICENSE)).
 
@@ -559,8 +562,8 @@ License: MIT (see [LICENSE](LICENSE)).
 
 **日本の職場の具体的な困りごと**：大学・研究機関の研究事務（共同研究の計画変更届、研究設備の利用申請）、自治体の補助金や
 防災備蓄品の窓口、施設の安全点検では、罫線・結合セル・`vMerge`・計算式・プルダウン・印刷された定型文を持つ公式の
-`.docx` / `.xlsx` 様式を使います。罫線が1本崩れる、文言が1つ言い換わる、メモに無い数字が入る——それだけで差し戻しになり、
-やり直しが発生します。毎月これらに記入しているのは、多くがエンジニアではない研究事務・申請者・バックオフィスの担当者です。
+`.docx` / `.xlsx` 様式を使います。罫線が1本崩れる、文言が1つ言い換わる、メモに無い数字が入るといった不備は差し戻しや
+やり直しの原因になります。毎月これらに記入しているのは、多くがエンジニアではない研究事務・申請者・バックオフィスの担当者です。
 生成AIのチャットは多くの場合、様式ごと作り直すため、罫線や文言が変わったり根拠の無い数字が入ったりすることがあり、
 何が変わったのか誰にも分からないので、安全に使えませんでした。
 
@@ -775,7 +778,6 @@ Web 画面の承認へ引き継ぎます）・`form_guard_verify` の 5 ツー�
 - 実在の個人情報はアップロードしないでください。アップロードは 15 MB までで、ZIP のパストラバーサル、2,000 を超えるエントリ、
   展開後 100 MB 超や極端な圧縮率（ZIP 爆弾）、XML の DTD・実体宣言（XXE）は、ファイルを解析する前に拒否します。PDF は、暗号化・
   JavaScript などの動作・埋め込みファイル・XFA・圧縮された相互参照・展開しすぎるストリーム（PDF 爆弾）を拒否します。
-- 固定PDFの重ね書きは、ページ自身の Unicode CID フォント（UniJIS-UCS2-H など）を使います。それが無い PDF は、ページの
-  `/Resources` を変えないために拒否します。
+- 固定PDFの重ね書きは、ページ自身の Unicode CID フォント（UniJIS-UCS2-H など）を使います。それが無い PDF（Word や Acrobat 等が出力する `Identity-H` 埋め込みフォントの PDF や、OCR が必要なスキャン画像のみの PDF を含む）は、ページの `/Resources` を変えないために書き込み前に拒否（または空欄候補なしと判定）します。また、圧縮された相互参照（PDF 1.5 xref stream）や `/CropBox != /MediaBox`・`/Rotate != 0`・クリッピング（`W` / `W*`）を含むページも安全のため対象外とし、AcroForm フィールドは検出・保護のみで書き込みません。
 
 ライセンス：MIT（[LICENSE](LICENSE) を参照）。

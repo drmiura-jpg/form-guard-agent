@@ -144,8 +144,19 @@ def id_supported(value: str, evidence: str, digits_only: bool = False) -> bool:
     return False
 
 
-_NEGATED_AFTER = re.compile(r"\s*(?:以外|(?:で|では|じゃ)?(?:は)?(?:なく|ない|無く|無い|ありません|ございません))")
+_NEGATED_AFTER = re.compile(r"\s*(?:以外|(?:で|では|じゃ)?(?:は)?(?:なく|ない|無く|無い|ありません|ございません|ず|ぬ)|未|非|不)")
+_NEGATED_BEFORE = re.compile(r"(?:未|非|不)\s*$")
 _JUDGEMENT_BEFORE = re.compile(r"(?:判定|結果|評価|区分|選択|該当)\s*(?:は|を|が|[:：])?\s*$")
+
+
+def _expand_span_clause(memo: str, start: int, end: int) -> str:
+    """Expand a located span to its containing line/sentence so trailing or leading negation around a partial quote is visible."""
+    s, e = start, end
+    while s > 0 and memo[s - 1] not in "\n。！？":
+        s -= 1
+    while e < len(memo) and memo[e] not in "\n。！？":
+        e += 1
+    return memo[s:e]
 
 
 def affirmed_options(allowed: list[str], evidence: str) -> tuple[set[str], set[str]]:
@@ -164,7 +175,7 @@ def affirmed_options(allowed: list[str], evidence: str) -> tuple[set[str], set[s
         for m in re.finditer(re.escape(o), ev):
             if any(s < m.end() and m.start() < e for s, e, *_ in mentions):
                 continue
-            negated = bool(_NEGATED_AFTER.match(ev, m.end()))
+            negated = bool(_NEGATED_AFTER.match(ev, m.end())) or bool(_NEGATED_BEFORE.search(ev[max(0, m.start() - 6) : m.start()]))
             cued = bool(_JUDGEMENT_BEFORE.search(ev[max(0, m.start() - 8) : m.start()]))
             mentions.append((m.start(), m.end(), opt, negated, cued))
     positive = [x for x in mentions if not x[3]]
@@ -263,7 +274,12 @@ def ground_value(value: str, quotes: list[str], memo: str, slot: Optional[FormSl
         from .constraints import split_choice
 
         selected = split_choice(value, slot)
-        affirmed, mentioned = affirmed_options(slot.constraints.get("allowed_values") or [], evidence)
+        allowed = slot.constraints.get("allowed_values") or []
+        affirmed_raw, mentioned_raw = affirmed_options(allowed, evidence)
+        expanded = "\n".join(_expand_span_clause(memo, sp.start_char, sp.end_char) for sp in res.spans)
+        affirmed_ctx, mentioned_ctx = affirmed_options(allowed, expanded)
+        affirmed = affirmed_raw & affirmed_ctx
+        mentioned = mentioned_raw | mentioned_ctx
         missing = [s for s in selected if s not in affirmed]
         if missing:
             stated = "／".join(sorted(affirmed)) or "none of the options"

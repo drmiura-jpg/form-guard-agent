@@ -128,6 +128,10 @@ TOOLS: list[dict[str, Any]] = [
                                         "classifies the printed labels (sends them to the Claude API) — explicit "
                                         "opt-in only"},
                 "model_tier": {**_TIER, "default": "auto"},
+                "expected_sha256": {
+                    "type": "string",
+                    "description": "optional SHA-256 of the downloaded blank form to verify before discovery",
+                },
             },
             "required": ["form_path"],
             "additionalProperties": False,
@@ -432,8 +436,12 @@ class FormGuardMCP:
         from .scanner import discover_blank_cells
 
         form = self._path(args.get("form_path"), "form_path")
-        d = discover_blank_cells(form, mode=str(args.get("mode") or "demo"), client=self.client,
-                                 model_tier=args.get("model_tier") or None)
+        try:
+            d = discover_blank_cells(form, mode=str(args.get("mode") or "demo"), client=self.client,
+                                     model_tier=args.get("model_tier") or None,
+                                     expected_sha256=args.get("expected_sha256") or None)
+        except ValueError as exc:
+            raise ToolError(f"refused before discovery: {exc}") from exc
         d["form_path"] = self._rel(form)
         return d
 
@@ -557,8 +565,18 @@ class FormGuardMCP:
                 rep.checks.append(_drift_check(visual))
                 rep.failed_count += 1
                 rep.overall_status = "FAIL"
-        except Exception as exc:  # noqa: BLE001 - a file the layout engine cannot read is reported, not fatal
+        except Exception as exc:  # noqa: BLE001 - a file the layout engine cannot read fails VIS-01
+            from .models import AuditCheckItem
+
             vis = {"checked": False, "error": f"{type(exc).__name__}: {exc}"}
+            rep.checks.append(AuditCheckItem(
+                check_id="VIS-01", category="visual", passed=False, severity="major",
+                description="Rendered layout outside the designated fields is unchanged and every value fits its cell",
+                details=f"visual verification failed: {type(exc).__name__}: {exc}",
+                evidence={"error": f"{type(exc).__name__}: {exc}"},
+            ))
+            rep.failed_count += 1
+            rep.overall_status = "FAIL"
         return {
             "original": self._rel(original), "filled": self._rel(filled), "overall_status": rep.overall_status,
             "passed": rep.passed_count, "failed": rep.failed_count, "pending_slots": rep.pending_slots,

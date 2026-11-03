@@ -22,28 +22,35 @@ fields the user did not confirm.
 - **Claude in Chrome**: open http://127.0.0.1:8000/portal in a new tab and read the card the user means. Each card
   carries `data-form-id`, `data-sha256`, `data-download`, `data-open` and `data-mcp-form-path`, the printed rules
   (和暦, 上限500,000円, 150字以内, □→■ …) and the 🔒 office-only boxes.
-- **Without a browser**: `curl -s http://127.0.0.1:8000/api/portal/forms` returns the same list as JSON
-  (`id`, `form`, `sha256`, `download_url`, `open_url`, `mcp_form_path`, `memo_path`, `rules`, `office_only`).
+- **Without a browser**: `curl.exe -s http://127.0.0.1:8000/api/portal/forms` (or `urllib.request.urlopen` in Python)
+  returns the same list as JSON (`id`, `form`, `sha256`, `download_url`, `open_url`, `mcp_form_path`, `memo_path`,
+  `rules`, `office_only`).
 - If the request is ambiguous (several study-group / grant forms), ask which call the user means.
 
 ## 2. Download the blank form (into output/, never into samples/)
 
 ```bash
 mkdir -p output/portal
-curl -s -D output/portal/headers.txt -o output/portal/form6_study_group_grant.pdf \
+curl.exe -s -D output/portal/headers.txt -o output/portal/form6_study_group_grant.pdf \
      http://127.0.0.1:8000/api/portal/forms/form6/download
+python -X utf8 -c "import hashlib, pathlib; p = pathlib.Path('output/portal/form6_study_group_grant.pdf'); print(hashlib.sha256(p.read_bytes()).hexdigest())"
 ```
 
-Compare the file's SHA-256 with the portal's (`X-Form-Guard-SHA256` header / `data-sha256`). A mismatch means a
-different file: stop and tell the user. When downloading a form from an external grant or study-group portal that does
-not publish an `X-Form-Guard-SHA256` header, compute the SHA-256 immediately upon download (`sha256sum` /
-`hashlib.sha256`), record it alongside the portal URL and form version title, and let `form_guard_discover_blank_cells`
-bind `form_sha256` to that initial download so any change between discovery and fill is refused. The blank templates in
-`samples/blank_forms/` are protected by the PreToolUse hook — download copies only into `output/`.
+Compare the downloaded file's SHA-256 (`python -X utf8 -c "import hashlib, pathlib; ..."`) primarily against the
+portal list's `data-sha256` / `/api/portal/forms` `sha256` (and optionally the `X-Form-Guard-SHA256` transport header).
+A mismatch means a different file: stop and tell the user. When downloading a form from an external grant or
+study-group portal that does not publish an `X-Form-Guard-SHA256` header:
+1. Compute the SHA-256 immediately upon download (`hashlib.sha256(p.read_bytes()).hexdigest()`) and save a provenance
+   sidecar `output/portal/<file>.source.json` recording `url`, `form_title`, `version`, `sha256` and `downloaded_at`.
+2. Pass `expected_sha256` to `form_guard_discover_blank_cells` and verify that the returned `form_sha256` matches the
+   sidecar's `sha256`.
+3. Re-verify the file's SHA-256 before `form_guard_fill`; stop immediately on any mismatch.
+
+The blank templates in `samples/blank_forms/` are protected by the PreToolUse hook — download copies only into `output/`.
 
 ## 3. Discover the boxes — the user confirms
 
-Call `form_guard_discover_blank_cells` with `{"form_path": "output/portal/form6_study_group_grant.pdf"}`
+Call `form_guard_discover_blank_cells` with `{"form_path": "output/portal/form6_study_group_grant.pdf", "expected_sha256": "<sha256>"}`
 (mode `demo` unless the user asks for Claude). For a fixed PDF the boxes are rebuilt from the ruled lines; show the
 user a short table: candidate id, label, inferred rule, applicant ✓ / office-only 🔒, and the printed options of
 a checkbox (`□ 合意済み　　□ 協議中…`). Office-only boxes (事務局受付欄・受付印・審査結果欄 …) can never be confirmed.
@@ -88,5 +95,7 @@ do not press 承認 yourself.
 ## Rules
 
 - Fictional or authorised data only; no real personal data, credentials or internal documents in memos.
-- Only `127.0.0.1` pages in Chrome; do not sign in anywhere and do not submit anything to an external site.
+- In Chrome, open only `127.0.0.1` and public call pages of external grant portals explicitly requested by the user.
+  Never sign in, type into fields, or submit anything on an external site — only download the blank form (if a portal
+  requires login, ask the user to download the blank form into `output/portal/` themselves).
 - Never present the draft as approved, verified as true or ready to submit — the human decides.

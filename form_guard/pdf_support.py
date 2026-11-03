@@ -344,8 +344,14 @@ def load_form(source: Union[str, Path, bytes], doc: Optional[PDFDocument] = None
     doc = doc or check_pdf(data)
     pages = []
     for p in doc.pages():
+        if p.rotate != 0:
+            raise PDFError(f"page {p.index + 1}: rotated pages (/Rotate {p.rotate}) are not supported — refused")
+        if any(abs(a - b) > 0.5 for a, b in zip(p.cropbox, p.mediabox)):
+            raise PDFError(f"page {p.index + 1}: /CropBox {p.cropbox} differs from /MediaBox {p.mediabox} — refused")
         streams = doc.page_streams(p)
         g = interpret([s.decoded() for _, s in streams], p.resources, doc, p.mediabox)
+        if "clipping" in g.notes:
+            raise PDFError(f"page {p.index + 1}: clipping paths (W / W*) are not supported — refused")
         hs, vs = ruled_segments(g)
         cells, tables = build_cells(hs, vs, p.index)
         assign_text(cells, g.runs)
@@ -358,14 +364,23 @@ def load_form(source: Union[str, Path, bytes], doc: Optional[PDFDocument] = None
 # ===================================================================== checkbox options
 
 
-def _cell_options(cell: Cell) -> list[dict[str, Any]]:
+def _cell_options(cell: Cell, page: Optional[PageModel] = None) -> list[dict[str, Any]]:
     """Checkbox options of a box, each with the geometry of its printed square."""
+    if page is not None:
+        if any(r.rotated and any(cell.contains(*_glyph_center(g)) for g in r.glyphs) for r in page.graphics.runs):
+            return []
     flat = [g for ln in cell.lines for g in ln]
     text = "".join(g.ch for g in flat)
     opts = parse_checkbox_options(text)
     for o in opts:
         g = flat[o["offset"]]
-        o.update(x=round(g.x, 3), y=round(g.y, 3), size=round(g.size, 3), adv=round(g.adv, 3), font=g.font)
+        if page is not None and g.font in page.fonts:
+            f = page.fonts[g.font]
+            exp_adv = f.width_of_unicode(g.ch) / 1000.0 * g.size
+            if abs(g.adv - exp_adv) > 0.05 * g.size:
+                return []
+        o.update(x=round(g.x, 3), y=round(g.y, 3), size=round(g.size, 3), adv=round(g.adv, 3), font=g.font,
+                 raw_mark=g.ch)
     return opts
 
 
@@ -407,32 +422,45 @@ def _section_of(page: PageModel, c: Cell, banners: list[Cell]) -> str:
     return min(above, key=lambda b: b.rect[1]).text if above else ""
 
 
+def _cell_has_image(page: PageModel, c: Cell) -> bool:
+    return any(_overlap(c.rect, (im[0], im[1], im[2], im[3])) for im in page.graphics.images)
+
+
+def _cell_has_acroform(fields: list[dict[str, Any]], c: Cell) -> bool:
+    for f in fields:
+        if f.get("page") in (None, c.page) and isinstance(f.get("rect"), list) and len(f["rect"]) == 4:
+            if _overlap(c.rect, tuple(float(v) for v in f["rect"])):
+                return True
+    return False
+
+
 def pdf_candidates(form: PDFForm) -> tuple[list[_PdfCand], list[dict[str, Any]]]:
     """Stage 1 + 3 for a PDF: empty boxes (and checkbox boxes) next to a printed label; rejected boxes with reasons."""
     from .scanner import _is_sentence
 
     found: list[_PdfCand] = []
     rejected: list[dict[str, Any]] = []
+    fields = acroform_fields(form)
     for page in form.pages:
         banners = _banners(page)
         for c in page.cells:
             if c in banners:
                 continue
-            options = [] if c.empty else _cell_options(c)
+            options = [] if c.empty else _cell_options(c, page)
             if not c.empty and not options:
                 continue
             left, above = _neighbors(page.cells, c)
             label_cell, direction = None, ""
-            if left is not None and left.text and not left.empty and not _cell_options(left):
+            if left is not None and left.text and not left.empty and not _cell_options(left, page):
                 label_cell, direction = left, "left"
-            elif above is not None and above.text and above not in banners and not _cell_options(above):
+            elif above is not None and above.text and above not in banners and not _cell_options(above, page):
                 label_cell, direction = above, "above"
             if label_cell is None or _is_sentence(label_cell.text):
                 continue
             group = ""
             if direction == "left":
                 gl, _ = _neighbors(page.cells, label_cell)
-                if gl is not None and gl.text and not _is_sentence(gl.text) and not _cell_options(gl):
+                if gl is not None and gl.text and not _is_sentence(gl.text) and not _cell_options(gl, page):
                     group = gl.text.split("\n")[0]
             cand = _PdfCand(c, label_cell, direction, label_cell.text, group, _section_of(page, c, banners),
                             "checkbox_text" if options else "box", options)
@@ -440,6 +468,16 @@ def pdf_candidates(form: PDFForm) -> tuple[list[_PdfCand], list[dict[str, Any]]]
                 rejected.append({"location": _where(c), "evidence_label": cand.label_text, "page": c.page,
                                  "rect": list(c.rect), "merged_range": "",
                                  "reason": f"box smaller than {MIN_BOX[0]:.0f}×{MIN_BOX[1]:.0f} pt — not a fill target"})
+                continue
+            if _cell_has_image(page, c):
+                rejected.append({"location": _where(c), "evidence_label": cand.label_text, "page": c.page,
+                                 "rect": list(c.rect), "merged_range": "",
+                                 "reason": "box overlaps an existing image — refusing to write over images"})
+                continue
+            if _cell_has_acroform(fields, c):
+                rejected.append({"location": _where(c), "evidence_label": cand.label_text, "page": c.page,
+                                 "rect": list(c.rect), "merged_range": "",
+                                 "reason": "box overlaps an interactive AcroForm field — refusing to write over form fields"})
                 continue
             if options and any(o["checked"] for o in options):
                 rejected.append({"location": _where(c), "evidence_label": cand.label_text, "page": c.page,
@@ -456,13 +494,12 @@ def _where(c: Cell) -> str:
 
 
 def acroform_fields(form: PDFForm) -> list[dict[str, Any]]:
-    """Interactive AcroForm fields (listed for the reviewer; filled by a PDF viewer, never by the overlay)."""
+    """Interactive AcroForm fields and page Widget annotations (listed for the reviewer; filled by a PDF viewer, never by the overlay)."""
     doc = form.doc
     af = doc.get(doc.root.get("AcroForm"))
     out: list[dict[str, Any]] = []
-    if not isinstance(af, dict):
-        return out
     page_of = {p.ref.num: p.index for p in form.pages}
+    seen_rects: set[tuple] = set()
 
     def walk(ref: Any, prefix: str, depth: int) -> None:
         node = doc.get(ref)
@@ -471,34 +508,61 @@ def acroform_fields(form: PDFForm) -> list[dict[str, Any]]:
         name = pdf_text(node.get("T")) if node.get("T") is not None else ""
         full = f"{prefix}.{name}" if prefix and name else (name or prefix)
         kids = doc.get(node.get("Kids"))
-        if isinstance(kids, list) and kids and all(isinstance(doc.get(k), dict) and "T" in doc.get(k) for k in kids):
+        if isinstance(kids, list) and kids:
             for k in kids:
                 walk(k, full, depth + 1)
-            return
+            if node.get("Rect") is None:
+                return
         rect = doc.get(node.get("Rect"))
         p = node.get("P")
-        out.append({"field": full, "type": str(node.get("FT") or ""), "label": pdf_text(node.get("TU")) or full,
-                    "page": page_of.get(p.num) if isinstance(p, Ref) else None,
-                    "rect": [float(v) for v in rect] if isinstance(rect, list) and len(rect) == 4 else None,
+        pg = page_of.get(p.num) if isinstance(p, Ref) else None
+        rlist = [float(v) for v in rect] if isinstance(rect, list) and len(rect) == 4 else None
+        key = (pg, tuple(round(v, 2) for v in rlist) if rlist else None, full)
+        if key in seen_rects:
+            return
+        seen_rects.add(key)
+        out.append({"field": full or "Widget", "type": str(node.get("FT") or node.get("Subtype") or ""),
+                    "label": pdf_text(node.get("TU")) or full or "Widget",
+                    "page": pg, "rect": rlist,
                     "value": pdf_text(node.get("V")) if isinstance(node.get("V"), bytes) else ""})
 
-    for f in doc.get(af.get("Fields")) or []:
-        walk(f, "", 0)
+    if isinstance(af, dict):
+        for f in doc.get(af.get("Fields")) or []:
+            walk(f, "", 0)
+    for p in form.pages:
+        annots = doc.get(p.ref.dict.get("Annots"))
+        if isinstance(annots, list):
+            for a in annots:
+                ad = doc.get(a)
+                if isinstance(ad, dict) and (ad.get("Subtype") == "Widget" or ad.get("FT") is not None):
+                    rect = doc.get(ad.get("Rect"))
+                    rlist = [float(v) for v in rect] if isinstance(rect, list) and len(rect) == 4 else None
+                    name = pdf_text(ad.get("T")) if ad.get("T") is not None else "Widget"
+                    key = (p.index, tuple(round(v, 2) for v in rlist) if rlist else None, name)
+                    if key not in seen_rects:
+                        seen_rects.add(key)
+                        out.append({"field": name, "type": str(ad.get("FT") or "Widget"), "label": pdf_text(ad.get("TU")) or name,
+                                    "page": p.index, "rect": rlist,
+                                    "value": pdf_text(ad.get("V")) if isinstance(ad.get("V"), bytes) else ""})
     return out
 
 
 def discover_pdf(path: Union[str, Path], mode: str = "demo", client: Any = None,
-                 model_tier: Optional[str] = "auto") -> dict[str, Any]:
+                 model_tier: Optional[str] = "auto", expected_sha256: Optional[str] = None) -> dict[str, Any]:
     """Blank-box discovery for a fixed PDF — the same report format as ``scanner.discover_blank_cells``."""
     from collections import Counter
     from datetime import datetime, timezone
 
     from .constraints import infer_slot_constraints
+    from .pdf_core import sha256
     from .scanner import (APPLICANT_REASON, OFFICE_REASON, _assign_slot_ids, _Cand, _classify_with_claude,
-                          _label_parts, _office_hits, sha256_file)
+                          _label_parts, _office_hits)
 
     path = Path(path)
     form = load_form(path)
+    actual_sha = sha256(form.data)
+    if expected_sha256 and expected_sha256.strip().lower() != actual_sha.lower():
+        raise ValueError(f"blank form SHA-256 mismatch: expected {expected_sha256.strip().lower()}, got {actual_sha}")
     found, rejected = pdf_candidates(form)
     n_found = len(found) + len(rejected)  # stage 1, before the stage-3 rejections and AcroForm fields are listed
     base_cands = []
@@ -546,7 +610,7 @@ def discover_pdf(path: Union[str, Path], mode: str = "demo", client: Any = None,
     n_office = sum(1 for c in candidates if c["office_only"])
     discovery = {
         "schema": "form-guard/blank-cell-discovery@1",
-        "form": path.name, "form_title": title, "file_type": "pdf", "form_sha256": sha256_file(path),
+        "form": path.name, "form_title": title, "file_type": "pdf", "form_sha256": actual_sha,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "engine": engine,
         "pdf": {"pages": [{"page": p.index, "mediabox": list(p.ref.mediabox), "boxes": len(p.cells),
@@ -631,6 +695,7 @@ def scan_pdf(path: Path, spec: dict):
     from .scanner import ScanResult, _Acc, _label_parts, _make_slot
 
     form = load_form(path)
+    fields = acroform_fields(form)
     accs: dict[str, _Acc] = {}
     warnings: list[str] = []
     claimed: dict[tuple[int, int], str] = {}
@@ -650,10 +715,17 @@ def scan_pdf(path: Path, spec: dict):
             warnings.append(f"coordinate target {sid!r}: no ruled box at page {tgt.get('page', 0)} rect "
                             f"{tgt.get('rect')!r} (within {MATCH_TOL} pt)")
             continue
+        page = form.pages[c.page]
+        if _cell_has_image(page, c):
+            warnings.append(f"coordinate target {sid!r}: the box overlaps an existing image — refusing to write over images")
+            continue
+        if _cell_has_acroform(fields, c):
+            warnings.append(f"coordinate target {sid!r}: the box overlaps an interactive AcroForm field — refusing to write over form fields")
+            continue
         kind = str(tgt.get("kind") or "box")
         options: list[dict[str, Any]] = []
         if kind == "checkbox_text":
-            options = _cell_options(c)
+            options = _cell_options(c, page)
             if not options:
                 warnings.append(f"coordinate target {sid!r}: the box prints no □ options — not a checkbox")
                 continue
@@ -667,7 +739,6 @@ def scan_pdf(path: Path, spec: dict):
             warnings.append(f"coordinate target {sid!r}: the box is already designated for {claimed[(c.page, c.idx)]!r}")
             continue
         claimed[(c.page, c.idx)] = sid
-        page = form.pages[c.page]
         left, above = _neighbors(page.cells, c)
         label_cell = left if left is not None and left.text else above
         label_text = label_cell.text if label_cell is not None else ""
@@ -780,6 +851,7 @@ class OverlayBlock:
     start: int            # bytes of the marked-content block inside the overlay stream
     end: int
     text: str
+    old_mark: str = CHECK_OFF
 
 
 def build_overlay(page: PageModel, items: list[tuple[Any, SlotOccurrence, str]]) -> tuple[bytes, list[OverlayBlock]]:
@@ -793,22 +865,27 @@ def build_overlay(page: PageModel, items: list[tuple[Any, SlotOccurrence, str]])
     for slot, occ, value in items:
         start = len(out)
         out += b"/" + OVERLAY_TAG.encode() + b" <</Slot " + text_string(slot.slot_id) + b">> BDC\n"
+        old_mark = CHECK_OFF
         if occ.marker_kind == "checkbox_text":
             chosen = selected_options(value, occ.checkbox_options)
+            marks_used = []
             for o in occ.checkbox_options:
                 if o["label"] not in chosen:
                     continue
+                marks_used.append(str(o.get("raw_mark") or CHECK_OFF))
                 fname = o["font"] if o.get("font") in page.fonts and page.fonts[o["font"]].unicode_encoding \
                     else page.overlay_font
                 out += _show(fname, o["size"], o["x"], o["y"], page.fonts[fname].encode(CHECK_ON))
             text = "、".join(chosen)
+            if marks_used:
+                old_mark = marks_used[0]
         else:
             lines, size, _fits = layout_value(value, tuple(occ.rect), font)  # type: ignore[arg-type]
             for ln, x, y in lines:
                 out += _show(page.overlay_font, size, x, y, font.encode(ln))
             text = value
         out += b"EMC\n"
-        blocks.append(OverlayBlock(slot.slot_id, occ.marker_kind, start, len(out), text))
+        blocks.append(OverlayBlock(slot.slot_id, occ.marker_kind, start, len(out), text, old_mark))
     out += b"Q\n"
     return bytes(out), blocks
 
@@ -880,7 +957,7 @@ def write_pdf(scan, values: dict[str, str], out_path: Union[str, Path]):
             patches.append(PatchRecord(part_name=f"pdf/page{pidx + 1}", slot_id=blk.slot_id,
                                        kind="pdf_mark" if box else "pdf_text",
                                        byte_start=head + blk.start, byte_end=head + blk.end,
-                                       old_text=CHECK_OFF if box else "",
+                                       old_text=blk.old_mark if box else "",
                                        new_text=f"{CHECK_ON} {blk.text}" if box else blk.text))
     return WriteResult(out_path=out_path, patches=patches, modified_parts=[f"pdf/page{p + 1}" for p in sorted(per_page)],
                        written_slots=sorted({p.slot_id for p in patches}), pending_slots=pending, values=prepared)
@@ -1179,12 +1256,18 @@ def verify_pdf(scan, filled_path: Union[str, Path], mappings: Optional[list[Fiel
                 any(im[4] in fp.overlay_streams for im in fp.page.graphics.images):
             overlay_issues.append(f"page {p.index + 1}: the overlay draws lines, boxes or images")
         printed = [g for r in p.graphics.runs for g in r.glyphs if g.ch.strip()]
+        orig_images = [im[:4] for im in p.graphics.images]
+        acro_rects = [tuple(float(v) for v in f["rect"]) for f in acroform_fields(form)
+                      if f.get("page") in (None, p.index) and isinstance(f.get("rect"), list) and len(f["rect"]) == 4]
         for r in overlay_runs(fp):
             n_runs_overlay += 1
             sid = run_slot(r)
             if sid is None or sid not in slot_rects:
                 overlay_issues.append(f"page {p.index + 1}: overlay text «{r.text[:20]}» is not inside a block of a "
                                       f"designated slot")
+                continue
+            if r.invisible or r.rotated or any(c > 0.25 for c in r.color):
+                overlay_issues.append(f"{sid}: overlay text «{r.text[:20]}» is invisible, rotated or non-dark (color {r.color})")
                 continue
             rects = [rc for pg, rc in slot_rects[sid] if pg == p.index]
             occ = occ_by_slot[sid]
@@ -1205,6 +1288,12 @@ def verify_pdf(scan, filled_path: Union[str, Path], mappings: Optional[list[Fiel
             for gl in r.glyphs:
                 if any(_overlap(_glyph_box(gl), _glyph_box(pg)) for pg in printed):
                     overlay_issues.append(f"{sid}: overlay text covers printed text near ({gl.x:.1f}, {gl.y:.1f})")
+                    break
+                if any(_overlap(_glyph_box(gl), im) for im in orig_images):
+                    overlay_issues.append(f"{sid}: overlay text covers an existing image near ({gl.x:.1f}, {gl.y:.1f})")
+                    break
+                if any(_overlap(_glyph_box(gl), ar) for ar in acro_rects):
+                    overlay_issues.append(f"{sid}: overlay text overlaps an interactive AcroForm field near ({gl.x:.1f}, {gl.y:.1f})")
                     break
             written_text.setdefault(sid, []).append(r)
         for c, kw in office:
@@ -1390,13 +1479,19 @@ def _overlay_ops(doc: PDFDocument, fp: FilledPage) -> list[str]:
             continue
         try:
             data = s.decoded()
-            ops = [op for op, _args, _sp in content_tokens(data)]
+            tokens = list(content_tokens(data))
+            ops = [op for op, _args, _sp in tokens]
         except PDFError as exc:
             issues.append(f"overlay stream unreadable: {exc}")
             continue
         bad = sorted(set(ops) - ALLOWED_OVERLAY_OPS)
         if bad:
             issues.append(f"overlay uses operators {bad} (only text operators are allowed)")
+        for op, args, _sp in tokens:
+            if op in ("g", "rg"):
+                nums = [float(x) for x in args if isinstance(x, (int, float)) and not isinstance(x, bool)]
+                if not nums or any(v > 0.25 or v < 0.0 for v in nums):
+                    issues.append(f"overlay sets non-dark fill color {op} {nums}")
         depth = 0
         for op in ops:
             depth += 1 if op == "q" else -1 if op == "Q" else 0
@@ -1584,13 +1679,16 @@ def build_pdf_previews(scan, filled_path: Path, values: dict[str, str], naive_pa
             {"box": "page", "issue": f"{px['outside']} px differ outside the designated boxes (pixel diff)"}]
         visual["drift_count"] = (visual.get("drift_count") or 0) + 1
     n_filled = sum(1 for v in values.values() if v)
+    px_ok = px.get("method") == "pixel" and px.get("outside", 0) == 0
+    outside_label = "identical (0 px)" if (visual["identical_outside_slots"] and px_ok) else (
+        "identical (geometric)" if visual["identical_outside_slots"] else "CHANGED")
     previews = {
         "blank": svg_document(blank_l, ov_b, "Blank original form",
                               "Blank original — designated boxes in blue, office-only boxes locked / 空欄の原本（青＝記入欄）",
                               "info"),
         "filled": svg_document(filled_l, ov_f, "Form-Guard output",
                                f"Form-Guard — {n_filled} boxes filled, page outside the boxes "
-                               f"{'identical (0 px)' if visual['identical_outside_slots'] else 'CHANGED'} / 指定欄のみ重ね書き",
+                               f"{outside_label} / 指定欄のみ重ね書き",
                                "ok" if visual["identical_outside_slots"] else "bad"),
     }
     naive_l = None

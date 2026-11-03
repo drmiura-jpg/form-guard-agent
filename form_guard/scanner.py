@@ -1076,7 +1076,8 @@ def _assign_slot_ids(cands: list[_Cand]) -> list[str]:
 
 
 def discover_blank_cells(path: Union[str, Path], mode: str = "demo", client: Any = None,
-                         model_tier: Optional[str] = "auto") -> dict[str, Any]:
+                         model_tier: Optional[str] = "auto",
+                         expected_sha256: Optional[str] = None) -> dict[str, Any]:
     """Propose fillable empty cells of an *unmarked* blank form (no {{markers}}, no .slots.json).
 
     Returns a discovery report for the human pre-fill confirmation gate; nothing is written.
@@ -1088,11 +1089,15 @@ def discover_blank_cells(path: Union[str, Path], mode: str = "demo", client: Any
     if file_type == "pdf":  # fixed PDF: boxes rebuilt from the ruled lines (pdf_support), same report format
         from .pdf_support import discover_pdf
 
-        return discover_pdf(path, mode=mode, client=client, model_tier=model_tier)
+        return discover_pdf(path, mode=mode, client=client, model_tier=model_tier, expected_sha256=expected_sha256)
     from .constraints import checkbox_constraints
 
     form_sha = sha256_file(path)
+    if expected_sha256 and expected_sha256.strip().lower() != form_sha.lower():
+        raise ValueError("blank form SHA-256 does not match expected_sha256 — the file changed before discovery")
     found, doc_text = _docx_blank_candidates(path) if file_type == "docx" else _xlsx_blank_candidates(path)
+    if sha256_file(path) != form_sha:
+        raise ValueError("blank form changed during discovery — re-run discovery on a stable file")
     found.sort(key=lambda c: c.order)
     kept = [c for c in found if not c.rejected]
     slot_ids = _assign_slot_ids(kept)

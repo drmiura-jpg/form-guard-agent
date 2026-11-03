@@ -146,7 +146,14 @@ CHECK_ON_CHARS = ("■", "☑", "☒")
 CHECKBOX_MARKS = "□■☐☑☒✓✔✅√"
 _CHECKBOX_SPLIT = re.compile(r"[、,，／/\n\s]+")
 _OPTION_RE = re.compile(r"[ 　]*([^ 　（(□■☐☑☒\n]+)")
-_NEEDS_INPUT_RE = re.compile(r"[：:][ 　]*[ 　][ 　]*[年月日]|[（(][ 　]{2,}[）)]")
+_NEEDS_INPUT_RE = re.compile(
+    r"[：:][ 　_＿]*[ 　_＿][ 　_＿]*[年月日]?"
+    r"|[：:][ 　_＿]*[）)]"
+    r"|[ 　_＿]{2,}[年月日]"
+    r"|[_＿]{2,}"
+    r"|[（(][ 　_＿]{2,}[）)]"
+    r"|具体的に|理由[：:]|内容[：:]|内訳[：:]|詳細[：:]"
+)
 
 
 def parse_checkbox_options(text: str) -> list[dict[str, Any]]:
@@ -165,8 +172,9 @@ def parse_checkbox_options(text: str) -> list[dict[str, Any]]:
         if not label:
             continue
         detail = seg[m.end() :].rstrip(" 　\n")
+        needs_in = bool(_NEEDS_INPUT_RE.search(detail)) or (label in ("その他", "Other", "other") and bool(detail.strip()))
         out.append({"label": label, "offset": i, "checked": text[i] in CHECK_ON_CHARS, "detail": detail,
-                    "needs_input": bool(_NEEDS_INPUT_RE.search(detail))})
+                    "needs_input": needs_in})
     labels = [o["label"] for o in out]
     return out if out and len(set(labels)) == len(labels) else []
 
@@ -192,10 +200,10 @@ def finish_checkbox_constraints(c: dict[str, Any], options: list[dict[str, Any]]
     out["multi_select"] = not out["exclusive"]
     if out["multi_select"]:
         out.setdefault("separator", "、")
-    req = out.get("requires_human_if_selected")
-    if req is None:
-        req = [o["label"] for o in options if o.get("needs_input")]
-    out["requires_human_if_selected"] = [r for r in req if r in out["allowed_values"]]
+    printed_req = [o["label"] for o in options if o.get("needs_input") or o.get("label") in ("その他", "Other", "other")]
+    req = out.get("requires_human_if_selected") or []
+    merged_req = list(dict.fromkeys(list(printed_req) + list(req)))
+    out["requires_human_if_selected"] = [r for r in merged_req if r in out["allowed_values"]]
     return out
 
 

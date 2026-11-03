@@ -110,8 +110,9 @@ def _checkbox_patches(idx: PartIndex, c: Container, slot_id: str, offsets: list[
         new = CHECK_OFF_BYTES.get(old)
         if new is None:
             raise UnsupportedXMLError(f"checkbox □ written as {old!r} — refusing to rewrite it")
+        old_ch = idx.container_text(c)[off] if off < len(idx.container_text(c)) else "□"
         out.append(_BytePatch(a, b, new, PatchRecord(part_name=idx.part_name, slot_id=slot_id, kind="checkbox",
-                                                     byte_start=a, byte_end=b, old_text="□", new_text="■")))
+                                                     byte_start=a, byte_end=b, old_text=old_ch, new_text="■")))
     return out
 
 

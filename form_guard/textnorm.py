@@ -236,35 +236,46 @@ def parse_compound(num: str) -> int:
     num = unicodedata.normalize("NFKC", num).replace(",", "").replace(" ", "")
     total = 0
     section = 0.0
+    has_section = False
     cur = ""
     for ch in num:
         if ch.isdigit() or ch == ".":
             cur += ch
         elif ch in _KANJI_SMALL:
-            section += float(cur or "1") * _KANJI_SMALL[ch]
+            section += float(cur if cur != "" else "1") * _KANJI_SMALL[ch]
+            has_section = True
             cur = ""
         elif ch in _KANJI_BIG:
-            section += float(cur) if cur else 0.0
-            total += round((section if section else 1.0) * _KANJI_BIG[ch])
+            if cur != "":
+                section += float(cur)
+                has_section = True
+            mult = section if has_section else 1.0
+            total += round(mult * _KANJI_BIG[ch])
             section = 0.0
+            has_section = False
             cur = ""
-    if cur:
+    if cur != "":
         section += float(cur)
     return int(total + round(section))
 
 
 def kanji_to_int(s: str) -> Optional[int]:
     total, section, digit = 0, 0, None
+    has_section = False
     for ch in s:
         if ch in _KANJI_DIGITS:
             digit = _KANJI_DIGITS[ch]
         elif ch in _KANJI_SMALL:
             section += (digit if digit is not None else 1) * _KANJI_SMALL[ch]
+            has_section = True
             digit = None
         elif ch in _KANJI_BIG:
-            section += digit or 0
-            total += (section or 1) * _KANJI_BIG[ch]
-            section, digit = 0, None
+            if digit is not None:
+                section += digit
+                has_section = True
+            mult = section if has_section else 1
+            total += mult * _KANJI_BIG[ch]
+            section, digit, has_section = 0, None, False
         else:
             return None
     return total + section + (digit or 0)

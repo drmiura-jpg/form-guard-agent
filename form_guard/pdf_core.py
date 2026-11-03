@@ -36,8 +36,14 @@ MAX_NESTING = 64                         # arrays / dictionaries inside each oth
 MAX_XREF_SECTIONS = 64
 MAX_FORM_XOBJECT_DEPTH = 6
 
-ACTIVE_ACTIONS = frozenset({"JavaScript", "Launch", "ImportData", "RichMedia", "Rendition", "GoToE"})
-ACTIVE_KEYS = frozenset({"JS", "JavaScript", "EmbeddedFiles", "EmbeddedFile", "XFA", "RichMediaContent"})
+ACTIVE_ACTIONS = frozenset({
+    "JavaScript", "Launch", "ImportData", "RichMedia", "Rendition", "GoToE",
+    "SubmitForm", "ResetForm", "URI", "GoToR", "Sound", "Movie", "Hide", "Thread", "SetOCGState",
+})
+ACTIVE_KEYS = frozenset({
+    "JS", "JavaScript", "EmbeddedFiles", "EmbeddedFile", "XFA", "RichMediaContent",
+    "OpenAction", "AA",
+})
 
 
 class PDFError(ValueError):
@@ -292,7 +298,8 @@ def _parse_value(lex: Lexer, tok: Optional[_Tok] = None, depth: int = 0, spans: 
 _OBJ_HEAD_RE = re.compile(rb"(\d+)[\x00\t\n\x0c\r ]+(\d+)[\x00\t\n\x0c\r ]+obj(?![^\x00\t\n\x0c\r ()<>\[\]{}/%])")
 
 
-def parse_indirect_at(data: bytes, offset: int, resolve_length=None, expect_num: Optional[int] = None) -> IndirectObject:
+def parse_indirect_at(data: bytes, offset: int, resolve_length=None, expect_num: Optional[int] = None,
+                      expect_gen: Optional[int] = None) -> IndirectObject:
     """The indirect object ``N G obj … endobj`` that starts at ``offset`` (stream included)."""
     m = _OBJ_HEAD_RE.match(data, offset)
     if not m:
@@ -300,6 +307,8 @@ def parse_indirect_at(data: bytes, offset: int, resolve_length=None, expect_num:
     num, gen = int(m.group(1)), int(m.group(2))
     if expect_num is not None and num != expect_num:
         raise PDFError(f"the cross-reference entry of object {expect_num} points at object {num}")
+    if expect_gen is not None and gen != expect_gen:
+        raise PDFError(f"the cross-reference entry of object {num} has generation {expect_gen}, but the object header is generation {gen}")
     lex = Lexer(data, m.end())
     first = lex.next()
     if first is None:
@@ -520,13 +529,16 @@ class PDFDocument:
         try:
             if not 0 < e.offset < len(self.data):
                 raise PDFError(f"object {num}: offset outside the file")
-            obj = parse_indirect_at(self.data, e.offset, self._length, expect_num=num)
+            obj = parse_indirect_at(self.data, e.offset, self._length, expect_num=num, expect_gen=e.gen)
         finally:
             self._loading.discard(num)
         self._cache[num] = obj
         return obj
 
     def _length(self, ref: Ref) -> Optional[int]:
+        e = self.xref.get(ref.num)
+        if e is not None and e.in_use and e.gen != ref.gen:
+            raise PDFError(f"reference {ref} disagrees with cross-reference generation {e.gen}")
         obj = self.indirect(ref.num)
         return obj.value if obj is not None and isinstance(obj.value, int) else None
 
@@ -535,6 +547,9 @@ class PDFDocument:
         while isinstance(value, Ref):
             if depth > 32:
                 raise PDFError("reference chain too long")
+            e = self.xref.get(value.num)
+            if e is not None and e.in_use and e.gen != value.gen:
+                raise PDFError(f"reference {value} disagrees with cross-reference generation {e.gen}")
             obj = self.indirect(value.num)
             value = None if obj is None else obj.value
             depth += 1
@@ -665,12 +680,15 @@ def check_pdf(source: Union[bytes, str, Any]) -> PDFDocument:
         if isinstance(obj.value, Stream):
             if obj.value.dict.get("Type") in ("XRef", "ObjStm"):
                 raise PDFError("object / cross-reference streams (PDF 1.5 compression) are not supported — refused")
-            if obj.value.dict.get("Filter") is not None or obj.value.dict.get("Subtype") not in ("Image",):
-                try:
-                    total += len(obj.value.decoded())
-                except PDFError:
-                    if obj.value.dict.get("Subtype") == "Image":  # image codecs (DCT, CCITT …) are never decoded
-                        continue
+            try:
+                total += len(obj.value.decoded())
+            except PDFError as exc:
+                if obj.value.dict.get("Subtype") == "Image" and str(exc).startswith("unsupported stream filter "):
+                    # Opaque image codecs (DCTDecode, CCITTFaxDecode …) are not Flate-inflated; count raw bytes against caps
+                    if len(obj.value.raw) > MAX_STREAM_DECODED:
+                        raise PDFError(f"image stream larger than {MAX_STREAM_DECODED:,} bytes") from exc
+                    total += len(obj.value.raw)
+                else:
                     raise
             if total > MAX_TOTAL_DECODED:
                 raise PDFError(f"streams decompress to more than {MAX_TOTAL_DECODED // (1024 * 1024)} MB (PDF bomb guard)")
@@ -822,9 +840,13 @@ def incremental_update(original: bytes, doc: PDFDocument, objects: dict[int, byt
     if not out.endswith((b"\n", b"\r")):
         out += b"\n"
     spans: dict[int, tuple[int, int]] = {}
+    gens: dict[int, int] = {}
     for num in sorted(objects):
+        old_entry = doc.xref.get(num)
+        gen = old_entry.gen if (old_entry is not None and old_entry.in_use) else 0
+        gens[num] = gen
         start = len(out)
-        out += f"{num} 0 obj\n".encode("ascii") + objects[num] + b"\nendobj\n"
+        out += f"{num} {gen} obj\n".encode("ascii") + objects[num] + b"\nendobj\n"
         spans[num] = (start, len(out))
     xref = len(out)
     out += b"xref\n0 1\n0000000000 65535 f \n"
@@ -836,7 +858,7 @@ def incremental_update(original: bytes, doc: PDFDocument, objects: dict[int, byt
             j += 1
         out += f"{nums[i]} {j - i + 1}\n".encode("ascii")
         for n in nums[i : j + 1]:
-            out += f"{spans[n][0]:010d} 00000 n \n".encode("ascii")
+            out += f"{spans[n][0]:010d} {gens[n]:05d} n \n".encode("ascii")
         i = j + 1
     size = max([doc.trailer.get("Size", 0) or 0] + [n + 1 for n in nums])
     trailer: dict[str, Any] = {"Size": size}
@@ -1266,6 +1288,8 @@ def interpret(streams: list[bytes], resources: dict, doc: Optional[PDFDocument],
                         "MP", "DP"):
                 if op == "sh":
                     pg.notes.append("shading")
+                elif op in ("W", "W*"):
+                    pg.notes.append("clipping")
             elif op == "BT":
                 in_text = True
                 tm = tlm = IDENTITY

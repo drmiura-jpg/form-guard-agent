@@ -115,17 +115,17 @@ Form-Guard の外科的な差し替えの違いを、最初の28秒で見せる�
 |---|---|---|
 | 1:45–1:57 | ガイドツアー「④ Claude 活用・モデル使い分け」をクリック（= `/#tour=4`）。デモ1 の「Claude Code 連携 · Architecture」タブ：「この実行のモデル割り当て」Haiku 4.5 ×3（提出日・研究課題番号・変更種別）／Sonnet 5 ×4／Opus 5.5 ×1（変更理由および予算影響）、その下の「ルーティング方針（--model-tier auto）」の表 | 欄ごとの3段モデル振り分け：Haiku（日付・番号・選択肢）／Sonnet（文章・金額・氏名）／Opus 5.5（adaptive thinking：条件を残す要約・差し戻し後の自己修正）＋ `MODEL_FALLBACK_CHAIN` |
 | 1:57–2:07 | 下へスクロール →「Claude Code 拡張の連携」（5ステップ）→「リポジトリ同梱の Claude Code 資産」。左の「フック（2 段）」カード：PreToolUse（書き込み前：白紙様式の改変・API キー・個人のパス・メールアドレスを阻止）／PostToolUse（書き込み後：`py_compile`・import・JSON を検査） | 2段フック `scripts/hook_guard.py`：書き込み前に阻止（終了コード 2＋deny）・書き込み後に検査 |
-| 2:07–2:15 | 同じ画面で中央と右のカード：「MCP サーバー」の 5 ツール（`form_guard_list_demos`・`form_guard_scan`・`form_guard_discover_blank_cells`・`form_guard_fill`・`form_guard_verify`）、「サブエージェント」4 種（どれも Edit/Write を持たない）、その下の Skills 5 種 | Skills 5 ・ 編集しないサブエージェント 4（`memo-extractor` は様式を見る前にメモを読む／`structure-auditor`・`form-auditor` が独立に検証） ・ 依存ゼロの MCP 5 ツール |
+| 2:07–2:15 | 同じ画面で中央と右のカード：「MCP サーバー」の 5 ツール（`form_guard_list_demos`・`form_guard_scan`・`form_guard_discover_blank_cells`・`form_guard_fill`・`form_guard_verify`）、「サブエージェント」4 種（どれも Edit/Write を持たない）、その下の Skills 6 種 | Skills 6 ・ 編集しないサブエージェント 4（`memo-extractor` は様式を見る前にメモを読む／`structure-auditor`・`form-auditor` が独立に検証） ・ 依存ゼロの MCP 5 ツール |
 | 2:15–2:25 | （任意カット）公募ポータル `/portal` から **Claude in Chrome** または Claude Code（`portal-form-fill`）で固定PDF様式 `form6_study_group_grant.pdf`（`□` → `■` チェック欄つき）や `form1` の `form_guard_fill` を実行し、結果の `review_url`（`/?run_id=…`）をブラウザで開く →「MCP の下書きを読み込みました（未承認）」→「人による最終確認」タブ | 公募ポータル `/portal` ＋ Claude in Chrome ＋ MCP の下書き → `web_handoff.json` → 同じ SHA-256 のまま Web で人が承認 |
 
-**ナレーション**（234字・約5.9字/秒。英語の固有名詞が多く、読み上げは表記より短い）
+**ナレーション**（235字・約5.9字/秒。英語の固有名詞が多く、読み上げは表記より短い）
 
 > Claudeは欄ごとに使い分けます。日付・番号・選択肢はHaiku、文章・金額・氏名はSonnet、条件を残す要約と差し戻し後の自己修正は
 > Opus 5.5。使えないモデルはフォールバック連鎖で補います。開発の中心はClaude Code。2段のフックが書き込み前に様式の改変と秘密情報を
-> 止め、書き込み後に構文・import・JSONを検査。編集権限の無い4つのサブエージェントが独立に検証し、5ツールのMCPで作った下書きは、
+> 止め、書き込み後に構文・import・JSONを検査。編集ツール無しの4つのサブエージェントが独立に検証し、5ツールのMCPで作った下書きは、
 > 同じSHA-256のままブラウザで承認します。
 
-- API キーなしの収録では、モデル割り当ては「ライブ auto で担当するモデルの計画」と明示されます（API を呼んだとは表示しません）。
+- 4種のサブエージェントはどれもファイル編集ツール（`Edit`/`Write`）を持たず（`Bash` を持つ監査役も手順と `PreToolUse` フックで書き込みを制限）、API キーなしの収録ではモデル割り当ては「ライブ auto で担当するモデルの計画」と明示されます（API を呼んだとは表示しません）。
   ライブ実行では、実際に応答したモデル ID、検証器に差し戻された欄の Opus への引き上げ、404 時のフォールバックが監査ログに残ります。
 - 任意カットを入れない場合は、2:15–2:25 も資産カードを映したまま、ナレーションの最後の一文を読みます。
 
@@ -150,7 +150,7 @@ Form-Guard の外科的な差し替えの違いを、最初の28秒で見せる�
   （form1・form2・form4 は 1 ページ → 1 ページ）、PDF 出力、計算式の再計算が期待値と一致（form3 の `COUNTIF` が 3・1・1、form5 の
   `=SUM(E13:E15)` が 17）。詳細は [BUILT_WITH_CLAUDE_CODE.md](BUILT_WITH_CLAUDE_CODE.md) を参照。
 - ハッカソン後の使い方：研究事務・自治体の窓口・施設管理の担当者が Web 画面や CLI で毎月の様式に記入し、Claude Code の利用者は
-  `.mcp.json` と `.claude/` を書類フォルダに置くだけで、AI が Form-Guard 経由でしか様式に記入しなくなります（返るのは未承認の下書きだけ）。
+  本リポジトリ（`form_guard` と `scripts/hook_guard.py` を含む環境）を導入するか `.mcp.json` と `.claude/settings.json` から参照することで、AI が Form-Guard 経由でしか様式に記入しなくなります（返るのは未承認の下書きだけ）。
 
 ---
 

@@ -5031,7 +5031,56 @@ def test_p4_ballot_box_u2610_checkbox_is_parsed_written_as_u25a0_and_verified(tm
     spec = {"targets": [{"slot_id": "共同研究先との合意", "table": 0, "row": 0, "col": 1, "kind": "checkbox_text"}]}
     res = run_pipeline(form_path, "共同研究先との合意：合意済み\n", tmp_path / "out", mode="demo", slot_spec=spec)
     assert res.report.overall_status == "PASS" and res.report.passed_count == 21
+    assert res.write.patches[0].old_text == "☐"
     filled_doc = Document(res.filled_path)
     assert filled_doc.tables[0].cell(0, 1).text == "■ 合意済み　　☐ 協議中（協議予定日：　　年　　月　　日）"
+
+
+def test_p4_r1_audit_fixes_zero_amounts_negated_quotes_checkbox_locks_and_expected_sha256(samples_dir, tmp_path):
+    from form_guard.constraints import finish_checkbox_constraints, parse_checkbox_options
+    from form_guard.grounding import ground_value
+    from form_guard.models import FormSlot
+    from form_guard.scanner import discover_blank_cells
+    from form_guard.textnorm import find_amounts, kanji_to_int, parse_compound, quantities
+
+    # #1: explicit 0 before unit (0万円 / 0万5千円 / 2億0万円 / 〇万円) vs 2千万
+    assert parse_compound("0万") == 0 and find_amounts("0万円")[0].value == 0
+    assert kanji_to_int("〇万") == 0 and find_amounts("〇万円")[0].value == 0
+    assert parse_compound("0万5千") == 5_000 and find_amounts("0万5千円")[0].value == 5_000
+    assert parse_compound("2億0万") == 200_000_000 and find_amounts("2億0万円")[0].value == 200_000_000
+    assert parse_compound("2千万") == 20_000_000 and kanji_to_int("二千万") == 20_000_000
+    assert {0, 200_000_000}.issubset(quantities("助成申請額：0万円（自己負担2億0万円）"))
+
+    # #2: partial quote cut out of a negated sentence must be rejected as choice_unsupported
+    slot = FormSlot(
+        slot_id="共同研究先との合意状況",
+        label="共同研究先との合意状況",
+        location_path="page 1",
+        file_type="pdf",
+        current_text="",
+        required_format="choice",
+        constraints={"allowed_values": ["合意済み", "協議中"], "checkbox_options": [
+            {"label": "合意済み", "detail": "", "needs_input": False},
+            {"label": "協議中", "detail": "", "needs_input": False},
+        ]},
+    )
+    neg_memo = "共同研究先との合意状況：合意済みではない。\n"
+    gr = ground_value("合意済み", ["合意済み"], neg_memo, slot)
+    assert [i.code for i in gr.issues if i.severity == "error"] == ["choice_unsupported"]
+
+    # #3: broader needs_input patterns & requires_human_if_selected union with printed rules
+    opts = parse_checkbox_options("□ 通常枠　　□ その他（具体的に：　　）　　□ 特別枠（____年__月）")
+    assert [o["needs_input"] for o in opts] == [False, True, True]
+    finished = finish_checkbox_constraints({"requires_human_if_selected": []}, opts)
+    assert set(finished["requires_human_if_selected"]) == {"その他", "特別枠"}
+
+    # #12: expected_sha256 verified on discover_blank_cells for both PDF and Word/Excel
+    p6 = form6(samples_dir)["form"]
+    with pytest.raises(ValueError, match="SHA-256"):
+        discover_blank_cells(p6, mode="demo", expected_sha256="0" * 64)
+    p4 = samples_dir / "blank_forms" / "form4_unmarked_blank.docx"
+    with pytest.raises(ValueError, match="SHA-256"):
+        discover_blank_cells(p4, mode="demo", expected_sha256="0" * 64)
+
 
 
