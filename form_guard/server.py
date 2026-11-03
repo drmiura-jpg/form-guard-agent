@@ -21,7 +21,7 @@ The server is meant for 127.0.0.1 only: requests with any other Host header (DNS
 rebinding) and state-changing requests from another Origin (cross-site forms) are refused.
 
 Unmarked blank forms: ``POST /api/discover`` (an uploaded form) or ``POST /api/discover/demo``
-(the built-in form4 / form5, listed by ``GET /api/unmarked-demos``) returns candidate empty
+(the built-in form4 / form5 / form6, with form4 / form5 listed by ``GET /api/unmarked-demos``) returns candidate empty
 cells (applicant vs office-only) and a ``discovery_id``. ``POST /api/runs/from-discovery``
 (JSON) or ``POST /api/runs/upload`` (multipart) with that ``discovery_id`` and the reviewer's
 ``confirmed_targets`` fills only those cells — after re-checking that the blank form is
@@ -446,7 +446,7 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
         return tier
 
     def _stage_upload(file: UploadFile) -> Path:
-        """Store an uploaded .docx / .xlsx in a fresh staging folder after size, ZIP-bomb and type checks."""
+        """Store an uploaded .docx / .xlsx / .pdf in a fresh staging folder after size, ZIP-bomb and type checks."""
         suffix = Path(file.filename or "").suffix.lower()
         if suffix not in MEDIA:
             raise HTTPException(400, "upload a .docx, .xlsx or .pdf form")
@@ -603,7 +603,7 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
         tier = _check_tier(model_tier)
         if file is None or not file.filename:
             if not demo_id:
-                raise HTTPException(400, "upload a .docx / .xlsx form or name a demo_id (form4 / form5)")
+                raise HTTPException(400, "upload a .docx / .xlsx / .pdf form or name a demo_id (form4 / form5 / form6)")
             return discover_demo(DiscoverDemoRequest(demo_id=demo_id, mode=mode, model_tier=tier))
         form_path = _stage_upload(file)
         d = _discover(form_path, mode, tier)

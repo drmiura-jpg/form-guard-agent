@@ -83,8 +83,8 @@
       </form>
     </section>
     <section class="rail-note">
-      <p data-l="ja"><b>人が最終確認する設計（HITL）。</b>AI の出力は下書きです。各値には原文の根拠が表示され、全項目を人が確認するまでダウンロードはサーバー側でロックされます。</p>
-      <p data-l="en"><b>Human-in-the-loop by design.</b> AI output is a draft. Every value shows its verbatim source; the download stays locked on the server until a person confirms every item.</p>
+      <p data-l="ja"><b>人が最終確認する設計（HITL）。</b>AI の出力は下書きです。AI抽出値には原文の根拠（年の補完は推定フラグ、人の追加入力は確認記録）が表示され、全項目を人が確認するまでダウンロードはサーバー側でロックされます。</p>
+      <p data-l="en"><b>Human-in-the-loop by design.</b> AI output is a draft. AI-extracted values show their verbatim source (inferred years are flagged for review; reviewer-entered values are recorded as human attestations), and the download stays locked on the server until a person confirms every item.</p>
     </section>
   </aside>
 
@@ -94,7 +94,7 @@
       <ol class="why-points">
         <li><b>①</b><span data-l="ja">行政・大学・施設の指定様式は、罫線1本・結合セル1個の崩れで差し戻される。</span><span data-l="en">Official forms of municipalities, universities and facilities are sent back for a single broken border or split merged cell.</span></li>
         <li><b>②</b><span data-l="ja">文書を再生成する方式では、罫線・結合セル・定型文・用紙サイズが変わってしまうことがあります（画面の比較例は失敗を再現した模擬データです）。</span><span data-l="en">Methods that re-generate the document can alter borders, merged cells, boilerplate text and page setup (the comparison file is a simulated reproduction of those failures).</span></li>
-        <li><b>③</b><span data-l="ja">Form-Guard は XML のテキストノードだけを外科手術的に差し替え、21項目の決定論的検査（描画のずれ・セルのはみ出しを検出した場合は VIS-01 を追加）＋視覚 Diff＋原文ハイライト＋人間承認ゲートで指定欄以外の変更を検査します。Word / Excel 実機での表示・印刷と記入内容の最終確認は人が行います。</span><span data-l="en">Form-Guard surgically replaces only XML text nodes and checks for any change outside the designated fields with 21 deterministic checks (plus VIS-01 if layout drift or overflow is detected), a visual diff, source highlighting and a human approval gate. Final display/print review in Word or Excel and fact sign-off stay with a person.</span></li>
+        <li><b>③</b><span data-l="ja">Form-Guard は Word/Excel の対象 XML テキストノード置換・固定PDFの増分重ね書きを行い、21項目の決定論的検査（描画のずれ・セルのはみ出しを検出した場合は VIS-01 を追加）＋視覚 Diff＋原文ハイライト＋人間承認ゲートで指定欄以外の変更を検査します。Word / Excel 実機での表示・印刷と記入内容の最終確認は人が行います。固定PDFも同様です。</span><span data-l="en">Form-Guard replaces only target XML text nodes in Word/Excel (or writes an incremental overlay on fixed PDFs) and checks for any change outside the designated fields with 21 deterministic checks (plus VIS-01 if layout drift or overflow is detected), a visual diff, source highlighting and a human approval gate. Final display/print review in Word or Excel and fact sign-off stay with a person. Fixed PDFs follow the same review.</span></li>
       </ol>
     </details>
     <nav id="tourBar" class="tour" aria-label="Judge quick walkthrough">
@@ -127,14 +127,14 @@
         </div>
         <div class="pitch-card">
           <div class="pitch-h" data-bi="どう解決するか|How Form-Guard solves it"></div>
-          <p data-l="ja">指定欄だけを XML バイト範囲（固定PDFは増分更新オーバーレイ）で書き換え、21項目の決定論的検査で指定欄以外の変更を検査。各値に原文の根拠を示し、人が確認するまでダウンロードをロックします。Word / Excel での表示と内容の最終確認は人が行います。固定PDFも同様です。</p>
-          <p data-l="en">It rewrites only the designated fields at the XML byte level (or via incremental-update overlay on fixed PDFs), checks for any change outside them with 21 deterministic checks, shows the verbatim source of every value, and locks the download until a person signs off. The final review in Word / Excel / PDF and of the content stays with a person.</p>
+          <p data-l="ja">指定欄だけを XML バイト範囲（固定PDFは増分更新オーバーレイ）で書き換え、21項目の決定論的検査で指定欄以外の変更を検査。各値に原文の根拠を示し、人が確認するまでダウンロードをロックします。Word / Excel での表示と内容の最終確認は人が行います。固定PDFも同様です（年の補完は推定フラグ、人の追加入力は確認記録として区別します）。</p>
+          <p data-l="en">It rewrites only the designated fields at the XML byte level (or via incremental-update overlay on fixed PDFs), checks for any change outside them with 21 deterministic checks, shows the verbatim source for AI-extracted values (flagging inferred years for review and recording reviewer entries as human attestations), and locks the download until a person signs off. The final review in Word / Excel / PDF and of the content stays with a person.</p>
         </div>
       </div>
       <ol class="steps">
         <li><b data-t="スキャン|Scan">スキャン</b><span data-t="欄と印刷ルール（字数・和暦・上限）を読む|find fields and printed rules (character limits, Japanese era dates, caps)">欄と印刷ルール（字数・和暦・上限）を読む</span></li>
         <li><b data-t="対応付け・自己修正|Map &amp; self-correct">対応付け・自己修正</b><span data-t="Claude（Haiku / Sonnet / Opus）またはオフライン、原文引用のみ|Claude (Haiku / Sonnet / Opus) or offline, verbatim quotes only">Claude（Haiku / Sonnet / Opus）またはオフライン、原文引用のみ</span></li>
-        <li><b data-t="外科的な書き込み|Surgical write">外科的な書き込み</b><span data-t="XML のマーカー文字だけを置換|replace only the marker characters in the XML">XML のマーカー文字だけを置換</span></li>
+        <li><b data-t="外科的な書き込み|Surgical write">外科的な書き込み</b><span data-t="Word/Excelの対象XML置換・PDFの増分重ね書き|replace target XML in Word/Excel or write incremental PDF overlay">Word/Excelの対象XML置換・PDFの増分重ね書き</span></li>
         <li><b data-t="構造検査（21項目）|Verify (21 checks)">構造検査（21項目）</b><span data-t="ZIP・XML骨格・表・罫線・定型文・根拠|ZIP · XML skeleton · tables · borders · text · grounding">ZIP・XML骨格・表・罫線・定型文・根拠</span></li>
         <li><b data-t="人による最終確認|Human sign-off">人による最終確認</b><span data-t="全項目を確認するとダウンロード解錠|checklist, then the download unlocks">全項目を確認するとダウンロード解錠</span></li>
       </ol>
