@@ -19,9 +19,9 @@
 ### ② 選択したテーマ（Selected Theme）
 
 - **単一選択の場合の第1推奨**：
-  **`テーマ1：あなたにしかない深さを。`**
+  **`テーマ1：あなたにしかない深さを。`**（主選択：テーマ1の現場課題を突き詰めた結果として、非エンジニアがAIを盲信せずに使えるテーマ2の壁も同時に解消する設計）
   - **選択理由（フォームに理由欄がある場合）**：
-    研究計画書や申請書など、指定様式を1字も崩せない書類を実務で扱ってきた当事者として、生成AIを書類業務に使いにくい最大の壁は「AIの文章が間違うこと」以上に、**「文書全体を作り直す方法では、指定様式の罫線・結合セル・計算式・定型文が変わってしまうことがあり、どこが変わったのか誰にも分からないためそのまま提出できないこと」**にあると痛感してきました。「『そういうものだ』と誰もが諦めて手作業で転記・目視確認してきた日々の不便」を、指定欄のバイト範囲だけを外科的に差し替え、指定欄以外が変わっていないことを21項目の決定論的検査で確かめる仕組みに変えました。
+    研究計画書や申請書など、指定様式を1字も崩せない書類を実務で扱ってきた当事者として、生成AIを書類業務に使いにくい最大の壁は「AIの文章が間違うこと」以上に、**「文書全体を作り直す方法では、指定様式の罫線・結合セル・計算式・定型文が変わってしまうことがあり、どこが変わったのか誰にも分からないためそのまま提出できないこと」**にあると痛感してきました。「『そういうものだ』と誰もが諦めて手作業で転記・目視確認してきた日々の不便」を、指定欄のバイト範囲だけを外科的に差し替え、指定欄以外が変わっていないことを21項目の決定論的検査で確かめる仕組みに変えました（あわせて、各値の原文引用表示・事務局欄ロック・人間承認ゲートにより、テーマ2が掲げる「非エンジニアでも安心して使える仕組み」も同時に満たしています）。
 - **複数選択可、またはテーマ2を選ぶ場合の文案**：
   **`テーマ2：本来、誰にでも届くべきものを。`**
   - **選択理由**：
@@ -57,47 +57,49 @@
 ## 2. プロジェクト概要：解決する課題と、誰のためのものか
 （Project Overview: Problem, Target Users, Solution & Post-Hackathon Use — 審査基準「インパクト 30%」「深さと実行力 20%」対応）
 
-### A. 日本語・標準版（Markdown記号・改行除き 1,484字／そのまま 1,561字）
+### A. 日本語・標準版（箇条書き・太字・バッククォート・改行除き 1,538字／改行除き 1,584字／そのまま 1,595字）
 
 **【誰の・どんな課題か（日本の現場から出発した課題）】**
-日本の大学・研究機関、自治体窓口、施設管理の現場では、「様式第1号」などの公式な Word（`.docx`）・Excel（`.xlsx`）・固定レイアウト PDF（`.pdf`）が指定され、**「元の書式・罫線・結合セル・計算式・定型文を変えないこと」**が求められます。罫線1本、結合セル1つ、Excel の `SUM` / `COUNTIF` 計算式1つの崩れが差し戻しや再提出の原因になることがあります。
-しかし、文書全体を作り直す方法では、罫線や結合セル、文言が変わってしまうことがあり、「どこが変わったのか」「どの数字がAIの推測なのか」を確かめるだけで手作業以上の時間がかかるため、現場の事務担当者や申請者が安全に使うには壁がありました。
+- 日本の大学・研究機関、自治体窓口、施設管理の現場では、「様式第1号」などの公式な Word（`.docx`）・Excel（`.xlsx`）・固定レイアウト PDF（`.pdf`）が指定され、**「元の書式・罫線・結合セル・計算式・定型文を変えないこと」**が求められます。罫線1本、結合セル1つ、Excel の `SUM` / `COUNTIF` 計算式1つの崩れが差し戻し（押印や決裁の取り直し・再提出の手戻り）や再提出の原因になることがあります。
+- しかし、文書全体を作り直す方法では、罫線や結合セル、文言が変わってしまうことがあり、「どこが変わったのか」「どの数字がAIの推測なのか」を確かめるだけで手作業以上の時間がかかるため、現場の事務担当者や申請者が安全に使うには壁がありました。
 
 **【どう解決するか（Form-Guard Agent のアプローチ）】**
-Form-Guard Agent は「AIに書類全体を作らせる」のではなく、**「白紙様式の指定欄だけをバイト単位で外科的に差し替え、それ以外が変わっていないことを決定論的に検査する」**エージェントです。
-1. **外科的差込と21項目＋視覚Diff検査（`VIS-01`）**：対象テキストノードのバイト範囲（固定PDFは増分更新オーバーレイ）だけを書き換え、他のZIPエントリは再圧縮すら行わず生バイト複製します。記入後に7区分・21項目の構造検査と視覚検査（`VIS-01`：Word／Excelは内蔵描画エンジンによる配置比較、対応する固定PDFは指定枠外の画素比較。`0 px` は各比較での測定値であり、任意文書の実機表示・印刷の完全一致保証ではなく最終確認は人が行います）を実行し、付属5様式については実機 Microsoft Word 16.0・Excel 16.0 でも警告ゼロ・ページ数不変・計算式一致を確認済みです。
-2. **マーカーなし白紙様式の4段階・空欄自動発見**：`{{マーカー}}` が無い白紙様式（デモ4 Word・デモ5 Excel・デモ6 固定PDF）でも、申請者記入欄（`applicant_fillable`）と事務局専用欄（`office_only`：受付番号・審査欄等）を自動仕分けし、事務局欄や計算式セルへの誤記入をロックします。
-3. **根拠付き抽出・不明点の明示と人間承認ロック**：AIの抽出値には元メモの原文引用スパンを紐づけ、年の補完は推定フラグ（`year_inferred`）を付けて人が確認し、メモに無い事実（デモ2の法人番号）は推測で埋めず `needs_human_input`（人の追加入力は本人確認記録 `human attestation`）として残します。アプリ側の字数超過修復処理では、検知した条件語の削除を自動保留（`unsafe_condensation`）して削除文を全文表示し、モデルが最初から字数内で要約した文章も含め、省略の妥当性は人が原文全体と照合します。確認者が全項目を確認して承認するまで、ダウンロードはサーバー側でロックされます。
+- Form-Guard Agent は「AIに書類全体を作らせる」のではなく、**「白紙様式の指定欄だけをバイト単位で外科的に差し替え、それ以外が変わっていないことを決定論的に検査する」**エージェントです。
+- **1. 外科的差込と21項目＋視覚Diff検査（`VIS-01`）**：対象テキストノードのバイト範囲（固定PDFは増分更新オーバーレイ）だけを書き換え、他のZIPエントリは再圧縮すら行わず生バイト複製します。記入後に7区分・21項目の構造検査と視覚検査（`VIS-01`：Word／Excelは内蔵描画エンジンによる配置比較、対応する固定PDFは指定枠外の画素比較。`0 px` は各比較での測定値であり、任意文書の実機表示・印刷の完全一致保証ではなく最終確認は人が行います）を実行し、付属5様式については実機 Microsoft Word 16.0・Excel 16.0 でも警告ゼロ・ページ数不変・計算式一致を確認済みです。
+- **2. マーカーなし白紙様式の4段階・空欄自動発見**：`{{マーカー}}` が無い白紙様式（デモ4 Word・デモ5 Excel・デモ6 固定PDF）でも、申請者記入欄（`applicant_fillable`）と事務局専用欄（`office_only`：受付番号・審査欄等）を自動仕分けし、事務局欄や計算式セルへの誤記入をロックします。
+- **3. 根拠付き抽出・不明点の明示と人間承認ロック**：AIの抽出値には元メモの原文引用スパンを紐づけ、年の補完は推定フラグ（`year_inferred`）を付けて人が確認し、メモに無い事実（デモ2の法人番号）は推測で埋めず `needs_human_input`（人の追加入力は本人確認記録 `human attestation`）として残します。アプリ側の字数超過修復処理では、検知した条件語の削除を自動保留（`unsafe_condensation`）して削除文を全文表示し、モデルが最初から字数内で要約した文章も含め、省略の妥当性は人が原文全体と照合します。確認者が全項目を確認して承認するまで、ダウンロードはサーバー側でロックされます。
 
 **【ハッカソン後の継続利用と導入条件】**
-Web UI・CLI・Claude Code MCP サーバー（`.mcp.json`）の3形態で動作し、APIキーがない端末でもオフライン決定論エンジンで再現できます。実務導入時は様式ごとの対象欄設定と実機表示確認を行い、固定PDFはページ内に Unicode の CID フォントを持つ PDF を対象とします（Identity-H やスキャン画像PDF等は安全に拒否。詳細は `README.md` の Limitations 参照）。
+- Web UI・CLI・Claude Code MCP サーバー（`.mcp.json`）の3形態で動作し、APIキーがない端末でもオフライン決定論エンジンで再現できます。実務導入時は様式ごとの対象欄設定と実機表示確認を行い、固定PDFはページ内に Unicode の CID フォントを持つ PDF を対象とします（Identity-H やスキャン画像PDF等は安全に拒否。詳細は `README.md` の Limitations 参照）。
 
 ---
 
-### B. 日本語・短縮版（文字数制限が厳しい欄向け・改行除き 443字／そのまま 446字）
+### B. 日本語・短縮版（文字数制限が厳しい欄向け・箇条書き・改行除き 465字／改行除き 471字／そのまま 473字）
 
-日本の大学・自治体・施設の申請業務では、指定された Word・Excel・固定PDF 様式の罫線や結合セル、計算式が崩れると差し戻しの原因になります。文書全体を作り直す方法では書式が変わることがあり、どこが変わったか分からず現場で安全に使えませんでした。
-Form-Guard Agent は、指定欄だけをバイト単位で外科的に書き換え（対応する固定PDFは元バイト不変の増分更新）、7区分・21項目の構造検査と視覚検査（Word/Excelの内蔵配置比較・固定PDFの欄外画素比較でずれ `0 px`、最終的な実機表示は人が確認）で欄外の不変を確かめます。マーカーの無い白紙様式でも申請者欄と事務局専用欄を4段階で自動仕分けして誤記入をロックし、AI抽出値に原文引用ハイライトを付与（年の補完は推定表示）。メモに無い事実は推測で埋めず人の入力待ちに残し、人が最終確認するまでダウンロードを解錠しません。Web UI・CLI・Claude Code MCP で現場の定型様式業務に活用できます。
+- 日本の大学・自治体・施設の申請業務では、指定された Word・Excel・固定PDF 様式の罫線や結合セル、計算式が崩れると差し戻し（押印・決裁の取り直しや再提出の手戻り）の原因になります。文書全体を作り直す方法では書式が変わることがあり、どこが変わったか分からず現場で安全に使えませんでした。
+- Form-Guard Agent は、指定欄だけをバイト単位で外科的に書き換え（対応する固定PDFは元バイト不変の増分更新）、7区分・21項目の構造検査と視覚検査（Word/Excelの内蔵配置比較・固定PDFの欄外画素比較でずれ `0 px`、最終的な実機表示は人が確認）で欄外の不変を確かめます。
+- マーカーの無い白紙様式でも申請者欄と事務局専用欄を4段階で自動仕分けして誤記入をロックし、AI抽出値に原文引用ハイライトを付与（年の補完は推定表示）。メモに無い事実は推測で埋めず人の入力待ちに残し、人が最終確認するまでダウンロードを解錠しません。Web UI・CLI・Claude Code MCP で現場の定型様式業務に活用できます。
 
 ---
 
-### C. 英語版（English Overview — Markdown記号・改行除き 1,725 chars／そのまま 1,788 chars）
+### C. 英語版（English Overview — 箇条書き・太字・バッククォート・改行除き 1,917 chars／改行除き 1,959 chars／そのまま 1,967 chars）
 
 **Problem & Target Users:**
-In Japanese universities, municipal offices, and facility management, official Word (`.docx`), Excel (`.xlsx`), and fixed-layout PDF (`.pdf`) forms come with a strict rule: *do not alter the original layout, borders, merged cells, formulas, or printed clauses*. Regenerating a complete form can alter borders, merged cells, or formulas and introduce unstated numbers, making it unsafe for non-engineer staff. (The comparison file in the demo uses scripted simulated regeneration failures to illustrate these structural checks.)
+- In Japanese universities, municipal offices, and facility management, official Word (`.docx`), Excel (`.xlsx`), and fixed-layout PDF (`.pdf`) forms come with a strict rule: *do not alter the original layout, borders, merged cells, formulas, or printed clauses*.
+- One broken border or altered clause can trigger administrative rejection (差し戻し), requiring internal seals/approvals to be re-obtained and the form to be re-submitted. Regenerating a complete form can alter borders, merged cells, or formulas and introduce unstated numbers, making it unsafe for non-engineer staff. (The comparison file in the demo uses scripted simulated regeneration failures to illustrate these structural checks.)
 
 **Solution:**
-Form-Guard Agent performs **byte-range surgical replacement** only on designated fields (and byte-preserving incremental overlay on supported fixed PDFs with embedded Unicode CID fonts; see `README.md` Limitations), backed by **21 deterministic structural checks + `VIS-01` visual verification**:
-1. **Visual & Structural Checks:** Visual checks compare built-in layout geometry for Word/Excel and pixels outside designated boxes for supported PDFs (`0 px` drift in the built-in checks; native display and printing require final human review, and production adoption requires per-template field and display verification).
-2. **4-Stage Blank-Cell Discovery** on unmarked forms (`form4` Word, `form5` Excel, `form6` PDF), separating `applicant_fillable` cells from locked `office_only` cells and Excel formulas.
-3. **Verbatim Source Grounding (no guessed facts) & Human Gate:** AI-extracted values carry source quotes; inferred years are flagged for review (`year_inferred`), unstated facts stay `needs_human_input`, and reviewer-entered values are recorded as human attestations. The application holds unsafe deletions during its own length repair, while pre-condensed model output is reviewed against the full source.
+- Form-Guard Agent performs **byte-range surgical replacement** only on designated fields (and byte-preserving incremental overlay on supported fixed PDFs with embedded Unicode CID fonts; see `README.md` Limitations), backed by **21 deterministic structural checks + `VIS-01` visual verification**:
+- **1. Visual & Structural Checks:** Visual checks compare built-in layout geometry for Word/Excel and pixels outside designated boxes for supported PDFs (`0 px` drift in the built-in checks; native display and printing require final human review, and production adoption requires per-template field and display verification).
+- **2. 4-Stage Blank-Cell Discovery** on unmarked forms (`form4` Word, `form5` Excel, `form6` PDF), separating `applicant_fillable` cells from locked `office_only` cells and Excel formulas.
+- **3. Verbatim Source Grounding (no guessed facts) & Human Gate:** AI-extracted values carry source quotes; inferred years are flagged for review (`year_inferred`), unstated facts stay `needs_human_input`, and reviewer-entered values are recorded as human attestations. The application holds unsafe deletions during its own length repair, while pre-condensed model output is reviewed against the full source.
 
 ---
 
 ## 3. Claude および Claude Code の活用に関する質問
 （How You Used Claude & Claude Code — 審査基準「Claudeの活用 25%」対応）
 
-### A. 日本語・標準版（Markdown記号・改行除き 2,109字／そのまま 2,286字）
+### A. 日本語・標準版（箇条書き・太字・バッククォート・改行除き 2,207字／改行除き 2,269字／そのまま 2,286字）
 
 **1. 欄の性質に応じた Claude 3モデルの目的別ルーティングと自己修正設計（アプリ中核）**
 1つの様式の中でも欄ごとに求められる能力が異なるため、`--model-tier auto` で3階層モデルを自動振り分けしています：
@@ -120,7 +122,7 @@ Form-Guard Agent performs **byte-range surgical replacement** only on designated
 
 ---
 
-### B. 英語版（How You Used Claude & Claude Code — Markdown記号・改行除き 1,677 chars／そのまま 1,795 chars）
+### B. 英語版（How You Used Claude & Claude Code — 箇条書き・太字・バッククォート・改行除き 1,743 chars／改行除き 1,787 chars／そのまま 1,795 chars）
 
 **1. Purpose-Driven 3-Tier Claude Routing & Self-Correction (`--model-tier auto`):**
 - **`claude-haiku-4-5-20251001`** handles date/era normalization, IDs, enum selection, and blank-cell classification.

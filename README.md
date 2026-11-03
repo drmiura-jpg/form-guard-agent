@@ -9,14 +9,14 @@ Built for **Built with Claude: Japan 2026** (development started Monday, 2026-11
 
 ### ⚡ 30-Second Judge Quick Reference / 審査員向け 30秒早見表（4つの審査基準と確認リンク）
 
-※下の `#tour=1`〜`#tour=5`・`/portal` は、`python -m form_guard.cli --serve` でローカルサーバー（`http://127.0.0.1:8000`）を起動した状態で1クリックで開けます。
+※下の `#tour=1`〜`#tour=5`・`/portal` は、`python -m form_guard.cli --serve` でローカルサーバー（`http://127.0.0.1:8000`）を起動した状態で1クリックで開けます（ローカルサーバー起動前にGitHub上でそのまま確認できるスクリーンショット・ドキュメントへの直リンクも併記しています）。
 
 | 審査基準 / Judging Criterion | 配点 | 何を確認できるか / What Form-Guard Proves | Web UI ガイドツアー & 実証リンク |
 |---|---|---|---|
-| **① インパクト（潜在的インパクト）**<br>Potential Impact | **30%** | 行政・大学・施設の指定様式（`.docx` / `.xlsx` / 固定 `.pdf`）で、罫線1本・結合セル1つの崩れによる差し戻しを防ぎ、非エンジニアでもWeb画面で各値の原文根拠を確かめてから承認できる（導入はPython 3.10以上・APIキー無しでも全工程が動く） | [トップ画面 `/` 上部バナー](http://127.0.0.1:8000/) · [ハッカソン後の継続利用場面 ↓](#why-this-matters--who-keeps-using-it-after-the-hackathon) |
-| **② デモ（デモの完成度）**<br>Demo & Presentation | **25%** | 作り直し版（失敗再現データ・7項目不合格）との視覚比較、マーカーなし白紙からの4段階空欄自動発見、原文引用ハイライトと推測拒否（法人番号は人の入力待ち） | [`/#tour=1`（視覚比較）](http://127.0.0.1:8000/#tour=1) · [`/#tour=2`（空欄自動発見）](http://127.0.0.1:8000/#tour=2) · [`/#tour=3`（原文根拠・推測拒否）](http://127.0.0.1:8000/#tour=3) · [3分動画台本](docs/DEMO_VIDEO_SCRIPT_JA.md) |
-| **③ Claudeの活用（Claude Code中心の開発・使い分け）**<br>Creative Use of Claude | **25%** | 欄ごとの3段モデル振り分け（Haiku 4.5 / Sonnet 5 / Opus 5.5・実API疎通確認済み）＋404フォールバック連鎖、2段フック（`PreToolUse` / `PostToolUse`）、`Edit`/`Write`ツール無しの4サブエージェント（うち3種はフック付き`Bash`を使用）、Skills 6種、依存ゼロの5ツール MCP、公募ポータル [`/portal`](http://127.0.0.1:8000/portal) 連携 | [`/#tour=4`（「Claude Code 連携 · Architecture」タブ）](http://127.0.0.1:8000/#tour=4) · [BUILT_WITH_CLAUDE_CODE.md](docs/BUILT_WITH_CLAUDE_CODE.md) |
-| **④ 深さと実行力（実装の深さと実行力）**<br>Depth & Execution | **20%** | 7区分21項目＋`VIS-01`（指定欄以外のずれ `0 px`）の決定論的検査、版（`revision`）と `SHA-256` に結び付いた人間承認ロック、実機 Word/Excel 16.0・実API 3階層ルーティング検証、272件の自動テスト（APIキー不要で再現可） | [`/#tour=5`（21項目構造証明＆人間承認ロック）](http://127.0.0.1:8000/#tour=5) · [試行錯誤の記録](docs/BUILT_WITH_CLAUDE_CODE.md#5-iterating-with-claude-code) · [実機検証記録](#verified-on-real-machines-2026-11-03火) · [自動テスト (`tests/test_form_guard.py`)](tests/test_form_guard.py) |
+| **① インパクト（潜在的インパクト）**<br>Potential Impact | **30%** | 行政・大学・施設の指定様式（`.docx` / `.xlsx` / 固定 `.pdf`）で、罫線1本・結合セル1つの崩れによる差し戻し（押印・決裁の取り直しや再提出の手戻り）を防ぎ、非エンジニアでもWeb画面で各値の原文根拠を確かめてから承認できる（導入はPython 3.10以上・APIキー無しでも全工程が動く） | [トップ画面 `/` 上部バナー](http://127.0.0.1:8000/)（[スクショ1](docs/screenshots/01_visual_diff.png)） · [ハッカソン後の継続利用場面 ↓](#why-this-matters--who-keeps-using-it-after-the-hackathon) |
+| **② デモ（デモの完成度）**<br>Demo & Presentation | **25%** | 作り直し版（失敗再現データ・7項目不合格）との視覚比較、マーカーなし白紙からの4段階空欄自動発見、原文引用ハイライトと推測拒否（法人番号は人の入力待ち） | [`/#tour=1`（視覚比較）](http://127.0.0.1:8000/#tour=1)（[スクショ1](docs/screenshots/01_visual_diff.png)） · [`/#tour=2`（空欄自動発見）](http://127.0.0.1:8000/#tour=2)（[スクショ6](docs/screenshots/06_unmarked_discovery.png)） · [`/#tour=3`（原文根拠・推測拒否）](http://127.0.0.1:8000/#tour=3)（[スクショ2](docs/screenshots/02_fields_and_sources.png)） · [3分動画台本](docs/DEMO_VIDEO_SCRIPT_JA.md) |
+| **③ Claudeの活用（Claude Code中心の開発・使い分け）**<br>Creative Use of Claude | **25%** | 欄ごとの3段モデル振り分け（Haiku 4.5 / Sonnet 5 / Opus 5.5・実API疎通確認済み）＋404フォールバック連鎖、2段フック（`PreToolUse` / `PostToolUse`）、`Edit`/`Write`ツール無しの4サブエージェント（うち3種はフック付き`Bash`を使用）、Skills 6種、依存ゼロの5ツール MCP、公募ポータル [`/portal`](http://127.0.0.1:8000/portal) 連携 | [`/#tour=4`（「Claude Code 連携 · Architecture」タブ）](http://127.0.0.1:8000/#tour=4)（[スクショ7](docs/screenshots/07_claude_code_architecture.png)） · [BUILT_WITH_CLAUDE_CODE.md](docs/BUILT_WITH_CLAUDE_CODE.md) |
+| **④ 深さと実行力（実装の深さと実行力）**<br>Depth & Execution | **20%** | 7区分21項目＋`VIS-01`（指定欄以外のずれ `0 px`）の決定論的検査、版（`revision`）と `SHA-256` に結び付いた人間承認ロック、実機 Word/Excel 16.0・実API 3階層ルーティング検証、272件の自動テスト（APIキー不要で再現可） | [`/#tour=5`（21項目構造証明＆人間承認ロック）](http://127.0.0.1:8000/#tour=5)（[スクショ3](docs/screenshots/03_structural_audit.png)・[スクショ4](docs/screenshots/04_human_approval.png)） · [試行錯誤の記録](docs/BUILT_WITH_CLAUDE_CODE.md#5-iterating-with-claude-code) · [実機検証記録](#verified-on-real-machines-2026-11-03火) · [自動テスト (`tests/test_form_guard.py`)](tests/test_form_guard.py) |
 
 ---
 
@@ -24,7 +24,7 @@ Built for **Built with Claude: Japan 2026** (development started Monday, 2026-11
 
 **Concrete pain in Japan's workplaces.**
 - University and research-institute administration (共同研究の計画変更届, 研究設備の利用申請), municipal subsidy and disaster-stockpile counters (補助金の交付申請, 備蓄品の貸出申請) and facility safety inspections (月次点検報告) all run on official `.docx` / `.xlsx` templates with strict cell grids, merged cells, `vMerge`, formulas, drop-down lists and printed legal boilerplate.
-- One broken border, one paraphrased clause or one number the notes never stated can lead to administrative rejection (差し戻し) and another round trip.
+- One broken border, one paraphrased clause or one number the notes never stated can lead to administrative rejection (差し戻し) and another round trip — requiring internal approvals or seals to be re-obtained and the document to be re-submitted.
 - The people who fill these forms every month — research administrators, municipal applicants and back-office staff, mostly not engineers — cannot safely use chat AI for it: asked to "fill in this form", it typically **re-creates the document**, and a re-created document can split merged cells, lose borders, paraphrase legal text, change the page setup and add numbers that are in nobody's notes — and nobody can tell what changed.
 
 - **Theme 1 — depth only someone from the domain sees:** the dangerous failure is not "the AI wrote a wrong
@@ -45,7 +45,8 @@ left-hand columns are counted from the files, **not** a timed study of a person)
 | form5 `form5_unmarked_blank.xlsx` | 5 (locate 6 empty cells, decide office vs applicant) | 52 | 282 XML tags · 30 printed text blocks · 34 merged cells/ranges · 269 border definitions · 9 package parts | 154 ms | 21/21 (PASS) | 7 checklist items |
 
 - Across the 5 built-in Word/Excel forms (form1–form5; the fixed-PDF demo 6 is not in this table, 41 designated fields in total), Form-Guard filled 40 fields (848 characters written), leaving 1 unstated field for human input, and verified 2,119 XML tags, 171 printed text blocks, 124 merged cells/ranges and 650 border definitions in under 0.4 s per form (120–246 ms in the table above; 119–379 ms in the web suite measurement; wall-clock varies with PC load).
-- What is left for the person is the 51-item source-linked sign-off checklist and 1 unstated fact — `法人番号` in form2 — which stays empty for the human instead of being hallucinated.
+- On the 6th built-in demo (`form6_study_group_grant.pdf`, A4 fixed PDF), Form-Guard reconstructs 19 ruled boxes across 2 tables, recommends 7 applicant boxes (including `□ 合意済み → ■ 合意済み` and `税込で48万円 → 480,000円`), locks 2 office-only boxes, appends a PDF incremental update keeping the 3,742-byte blank PDF as an exact byte prefix, and passes all 21/21 checks with `0 px` pixel diff outside the designated boxes.
+- What is left for the person is the 51-item source-linked sign-off checklist (plus 9 items on form6) and 1 unstated fact — `法人番号` in form2 — which stays empty for the human instead of being hallucinated.
 
 **Post-hackathon continued use & deployment roadmap**
 
@@ -166,7 +167,7 @@ How Claude is used at runtime (`form_guard/mapper.py`):
   and an unrecognised family or version gets no capability flags at all.
   Request formatting is verified against mock/transport tests; live API availability and model-specific features
   depend on the caller's Anthropic account tier. On 2026-11-03（火）, a live 3-tier API run was also verified in
-  `output/live_smoke_form1/audit_log.json` (run `20261103-164113-f83bad`). Thinking summaries returned by the API are kept in the audit log,
+  `output/live_smoke_form1/audit_log.json` (run `20261103-164113-f83bad`, local git-ignored `output/` directory). Thinking summaries returned by the API are kept in the audit log,
   labelled as API-returned summaries.
 - **Self-correction loop**: the validator's findings ("quote not found verbatim", "212 chars exceeds the 200-char
   limit", "1,612,000円 exceeds the printed cap") are sent back in the same conversation; only the failing fields
@@ -187,7 +188,7 @@ The repository ships its own Claude Code setup (details and rationale: [docs/BUI
 |---|---|
 | `.claude/skills/` | `form-scan`, `surgical-fill`, `structural-audit`, `form-fill-verify`, `visual-diff-audit`, `portal-form-fill` — scan (with blank-cell discovery) → fill → audit, a one-pass fill-and-verify, the visual / layout audit, and the one-sentence grant-portal workflow (portal → discover → fill → verify → sign-off page in Chrome) |
 | `.claude/agents/` | `memo-extractor` (Sonnet: blind verbatim extraction *before* it sees the slots), `field-mapper` (`claude-opus-5-5`: rule-aware proposals — 和暦, caps, condensation), `structure-auditor` (Sonnet: fast deterministic audit), `form-auditor` (Opus: adversarial re-verification and the HITL list). **No file-editing tools (`Edit`/`Write`)**: `memo-extractor` uses only `Read, Grep, Glob`, and `form-auditor` (like `field-mapper` and `structure-auditor`) uses `Read, Grep, Glob, Bash` for verification commands under `PreToolUse` protection. That `Bash` is limited by the agents' prompt instructions and by the `PreToolUse` hook (`scripts/hook_guard.py`), which blocks any write, move or deletion targeting `samples/blank_forms/` — the tool list alone does not make a shell read-only |
-| `.claude/settings.json` + `scripts/hook_guard.py` | **Two-stage hook guard.** `PreToolUse` (`Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `Bash`, `PowerShell`) prevents *before anything is written* — exit code 2 + `permissionDecision: "deny"` — any write, copy-over, move or delete of `samples/blank_forms/*.docx` / `*.xlsx` / `*.pdf` — the folder itself, folders above it and wildcards included (`rm -rf samples/blank_forms`, `Remove-Item -LiteralPath samples/blank_forms -Recurse`, `rm samples/blank_forms/*`); only the real generator command `python -m form_guard.cli --generate-samples` is exempt, never a flag inside a `# comment` — and any write that would put an Anthropic API key, a literal `ANTHROPIC_API_KEY = "sk-…"`, a personal user-profile path (`C:\Users\<user>`, `/Users/<user>`, `/home/<user>` — any user name, Japanese ones included; placeholders such as `<user>`, `runner` or `root` are fine) or an e-mail address outside `example.com` / `example.jp` / `example.org` (and their subdomains) and `users.noreply.github.com` into a project file — the only other address allowed is exactly `noreply@anthropic.com`. `PostToolUse` (`Write`, `Edit`, `MultiEdit`) verifies *after the write* that Python compiles (`py_compile`) and the edited module imports (< 1.8 s), that JSON parses, and re-scans the file; extensions are compared case-insensitively (`X.PY`, `X.JSON`). Commands: `python scripts/hook_guard.py pre-tool-use` / `post-tool-use` — no `$`, `%` or backtick, so they run identically in Git Bash, PowerShell, cmd, macOS and Linux (activate `.venv` first, see Quick start) |
+| `.claude/settings.json` + `scripts/hook_guard.py` | **Two-stage hook guard.**<br>• `PreToolUse` (`Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `Bash`, `PowerShell`) prevents *before anything is written* — exit code 2 + `permissionDecision: "deny"` — any write, copy-over, move or delete of `samples/blank_forms/*.docx` / `*.xlsx` / `*.pdf` — the folder itself, folders above it and wildcards included (`rm -rf samples/blank_forms`, `Remove-Item -LiteralPath samples/blank_forms -Recurse`, `rm samples/blank_forms/*`); only the real generator command `python -m form_guard.cli --generate-samples` is exempt, never a flag inside a `# comment` — and any write that would put an Anthropic API key, a literal `ANTHROPIC_API_KEY = "sk-…"`, a personal user-profile path (`C:\Users\<user>`, `/Users/<user>`, `/home/<user>` — any user name, Japanese ones included; placeholders such as `<user>`, `runner` or `root` are fine) or an e-mail address outside `example.com` / `example.jp` / `example.org` (and their subdomains) and `users.noreply.github.com` into a project file — the only other address allowed is exactly `noreply@anthropic.com`.<br>• `PostToolUse` (`Write`, `Edit`, `MultiEdit`) verifies *after the write* that Python compiles (`py_compile`) and the edited module imports (< 1.8 s), that JSON parses, and re-scans the file; extensions are compared case-insensitively (`X.PY`, `X.JSON`).<br>• Commands: `python scripts/hook_guard.py pre-tool-use` / `post-tool-use` — no `$`, `%` or backtick, so they run identically in Git Bash, PowerShell, cmd, macOS and Linux (activate `.venv` first, see Quick start) |
 | `.mcp.json` | registers the `form-guard` MCP server: `python -m form_guard.mcp_server` (stdio JSON-RPC 2.0, no extra dependencies, UTF-8 forced, messages capped at 10 MB) with `form_guard_list_demos` (all six fictional demos: marked, unmarked and the fixed PDF), `form_guard_scan`, `form_guard_discover_blank_cells`, `form_guard_fill` (writes only an **unapproved draft** into `output/mcp_runs/`, `approval_status: UNAPPROVED_DRAFT_REQUIRES_HUMAN_SIGN_OFF` in the result and in `audit_log.json` — nothing is stamped into the document itself; the result's `review_url` opens that exact draft in the web app for sign-off) and `form_guard_verify` (with VIS-01). `mode` defaults to `demo` (offline); `live` is an explicit opt-in. Paths with a `.env*`, `.git`, `.ssh` or `.claude-hackathon` component are refused |
 | Web UI tab **Claude Code 連携 · Architecture** | `GET /api/claude-suite` reads the files above (skills, subagents with their models and tools, both hook stages — `PreToolUse` and `PostToolUse` — with their commands and checks, the permission denials, the MCP tools) and shows how they work together, this run's per-field model routing, the routing policy and the measured workflow numbers |
 
@@ -411,7 +412,7 @@ A **fixed PDF** is checked against the same ids (`form_guard/pdf_support.py`, `v
 ## Verified on real machines (2026-11-03（火）)
 
 - **Live Anthropic API 3-tier routing (`--mode live --model-tier auto`).** On `form1_research_plan_change.docx`
-  (local live run `20261103-164113-f83bad` in `output/live_smoke_form1/audit_log.json`, `filled_sha256: 2198043e2f70c66a2b36a71c4e0c653ffd6a1e8d88740af44d3f9f8356c2a2bc`),
+  (local live run `20261103-164113-f83bad` in `output/live_smoke_form1/audit_log.json`, local git-ignored `output/` directory, `filled_sha256: 2198043e2f70c66a2b36a71c4e0c653ffd6a1e8d88740af44d3f9f8356c2a2bc`),
   all three tiers answered on the first attempt (`model_fallbacks: []`, `escalations: []`):
   `claude-haiku-4-5-20251001` mapped 3 structured fields (`提出日`, `研究課題番号`, `変更種別`; `effort: null`, thinking omitted),
   `claude-sonnet-5` mapped 4 standard text/name fields (`研究代表者氏名`, `所属部局`, `変更前の計画概要`, `変更後の計画概要`; `effort: "medium"`, adaptive thinking summarized),
@@ -539,23 +540,20 @@ License: MIT (see [LICENSE](LICENSE)).
 
 ### 誰のどんな課題を解決し、ハッカソン後にどこで使われ続けるか
 
-**日本の職場の具体的な困りごと**：大学・研究機関の研究事務（共同研究の計画変更届、研究設備の利用申請）、自治体の補助金や
-防災備蓄品の窓口、施設の安全点検では、罫線・結合セル・`vMerge`・計算式・プルダウン・印刷された定型文を持つ公式の
-`.docx` / `.xlsx` 様式を使います。罫線が1本崩れる、文言が1つ言い換わる、メモに無い数字が入るといった不備は差し戻しや
-やり直しの原因になります。毎月これらに記入しているのは、多くがエンジニアではない研究事務・申請者・バックオフィスの担当者です。
-生成AIのチャットは多くの場合、様式ごと作り直すため、罫線や文言が変わったり根拠の無い数字が入ったりすることがあり、
-何が変わったのか誰にも分からないので、安全に使えませんでした。
+**日本の職場の具体的な困りごと**：
+- 大学・研究機関の研究事務（共同研究の計画変更届、研究設備の利用申請）、自治体の補助金や防災備蓄品の窓口、施設の安全点検では、罫線・結合セル・`vMerge`・計算式・プルダウン・印刷された定型文を持つ公式の `.docx` / `.xlsx` 様式を使います。
+- 罫線が1本崩れる、文言が1つ言い換わる、メモに無い数字が入るといった不備は差し戻し（押印や決裁の取り直し・再提出の手戻り）ややり直しの原因になります。毎月これらに記入しているのは、多くがエンジニアではない研究事務・申請者・バックオフィスの担当者です。
+- 生成AIのチャットは多くの場合、様式ごと作り直すため、罫線や文言が変わったり根拠の無い数字が入ったりすることがあり、何が変わったのか誰にも分からないので、安全に使えませんでした。
 
 - **テーマ1（その現場にいた人にしか見えない深さ）**：本当に危ないのは「AIの文章が間違う」ことより「AIが様式を黙って変える」
   ことです。Form-Guard は様式そのもの（ZIP・XML骨格・罫線・結合セル・定型文）を検査し、事実は推測しません（法人番号は人が入力）。
 - **テーマ2（すべての人に届けるべきもの）**：AIを信用しなくても使えます。各値に原文の根拠を示し、事務局欄はロックし、
   名前のある確認者が承認するまでダウンロードはロックされます。
 
-**計測による定量的な裏付け**（`python docs/measure_workflow.py`、オフラインエンジン、架空のサンプル様式。様式ごとの表は
-英語版を参照。手作業の列はファイルから数えた作業量で、人の作業時間を計ったものではありません）：Word/Excel の 5 つの付属様式（form1〜form5、固定PDFのデモ6はこの表の対象外）で、
-Form-Guard は 41 の指定欄に 40 件（848 文字）を記入し、XML タグ 2,119 個・定型文 171 か所・結合セル／範囲 124・罫線定義 650 を
-1 様式あたり 0.4 秒未満（英語版の表では 120〜246 ms・Web 計測タイル実測では 119〜379 ms、PC の負荷により変動）で照合しました。人に残るのは、各値を原文と並べて確認する計 51 項目の最終確認と、メモに無い事実
-1 件（様式2の法人番号）の入力だけです。Form-Guard はその欄を推測で埋めません。
+**計測による定量的な裏付け**（`python docs/measure_workflow.py`、オフラインエンジン、架空のサンプル様式。様式ごとの表は英語版を参照。手作業の列はファイルから数えた作業量で、人の作業時間を計ったものではありません）：
+- Word/Excel の 5 つの付属様式（form1〜form5、固定PDFのデモ6はこの表の対象外）で、Form-Guard は 41 の指定欄に 40 件（848 文字）を記入し、XML タグ 2,119 個・定型文 171 か所・結合セル／範囲 124・罫線定義 650 を 1 様式あたり 0.4 秒未満（英語版の表では 120〜246 ms・Web 計測タイル実測では 119〜379 ms、PC の負荷により変動）で照合しました。
+- 6つ目の付属デモである固定PDF様式（`form6_study_group_grant.pdf`、A4）でも、ページの罫線から 19 枠を復元し、申請者欄 7 枠（`□ 合意済み → ■ 合意済み`、`税込で48万円 → 480,000円` を含む）を記入、事務局専用欄 2 枠をロックし、白紙PDF（3,742バイト）を先頭に完全保持した増分更新で 21/21 項目 `PASS`・指定枠外の画素差分 `0 px` を達成しています。
+- 人に残るのは、各値を原文と並べて確認する計 51 項目（form6 の 9 項目を含めると 60 項目）の最終確認と、メモに無い事実 1 件（様式2の法人番号）の入力だけです。Form-Guard はその欄を推測で埋めません。
 
 **ハッカソン後の継続利用場面**
 
@@ -604,7 +602,7 @@ pytest -v
 - 3分デモ動画の台本と絵コンテ（日本語ナレーション・175秒）は [docs/DEMO_VIDEO_SCRIPT_JA.md](docs/DEMO_VIDEO_SCRIPT_JA.md) にあり、このガイドツアー（`#tour=1`〜`#tour=5`）に沿って画面をたどります。
 
 - `ANTHROPIC_API_KEY` を設定すると（`.env` も可、Git には含まれません）、`--mode auto` / `--mode live` で Claude を使います。既定の `--model-tier auto` では、定型の欄（和暦日付・期間・桁数・書式・選択肢）と空欄ラベルの分類を `claude-haiku-4-5-20251001`、通常の文章・金額・氏名を `claude-sonnet-5`、長文の要約と検証器に差し戻された後の自己修正を `claude-opus-5-5` が担当します（`--model-tier opus|sonnet|haiku` で固定も可）。
-- 構造化出力（JSON スキーマ）、adaptive thinking（要約表示）と effort 指定は、`model_capabilities()` の既知モデル表にあるモデルにだけ送ります（表に無いファミリーや将来のバージョンには何も付けません）。モデル別に送信パラメータを切り替えます。確認済みなのはモックによるリクエスト形式で、実APIでの利用可否・対応機能はアカウント権限に依存します。2026-11-03（火）には実APIでの3階層ルーティング実行（`output/live_smoke_form1/audit_log.json`、run `20261103-164113-f83bad`）も確認済みです。どの欄をどのモデルが担当したかは監査ログとレポートに残ります。
+- 構造化出力（JSON スキーマ）、adaptive thinking（要約表示）と effort 指定は、`model_capabilities()` の既知モデル表にあるモデルにだけ送ります（表に無いファミリーや将来のバージョンには何も付けません）。モデル別に送信パラメータを切り替えます。確認済みなのはモックによるリクエスト形式で、実APIでの利用可否・対応機能はアカウント権限に依存します。2026-11-03（火）には実APIでの3階層ルーティング実行（ローカルの `.gitignore` 対象 `output/live_smoke_form1/audit_log.json`、run `20261103-164113-f83bad`）も確認済みです。どの欄をどのモデルが担当したかは監査ログとレポートに残ります。
 - 各欄の `routed_model` / `route_reason` には実際に応答したモデル（自己修正後は `claude-sonnet-5 → claude-opus-5-5 (revision)`）を記録し、オフライン実行では `offline (claude-haiku-4-5-20251001 in live auto)` のように「ライブ auto 時の計画」であることを明示します（API を呼んだとは表示しません。ライブ実行が途中で失敗してオフラインに切り替えた場合は、それまでの API 呼び出しとトークン数を表示します）。
 - Web 画面の「記入値と根拠」で欄ごとに、右上の「モデル」選択（自動：Haiku 4.5 / Sonnet 5 / Opus 5.5、Opus 5.5 のみ・Sonnet 5 のみ・Haiku 4.5 のみ）で実行ごとに切り替えられます。Haiku 4.5 は旧世代のモデルなので、adaptive thinking と effort は送りません。
 
@@ -665,14 +663,16 @@ python -m form_guard.cli --form samples/blank_forms/form6_study_group_grant.pdf 
 
 - リポジトリには Claude Code 用の Skills 6 種（`.claude/skills/`：スキャン・外科的記入・構造検査・記入と検証・見た目の監査・公募ポータルからの一言記入）、サブエージェント 4 種（`.claude/agents/`：様式を見る前にメモから原文引用だけを抜き出す `memo-extractor`（Sonnet）、ルールを踏まえて値を提案する `field-mapper`（Opus 5.5）、高速に構造を監査する `structure-auditor`（Sonnet）、敵対的に検査し直す `form-auditor`（Opus））を同梱しています。
 - どのサブエージェントもファイル編集ツール（`Edit`/`Write`）を持たず、`memo-extractor` は `Read, Grep, Glob` のみ、`form-auditor`（`field-mapper`・`structure-auditor` も同じ）は検証コマンドのために `Read, Grep, Glob, Bash` を使います。その Bash はプロンプトの指示と PreToolUse フック（`scripts/hook_guard.py`）で制限され、`samples/blank_forms/` を対象とする書き込み・移動・削除はフックが阻止します（ツール一覧だけでシェルが読み取り専用になるわけではありません）。
-- フックは 2 段構成です（`.claude/settings.json` → `scripts/hook_guard.py`）：**PreToolUse** は書き込む前に、白紙様式（`samples/blank_forms/*.docx・*.xlsx・*.pdf`）の書き込み・上書きコピー・移動・削除（`samples/blank_forms` フォルダ自体・その上位フォルダ・`rm samples/blank_forms/*` のようなワイルドカードも含む。例外は本物の `python -m form_guard.cli --generate-samples` だけで、`# コメント` 内の文字列では例外になりません）と、API キー・`ANTHROPIC_API_KEY = "sk-…"` の直書き・個人のユーザーフォルダのパス（日本語のユーザー名も検出）・例示用ドメイン（`example.com`・`example.jp`・`example.org` とそのサブドメイン、`users.noreply.github.com`）以外のメールアドレス（例外は `noreply@anthropic.com` のみ）の書き込みを終了コード 2（`permissionDecision: "deny"`）で阻止し、**PostToolUse** は書き込んだ後に Python の構文（`py_compile`）と import（1.8 秒以内）、JSON の妥当性を検査して（拡張子の大文字・小文字は区別しません）、問題を Claude に返します。コマンドは `$`・`%`・バッククォートを含まないので、Git Bash・PowerShell・cmd・macOS・Linux で同じように動きます。
+- フックは 2 段構成です（`.claude/settings.json` → `scripts/hook_guard.py`）：
+  - **PreToolUse**：書き込む前に、白紙様式（`samples/blank_forms/*.docx・*.xlsx・*.pdf`）の書き込み・上書きコピー・移動・削除（`samples/blank_forms` フォルダ自体・その上位フォルダ・`rm samples/blank_forms/*` のようなワイルドカードも含む。例外は本物の `python -m form_guard.cli --generate-samples` だけで、`# コメント` 内の文字列では例外になりません）と、API キー・`ANTHROPIC_API_KEY = "sk-…"` の直書き・個人のユーザーフォルダのパス（日本語のユーザー名も検出）・例示用ドメイン（`example.com`・`example.jp`・`example.org` とそのサブドメイン、`users.noreply.github.com`）以外のメールアドレス（例外は `noreply@anthropic.com` のみ）の書き込みを終了コード 2（`permissionDecision: "deny"`）で阻止します。
+  - **PostToolUse**：書き込んだ後に Python の構文（`py_compile`）と import（1.8 秒以内）、JSON の妥当性を検査して（拡張子の大文字・小文字は区別しません）、問題を Claude に返します。コマンドは `$`・`%`・バッククォートを含まないので、Git Bash・PowerShell・cmd・macOS・Linux で同じように動きます。
 - MCP サーバー（`.mcp.json` → `python -m form_guard.mcp_server`）は `form_guard_list_demos`（架空デモ6件、固定PDFを含む）・`form_guard_scan`・`form_guard_discover_blank_cells`・`form_guard_fill`（**未承認の下書き**のみ。承認状態は結果と `audit_log.json` に記録し、文書本体には書き込みません。結果の `review_url` で Web 画面の承認へ引き継ぎます）・`form_guard_verify` の 5 ツールを提供し、Windows の cp932 環境でも日本語を UTF-8 のまま扱います。`mode` の既定は `demo`（オフライン）で、`live` は明示した場合だけです。`.env`・`.git`・`.ssh`・`.claude-hackathon` を含むパスと 10 MB を超えるメッセージは拒否します。
 - Web 画面の「Claude Code 連携 · Architecture」タブ（`GET /api/claude-suite`）は、これらのファイルを読み込んで連携の流れ、この実行の欄ごとのモデル割り当て、ルーティング方針、計測した作業量を表示します。詳しくは [docs/BUILT_WITH_CLAUDE_CODE.md](docs/BUILT_WITH_CLAUDE_CODE.md) を参照してください。
 
 ### 実機での検証（2026-11-03（火））
 
 - **Anthropic 実API 3階層ルーティング（`--mode live --model-tier auto`）**：`form1_research_plan_change.docx`
-  （ローカル実API実行 `20261103-164113-f83bad`、`output/live_smoke_form1/audit_log.json`、`filled_sha256: 2198043e2f70c66a2b36a71c4e0c653ffd6a1e8d88740af44d3f9f8356c2a2bc`）
+  （ローカル実API実行 `20261103-164113-f83bad`、ローカル `.gitignore` 対象の `output/live_smoke_form1/audit_log.json`、`filled_sha256: 2198043e2f70c66a2b36a71c4e0c653ffd6a1e8d88740af44d3f9f8356c2a2bc`）
   で3階層すべてが初回で応答し（`model_fallbacks: []`・`escalations: []`）、`claude-haiku-4-5-20251001` が定型3欄（`提出日`・`研究課題番号`・`変更種別`、`effort: null`、thinking 省略）、
   `claude-sonnet-5` が標準4欄（`研究代表者氏名`・`所属部局`・`変更前の計画概要`・`変更後の計画概要`、`effort: "medium"`、adaptive thinking 要約記録）、
   `claude-opus-5-5` が長文要約1欄（`変更理由および予算影響`、257字→181字へ抽出短縮、`effort: "medium"`、adaptive thinking 要約記録）を担当して、21/21 項目 `PASS`・描画位置のずれ `0 px` を確認しました。

@@ -80,7 +80,7 @@ which means one model — Opus — for every call) disables routing; `--model` o
 
 Request parameters are adapted per model via `model_capabilities()`, an explicit table of known model ids (`KNOWN_MODEL_VERSIONS`: `opus` / `sonnet` / `haiku` 4.5, 4.6, 4.7, 5, 5.5 and `fable` 5 / 5.1):
 - Adaptive thinking (`thinking={"type": "adaptive", "display": "summarized"}`) is sent only to the table's 4.6-and-later entries, and `output_config.effort` is sent to those entries plus `claude-opus-4-5`; legacy models such as `claude-haiku-4-5` — the Haiku tier `claude-haiku-4-5-20251001` included — get a plain structured-output request, and an unrecognised family (`claude-unrecognized-5-5`) or future version (`claude-opus-99-9`) gets no capability flags at all.
-- Effort is clamped to a level the model supports, and the server-side refusal fallback is only requested where the table says it exists. Request formatting is verified against mock/transport tests; live API availability and model-specific features depend on the caller's Anthropic account tier. On 2026-11-03（火）, a live 3-tier API run was also verified in `output/live_smoke_form1/audit_log.json` (run `20261103-164113-f83bad`).
+- Effort is clamped to a level the model supports, and the server-side refusal fallback is only requested where the table says it exists. Request formatting is verified against mock/transport tests; live API availability and model-specific features depend on the caller's Anthropic account tier. On 2026-11-03（火）, a live 3-tier API run was also verified in `output/live_smoke_form1/audit_log.json` (run `20261103-164113-f83bad`, local git-ignored `output/` directory).
 - The audit log records which model handled which field and why, every served model id, per-call stop reasons and tokens, and the thinking summaries the API returned (labelled "API-returned thinking summary" — a summary written by the API, not the model's raw reasoning). The HTML report shows the routing table.
 
 Every `FieldMapping` carries `routed_model` and `route_reason`:
@@ -106,7 +106,8 @@ calls add API latency that is not included):
 
 Across the 5 built-in Word/Excel forms (form1–form5; the fixed-PDF demo 6 is not in this table):
 - Form-Guard wrote 40 values (848 characters) into 41 designated fields and compared 2,119 XML tags, 171 printed text blocks, 124 merged cells/ranges and 650 border definitions, in under 0.4 s per form (120–246 ms in the table above; 119–379 ms in the web suite measurement; wall-clock varies with machine load, the counted columns do not).
-- What is left for the person is the 51-item sign-off checklist (each value next to its verbatim source) and the one fact the memo does not contain (法人番号 in form2), which Form-Guard leaves empty instead of guessing. The same numbers are measured live in the web UI's Claude Code tab.
+- On the 6th built-in demo (`form6_study_group_grant.pdf`, A4 fixed PDF), Form-Guard reconstructs 19 ruled boxes across 2 tables, recommends 7 applicant boxes (including `□ 合意済み → ■ 合意済み` and `税込で48万円 → 480,000円`), locks 2 office-only boxes, appends a PDF incremental update keeping the 3,742-byte blank PDF as an exact byte prefix, and passes all 21/21 checks with `0 px` pixel diff outside the designated boxes.
+- What is left for the person is the 51-item sign-off checklist (plus 9 items on form6; each value next to its verbatim source) and the one fact the memo does not contain (法人番号 in form2), which Form-Guard leaves empty instead of guessing. The same numbers are measured live in the web UI's Claude Code tab.
 
 ## 4. Safety by design
 
@@ -194,7 +195,7 @@ iteration and, in Phase 3, to drive the web UI end to end in a headless browser 
 Beyond the offline suite, three checks were run on real software on 2026-11-03（火）.
 
 **Live Anthropic API 3-tier routing (`--mode live --model-tier auto`).**
-- On `form1_research_plan_change.docx` (local live run `20261103-164113-f83bad` in `output/live_smoke_form1/audit_log.json`, `filled_sha256: 2198043e2f70c66a2b36a71c4e0c653ffd6a1e8d88740af44d3f9f8356c2a2bc`), all three tiers answered on the first attempt (`model_fallbacks: []`, `escalations: []`).
+- On `form1_research_plan_change.docx` (local live run `20261103-164113-f83bad` in `output/live_smoke_form1/audit_log.json`, local git-ignored `output/` directory, `filled_sha256: 2198043e2f70c66a2b36a71c4e0c653ffd6a1e8d88740af44d3f9f8356c2a2bc`), all three tiers answered on the first attempt (`model_fallbacks: []`, `escalations: []`).
 - `claude-haiku-4-5-20251001` mapped 3 structured fields (`提出日`, `研究課題番号`, `変更種別`; `effort: null`, thinking omitted), `claude-sonnet-5` mapped 4 standard text/name fields (`研究代表者氏名`, `所属部局`, `変更前の計画概要`, `変更後の計画概要`; `effort: "medium"`, adaptive thinking summarized), and `claude-opus-5-5` condensed `変更理由および予算影響` from 257 chars to 181 chars (`effort: "medium"`, adaptive thinking summarized), passing 21/21 deterministic checks with 0 px layout drift.
 
 **Live Claude Code CLI MCP verification.** In a live Claude Code session started with the hackathon CLI wrapper
@@ -243,9 +244,8 @@ Web 画面の「Claude Code 連携 · Architecture」タブ（`GET /api/claude-s
 対象と `scripts/hook_guard.py` に実装された検査項目、読み取り禁止の権限、MCP サーバーの登録とツール）、連携の流れを、この実行の欄ごとのモデル割り当て・ルーティング方針・
 第3節の計測値と並べて表示します。
 
-また、実務の書類作成で Form-Guard が防ぎたい代表的な失敗は、作成者が「当たり前すぎてメモに書き忘れた前提（未知の既知）」や「自分でも気づいていなかった規定上の盲点（未知の未知：30日前届出規定や、選択時に着手日記入が必須になるチェックボックスなど）」を、従来の生成AIが推測で勝手に埋めてしまう（例：13桁法人番号を架空の数字で作ってしまう）場面です。Form-Guard Agent は、欄を見る前の原文抽出（`memo-extractor`）、印刷ルールに沿った対応付け（`field-mapper`）、決定論＋敵対的監査（`structure-auditor`・`form-auditor`）、そして人間による最終確認へと役割を分け、根拠不足や解消できない検証エラー（追加入力必須のチェックボックス等）は推測せず空欄のまま `needs_human_input` とし、30日前届出などの日付間ルールはメモの値を保持して警告（`warnings`）を出し人間の確認に委ねる設計をとっています（警告のみの場合は `filled`／`PASS` のままになり得ます）。
-
-さらに、リポジトリ直下には [`CLAUDE.md`](../CLAUDE.md) を配置し、Claude Code が起動した時点で「プロジェクトのゴール・絶対境界条件5原則・同梱拡張・検証コマンド」を最初に読み込む土台を整えています。エージェント制御においても、様式のバイナリファイル（`.docx`・`.xlsx`・`.pdf`）自体の書き換えを外部のクラウドコンテナ環境へ委ねるのではなく（MCPサーバー既定の `--mode demo` では Form-Guard エンジンからの外部API通信はゼロ、CLI既定の `--mode auto` や Web UI も APIキーがあるときのみ通信し `--mode demo` 指定で通信ゼロを保証、また `live` モードで Messages API に送るのはメモ全文・様式名・欄定義・分類候補等のテキストのみで様式ファイル自体はローカルディスク上に留まり Web UI は `127.0.0.1` のみで待受）、**手元のローカル決定論エンジン（未変更ZIPエントリの生バイト保持＋指定欄以外の構造・定型文に関する21項目検査＋内蔵描画による視覚比較 `VIS-01`［レイアウトずれ・はみ出し検出時に不合格項目として追加］）＋Messages APIの3階層モデル振り分け＋ローカルMCP／サブエージェント分業**を組み合わせ、Word／Excel等での最終表示・印刷確認と `filled_sha256`・`revision` に紐づく内容承認は人間が行う分担としています。
+- **5. 未知の既知・未知の未知を推測せず浮かび上がらせる設計（`needs_human_input`＋警告＋4役分業）**：実務の書類作成で Form-Guard が防ぎたい代表的な失敗は、作成者が「当たり前すぎてメモに書き忘れた前提（未知の既知）」や「自分でも気づいていなかった規定上の盲点（未知の未知：30日前届出規定や、選択時に着手日記入が必須になるチェックボックスなど）」を、従来の生成AIが推測で勝手に埋めてしまう（例：13桁法人番号を架空の数字で作ってしまう）場面です。Form-Guard Agent は、欄を見る前の原文抽出（`memo-extractor`）、印刷ルールに沿った対応付け（`field-mapper`）、決定論＋敵対的監査（`structure-auditor`・`form-auditor`）、そして人間による最終確認へと役割を分け、根拠不足や解消できない検証エラー（追加入力必須のチェックボックス等）は推測せず空欄のまま `needs_human_input` とし、30日前届出などの日付間ルールはメモの値を保持して警告（`warnings`）を出し人間の確認に委ねる設計をとっています（警告のみの場合は `filled`／`PASS` のままになり得ます）。
+- **6. リポジトリ直下の `CLAUDE.md` と、クラウドコンテナではなくローカル決定論エンジン＋Messages API＋MCPを選んだ理由**：リポジトリ直下には [`CLAUDE.md`](../CLAUDE.md) を配置し、Claude Code が起動した時点で「プロジェクトのゴール・絶対境界条件5原則・同梱拡張・検証コマンド」を最初に読み込む土台を整えています。エージェント制御においても、様式のバイナリファイル（`.docx`・`.xlsx`・`.pdf`）自体の書き換えを外部のクラウドコンテナ環境へ委ねるのではなく（MCPサーバー既定の `--mode demo` では Form-Guard エンジンからの外部API通信はゼロ、CLI既定の `--mode auto` や Web UI も APIキーがあるときのみ通信し `--mode demo` 指定で通信ゼロを保証、また `live` モードで Messages API に送るのはメモ全文・様式名・欄定義・分類候補等のテキストのみで様式ファイル自体はローカルディスク上に留まり Web UI は `127.0.0.1` のみで待受）、**手元のローカル決定論エンジン（未変更ZIPエントリの生バイト保持＋指定欄以外の構造・定型文に関する21項目検査＋内蔵描画による視覚比較 `VIS-01`［レイアウトずれ・はみ出し検出時に不合格項目として追加］）＋Messages APIの3階層モデル振り分け＋ローカルMCP／サブエージェント分業**を組み合わせ、Word／Excel等での最終表示・印刷確認と `filled_sha256`・`revision` に紐づく内容承認は人間が行う分担としています。
 
 ### 2. アプリ内のモデルの使い分け
 
@@ -268,7 +268,7 @@ Haiku・Sonnet の下書きが根拠確認や印刷されたルールで却下�
 - 存在しないモデル ID と、その API 組織で使えないモデル ID は、どちらも `404 not_found_error` になります。そのとき `ClaudeEngine` は `MODEL_FALLBACK_CHAIN`（`claude-opus-5-5` → `claude-opus-5` → `claude-opus-4-6`、`claude-sonnet-5` → `claude-sonnet-4-5`、`claude-haiku-4-5-20251001` → `claude-haiku-4-5`）に沿って、各モデルの機能に合わせたリクエストで再試行します。
 - 最初に応答した ID がその実行の残りを担当し、監査ログには要求したモデルと実際に応答したモデルの両方（`usage.model_fallbacks`、`usage.calls[].attempted_models`、各欄の `routed_model` の注記）が残ります。
 - `model_capabilities()` の既知モデル表（`KNOWN_MODEL_VERSIONS`：`opus`・`sonnet`・`haiku` の 4.5・4.6・4.7・5・5.5 と `fable` 5・5.1）に基づき、実装上 adaptive thinking（`display: "summarized"`）は既知表の 4.6 以降に送り、effort はそれに `claude-opus-4-5` を加えた対象にだけ送ります（`claude-haiku-4-5` などの旧モデル［Haiku の層の `claude-haiku-4-5-20251001` を含む］にはどちらも送りません）。表に無いファミリーや将来のバージョンには、どの機能フラグも付けません。
-- モデル別に送信パラメータを切り替えます。確認済みなのはモックによるリクエスト形式で、実APIでの利用可否・対応機能はアカウント権限に依存します。2026-11-03（火）には実APIでの3階層ルーティング実行（`output/live_smoke_form1/audit_log.json`、run `20261103-164113-f83bad`）も確認済みです。どの欄をどのモデルが担当したか（理由つき）、実際に応答したモデル、API が返した思考の要約（「API-returned thinking summary」と明記）は監査ログに記録され、HTML レポートにも表示されます。
+- モデル別に送信パラメータを切り替えます。確認済みなのはモックによるリクエスト形式で、実APIでの利用可否・対応機能はアカウント権限に依存します。2026-11-03（火）には実APIでの3階層ルーティング実行（ローカルの `.gitignore` 対象 `output/live_smoke_form1/audit_log.json`、run `20261103-164113-f83bad`）も確認済みです。どの欄をどのモデルが担当したか（理由つき）、実際に応答したモデル、API が返した思考の要約（「API-returned thinking summary」と明記）は監査ログに記録され、HTML レポートにも表示されます。
 
 すべての `FieldMapping` に `routed_model` と `route_reason` を記録します：
 - ライブでは API が実際に返したモデル ID（日付なら `claude-haiku-4-5-20251001`、検証器に差し戻された欄なら `claude-sonnet-5 → claude-opus-5-5 (revision)`）で、サーバー側のフォールバックで別のモデルが応答した場合も `(served by …; requested …)` と残ります。
@@ -278,15 +278,10 @@ Haiku・Sonnet の下書きが根拠確認や印刷されたルールで却下�
 
 ### 3. 作業量の比較（計測）
 
-2026-11-02（月）に Windows 11・Python 3.13 で、オフラインのデモエンジン（ネットワークなし）を使って計測しました。
-ライブモードでは API の応答時間が加わります（表には含みません）。左側の列は、架空の各様式を人が手作業で処理する場合の
-作業量を同じスクリプトでファイルから数えたもので、人の作業時間を計ったものではありません。右側の列が Form-Guard の
-計測値です。`python docs/measure_workflow.py` で再現できます（表は英語版と同じ）。
-
-Word/Excel の 5 つの様式（form1〜form5、固定PDFのデモ6はこの表の対象外）で、Form-Guard は 41 の指定欄に 40 件（848 文字）を記入し、XML タグ 2,119 個・定型文 171 か所・結合セル 124・
-罫線定義 650 を 1 様式あたり 0.4 秒未満（表の計測では 120〜246 ms・Web 計測タイル実測では 119〜379 ms、時間は PC の負荷で変わりますが数えた列は変わりません）で照合しました。
-人に残るのは、各値を原文と並べて確認する計 51 項目の最終確認と、メモに無い事実（様式 2 の法人番号）の入力だけです。
-Form-Guard はその欄を推測で埋めません。同じ数値は Web 画面の Claude Code タブでもその場で計測して表示します。
+- 2026-11-02（月）に Windows 11・Python 3.13 で、オフラインのデモエンジン（ネットワークなし）を使って計測しました。ライブモードでは API の応答時間が加わります（表には含みません）。左側の列は、架空の各様式を人が手作業で処理する場合の作業量を同じスクリプトでファイルから数えたもので、人の作業時間を計ったものではありません。右側の列が Form-Guard の計測値です。`python docs/measure_workflow.py` で再現できます（表は英語版と同じ）。
+- Word/Excel の 5 つの様式（form1〜form5、固定PDFのデモ6はこの表の対象外）で、Form-Guard は 41 の指定欄に 40 件（848 文字）を記入し、XML タグ 2,119 個・定型文 171 か所・結合セル 124・罫線定義 650 を 1 様式あたり 0.4 秒未満（表の計測では 120〜246 ms・Web 計測タイル実測では 119〜379 ms、時間は PC の負荷で変わりますが数えた列は変わりません）で照合しました。
+- 6つ目の付属デモである固定PDF様式（`form6_study_group_grant.pdf`、A4）でも、ページの罫線から 19 枠を復元し、申請者欄 7 枠（`□ 合意済み → ■ 合意済み`、`税込で48万円 → 480,000円` を含む）を記入、事務局専用欄 2 枠をロックし、白紙PDF（3,742バイト）を先頭に完全保持した増分更新で 21/21 項目 `PASS`・指定枠外の画素差分 `0 px` を達成しています。
+- 人に残るのは、各値を原文と並べて確認する計 51 項目（form6 の 9 項目を含めると 60 項目）の最終確認と、メモに無い事実（様式 2 の法人番号）の入力だけです。Form-Guard はその欄を推測で埋めません。同じ数値は Web 画面の Claude Code タブでもその場で計測して表示します。
 
 ### 4. 安全のための設計
 
@@ -363,7 +358,7 @@ cp932 環境での stdio 経由の MCP サーバー、2 段のフックを対象
 オフラインのテストに加えて、2026-11-03（火）に実際のソフトウェアと実APIで次の 3 つを確認しました。
 
 **Anthropic 実API 3階層ルーティング（`--mode live --model-tier auto`）。**
-- `form1_research_plan_change.docx`（ローカル実API実行 `20261103-164113-f83bad`、`output/live_smoke_form1/audit_log.json`、`filled_sha256: 2198043e2f70c66a2b36a71c4e0c653ffd6a1e8d88740af44d3f9f8356c2a2bc`）で3階層すべてが初回で応答しました（`model_fallbacks: []`・`escalations: []`）。
+- `form1_research_plan_change.docx`（ローカル実API実行 `20261103-164113-f83bad`、ローカル `.gitignore` 対象の `output/live_smoke_form1/audit_log.json`、`filled_sha256: 2198043e2f70c66a2b36a71c4e0c653ffd6a1e8d88740af44d3f9f8356c2a2bc`）で3階層すべてが初回で応答しました（`model_fallbacks: []`・`escalations: []`）。
 - `claude-haiku-4-5-20251001` が定型3欄（`提出日`・`研究課題番号`・`変更種別`、`effort: null`、thinking 省略）、`claude-sonnet-5` が標準4欄（`研究代表者氏名`・`所属部局`・`変更前の計画概要`・`変更後の計画概要`、`effort: "medium"`、adaptive thinking 要約記録）、`claude-opus-5-5` が長文要約1欄（`変更理由および予算影響`、257字→181字へ抽出短縮、`effort: "medium"`、adaptive thinking 要約記録）を担当し、21/21 項目 `PASS`・描画位置のずれ `0 px` を確認しました。
 
 **Claude Code CLI からの MCP 実行。**
