@@ -15,6 +15,10 @@ original part bytes:
   ``<c r="C5" s="2"/>`` keeps every attribute (``s`` included) and only gains
   ``t="inlineStr"``; a cell that does not exist yet is created in column order inside its
   row (the row is created if needed) with the style Excel would show there (row or column style).
+* A printed text checkbox (``□ 合意済み　　□ 協議中…`` in one ``<w:t>`` / ``<t>``) is ticked by replacing the bytes
+  of the chosen option's □ with ■ — ``E2 96 A1`` → ``E2 96 A0`` (or ``&#9633;`` → ``&#9632;``), the same length —
+  and nothing else: the unselected □, the spaces and the printed notes stay byte-identical.
+* Fixed PDF forms are filled by ``pdf_support.write_pdf`` (an incremental update; the blank PDF stays an exact prefix).
 
 Every untouched ZIP entry is copied as raw bytes (see ``ziputil``).
 """
@@ -58,9 +62,50 @@ class WriteResult:
 
 def prepare_value(value: str, file_type: str) -> str:
     v = sanitize_xml_text(value).strip()
-    if file_type == "docx":
+    if file_type in ("docx", "pdf"):
         v = re.sub(r"\s*\n\s*", " ", v)
     return v
+
+
+CHECK_OFF_BYTES = {b"\xe2\x96\xa1": b"\xe2\x96\xa0", b"&#9633;": b"&#9632;", b"&#x25A1;": b"&#x25A0;",
+                   b"&#x25a1;": b"&#x25a0;"}
+
+
+def checkbox_offsets(text: str, options: list[dict], value: str) -> list[int]:
+    """Character offsets (in the container text) of the □ of every option the value ticks."""
+    from .constraints import CHECK_OFF, normalize_checkbox_value
+
+    labels = [o["label"] for o in options]
+    picked = set(normalize_checkbox_value(value, labels))
+    out = []
+    for o in options:
+        if o["label"] in picked:
+            if o["offset"] >= len(text) or text[o["offset"]] != CHECK_OFF:
+                raise UnsupportedXMLError(f"checkbox option «{o['label']}»: no printed □ at its position")
+            out.append(o["offset"])
+    return out
+
+
+def _checkbox_patches(idx: PartIndex, c: Container, slot_id: str, offsets: list[int]) -> list[_BytePatch]:
+    """Replace the bytes of one □ character per offset with ■ (same length; nothing else in the node changes)."""
+    out = []
+    layout = idx.node_layout(c)
+    for off in offsets:
+        hit = next(((ni, ns) for ni, ns, ne in layout if ns <= off < ne), None)
+        if hit is None:
+            raise UnsupportedXMLError(f"checkbox □ at offset {off} is not backed by a text node")
+        ni, ns = hit
+        node = idx.nodes[ni]
+        raw = idx.data[node.content[0] : node.content[1]]
+        offs = raw_char_offsets(raw)
+        a, b = node.content[0] + offs[off - ns], node.content[0] + offs[off - ns + 1]
+        old = idx.data[a:b]
+        new = CHECK_OFF_BYTES.get(old)
+        if new is None:
+            raise UnsupportedXMLError(f"checkbox □ written as {old!r} — refusing to rewrite it")
+        out.append(_BytePatch(a, b, new, PatchRecord(part_name=idx.part_name, slot_id=slot_id, kind="checkbox",
+                                                     byte_start=a, byte_end=b, old_text="□", new_text="■")))
+    return out
 
 
 @dataclass
@@ -77,11 +122,12 @@ _RPR_DROP = re.compile(rb"<(\w+:)?(ins|del|moveFrom|moveTo)\b[^>]*/>|<(\w+:)?rPr
 
 def patch_part(idx: PartIndex, values: dict[str, str], file_type: str,
                empty_cell_targets: dict[int, str] | None = None,
-               sheet_cell_targets: dict[str, str] | None = None) -> tuple[bytes, list[PatchRecord]]:
+               sheet_cell_targets: dict[str, str] | None = None,
+               checkbox_targets: dict[int, tuple[str, list[int]]] | None = None) -> tuple[bytes, list[PatchRecord]]:
     """Return (new_part_bytes, patch_records) for one indexed OOXML part.
 
     ``empty_cell_targets``: Word paragraph container index -> slot id; ``sheet_cell_targets``: worksheet cell
-    reference ("C5") -> slot id.
+    reference ("C5") -> slot id; ``checkbox_targets``: container index -> (slot id, offsets of the □ to tick).
     """
     data = idx.data
     node_edits: dict[int, list[tuple[int, int, str, str]]] = {}
@@ -134,6 +180,8 @@ def patch_part(idx: PartIndex, values: dict[str, str], file_type: str,
         patches.append(_insert_run_patch(idx, idx.containers[cidx], slot_id, values[slot_id]))
     if sheet_cell_targets:
         patches += _sheet_cell_patches(idx, sheet_cell_targets, values)
+    for cidx, (slot_id, offsets) in (checkbox_targets or {}).items():
+        patches += _checkbox_patches(idx, idx.containers[cidx], slot_id, offsets)
 
     patches.sort(key=lambda p: p.start)
     for a, b in zip(patches, patches[1:]):
@@ -272,6 +320,10 @@ def _sheet_cell_patches(idx: PartIndex, targets: dict[str, str], values: dict[st
 
 def fill_form(scan: ScanResult, values: dict[str, str], out_path: Union[str, Path]) -> WriteResult:
     """Write a filled copy of ``scan.path``; slots missing from ``values`` keep their marker."""
+    if scan.file_type == "pdf":
+        from .pdf_support import write_pdf
+
+        return write_pdf(scan, values, out_path)
     out_path = Path(out_path)
     prepared = {k: prepare_value(v, scan.file_type) for k, v in values.items() if v is not None and str(v).strip()}
     known = {s.slot_id for s in scan.slots}
@@ -287,7 +339,14 @@ def fill_form(scan: ScanResult, values: dict[str, str], out_path: Union[str, Pat
             empty_targets, cell_targets = {o.container_index: sid for o, sid in designated}, None
         else:
             empty_targets, cell_targets = None, {o.cell_ref: sid for o, sid in designated if o.cell_ref}
-        new_bytes, recs = patch_part(idx, prepared, scan.file_type, empty_targets, cell_targets)
+        boxes = {}
+        for s in scan.slots:
+            for o in s.occurrences:
+                if o.part_name == part and o.marker_kind == "checkbox_text" and s.slot_id in prepared:
+                    text = idx.container_text(idx.containers[o.container_index])
+                    boxes[o.container_index] = (s.slot_id, checkbox_offsets(text, o.checkbox_options,
+                                                                            prepared[s.slot_id]))
+        new_bytes, recs = patch_part(idx, prepared, scan.file_type, empty_targets, cell_targets, boxes)
         if recs:
             etree.fromstring(new_bytes, etree.XMLParser(resolve_entities=False, no_network=True))
             replacements[part] = new_bytes

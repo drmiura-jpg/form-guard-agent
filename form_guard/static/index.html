@@ -18,6 +18,7 @@
       <div class="brand-name">Form-Guard Agent</div>
       <div class="brand-sub" data-t="指定欄だけを記入し、様式の変更を検査する書類記入エージェント|Fills only the designated fields of a form — and proves nothing else changed">指定欄だけを記入し、様式の変更を検査する書類記入エージェント</div>
     </div>
+    <a id="portalLink" class="btn btn-ghost btn-sm brand-portal" href="/portal" title="架空学術振興ポータル / Fictional grant &amp; study-group form portal"><span data-bi="🌐 公募様式ポータル (/portal)|Grant portal"></span></a>
   </div>
   <div class="top-actions">
     <button id="suiteBtn" class="btn btn-ghost btn-sm" type="button"><span data-bi="🧩 Claude Code 連携|🧩 Claude Code · Architecture"></span></button>
@@ -57,11 +58,16 @@
       <div id="unmarkedList" class="demo-list"></div>
     </section>
     <section>
+      <h2 class="rail-h" data-bi="固定PDF様式・手作業のテキストボックス配置を自動化|Fixed PDF forms — no manual text boxes"></h2>
+      <div id="pdfList" class="demo-list"></div>
+      <a class="rail-link" href="/portal"><span data-bi="🌐 公募様式ポータルから様式を取得 →|🌐 Get forms from the grant portal →"></span></a>
+    </section>
+    <section>
       <h2 class="rail-h" data-bi="自分の様式で試す|Your own form"></h2>
       <form id="uploadForm" class="upload">
         <label class="file-drop">
-          <input id="fileInput" type="file" accept=".docx,.xlsx" required>
-          <span id="fileLabel"><span id="fileHint"><span data-l="ja"><code>{{項目名}}</code>・<code>[記入欄: 項目名]</code> の入った .docx / .xlsx、またはマーカーの無い白紙様式（下の 🔍 で空欄を発見）</span><span data-l="en">A .docx / .xlsx with <code>{{項目名}}</code> or <code>[記入欄: 項目名]</code> markers — or an unmarked blank form (use 🔍 below)</span></span><b id="fileName" hidden></b></span>
+          <input id="fileInput" type="file" accept=".docx,.xlsx,.pdf" required>
+          <span id="fileLabel"><span id="fileHint"><span data-l="ja"><code>{{項目名}}</code>・<code>[記入欄: 項目名]</code> の入った .docx / .xlsx、またはマーカーの無い白紙様式・固定PDF（下の 🔍 で空欄を発見）</span><span data-l="en">A .docx / .xlsx with <code>{{項目名}}</code> or <code>[記入欄: 項目名]</code> markers — or an unmarked blank form / fixed PDF (use 🔍 below)</span></span><b id="fileName" hidden></b></span>
         </label>
         <label class="field-l"><span data-bi="入力メモ|Source memo"></span>
           <textarea id="memoInput" rows="7" data-ph="会議メモ・メールなどを貼り付け（実在の個人情報は入れないでください）|Paste meeting notes or an e-mail (no real personal data)" placeholder="会議メモ・メールなどを貼り付け（実在の個人情報は入れないでください）" required></textarea>

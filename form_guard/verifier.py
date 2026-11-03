@@ -18,6 +18,13 @@ filled file, re-indexes both independently and proves, check by check:
   GRD/CON — every written value backed by verbatim memo quotes, numbers/dates
           supported, character / format / option / cap constraints met.
 
+Printed text checkboxes (``□ 合意済み　　□ 協議中…``): only the □ of the approved option(s) may have become ■. Those
+characters — and only those — are put back to the blank form's bytes before the skeleton and boilerplate comparison,
+so an unselected □ that changed, or any other character of the cell, fails XML-03 and TEXT-01; TEXT-02 requires ■
+exactly on the approved options and CON-03 at most one ■ when the options are exclusive.
+
+Fixed PDF forms are verified by ``pdf_support.verify_pdf`` with the same 21 check ids.
+
 Coordinate-designated empty cells get their own strict checks. Word: the cell may gain
 exactly one run holding one ``<w:t>``, formatted exactly like the blank cell's paragraph
 mark — no drawing, field, hyperlink or table, and its ``w:pPr`` unchanged (XML-03,
@@ -42,7 +49,7 @@ from typing import Any, Iterable, Optional, Union
 
 from lxml import etree
 
-from .constraints import DATE_CODES, validate_value
+from .constraints import DATE_CODES, checkbox_hold, validate_value
 from .grounding import NUMBER_DATE_CODES, ground_value
 from .models import AuditCheckItem, EntryHash, FieldMapping, HITLItem, VerificationReport
 from .ooxml import (
@@ -611,6 +618,10 @@ def verify(
     subject: str = "form_guard",
 ) -> VerificationReport:
     """Verify a filled file against the original blank form described by ``scan``."""
+    if scan.file_type == "pdf":
+        from .pdf_support import verify_pdf
+
+        return verify_pdf(scan, filled_path, mappings, memo_text, subject)
     filled_path = Path(filled_path)
     checks: list[AuditCheckItem] = []
     mappings = mappings or []
@@ -695,8 +706,12 @@ def verify(
     designated: dict[str, set[int]] = {}         # Word: paragraph container indices of designated empty cells
     sheet_cells: dict[str, dict[str, str]] = {}  # Excel: part -> {cell ref: slot id}
     slot_by_container: dict[str, dict[int, str]] = {}
+    checkboxes: dict[str, dict[int, tuple[str, list[dict]]]] = {}  # part -> container -> (slot id, printed options)
     for s in scan.slots:
         for o in s.occurrences:
+            if o.marker_kind == "checkbox_text":
+                checkboxes.setdefault(o.part_name, {})[o.container_index] = (s.slot_id, o.checkbox_options)
+                continue
             if o.marker_kind != "empty_cell":
                 continue
             if scan.file_type == "docx":
@@ -707,6 +722,8 @@ def verify(
     slot_keys = {part: slot_node_keys(scan.parts[part]) for part in targets if part in scan.parts}
     cell_struct: list[str] = []   # designated cells: structure (XML-03)
     cell_format: list[str] = []   # Word designated cells: formatting (LAYOUT-03)
+    box_text: list[str] = []      # checkboxes: ■ not exactly on the approved options (TEXT-02)
+    box_marks: dict[str, set[str]] = {}  # checkboxes: options ticked in the file (CON-03)
     sheet_audits: dict[str, SheetCellAudit] = {}
     tags_compared = 0
     for part in sorted(targets):
@@ -719,6 +736,10 @@ def verify(
             ensure_safe_xml(data_f, part)
             etree.fromstring(data_f, _PARSER)
             profile = scan.parts[part].profile
+            if part in checkboxes:  # put the approved ■ back to the blank form's □ before anything is compared
+                data_f, issues, marks = revert_checkboxes(part, scan.parts[part], data_f, checkboxes[part], prepared)
+                box_text += issues
+                box_marks.update(marks)
             if part in sheet_cells:
                 audit = audit_sheet_cells(part, scan.parts[part], data_f, sheet_cells[part], prepared)
                 sheet_audits[part] = audit
@@ -770,12 +791,87 @@ def verify(
         _xlsx_layout_checks(orig_blob, filled_blob, checks, stats, scan, sheet_audits)
 
     # --------------------------------------------------------------- TEXT
-    _text_checks(scan, filled_parts, values, pending, designated, checks, stats, slot_keys, sheet_audits)
+    _text_checks(scan, filled_parts, values, pending, designated, checks, stats, slot_keys, sheet_audits, box_text)
 
     # ------------------------------------------------------- GRD / CON / APP
     _content_checks(scan, mappings, values, memo_text, checks, stats)
+    exclusive = [f"{s.slot_id}: {len(box_marks.get(s.slot_id, ()))} options ticked "
+                 f"(■ on {'、'.join(sorted(box_marks.get(s.slot_id, ())))}) — only one is allowed"
+                 for s in scan.slots if s.constraints.get("checkbox") and s.constraints.get("exclusive", True)
+                 and len(box_marks.get(s.slot_id, ())) > 1]
+    if exclusive:
+        fail_check(checks, "CON-03", exclusive)
+    if checkboxes:
+        stats["checkboxes"] = sum(len(v) for v in checkboxes.values())
     _app_check(scan.file_type, filled_blob, checks, expected_sheet_values(scan, prepared))
     return _finish(scan, checks, entry_hashes, mappings, pending, stats, subject)
+
+
+def fail_check(checks: list[AuditCheckItem], check_id: str, issues: list[str]) -> None:
+    """Mark an already recorded check failed with the given findings (kept with any earlier findings)."""
+    for c in checks:
+        if c.check_id == check_id:
+            keep = [] if c.passed else [c.details]
+            c.passed = False
+            c.details = "; ".join(keep + issues)
+            return
+
+
+def revert_checkboxes(part: str, oidx: PartIndex, data_f: bytes, boxes: dict[int, tuple[str, list[dict]]],
+                      prepared: dict[str, str]) -> tuple[bytes, list[str], dict[str, set[str]]]:
+    """(filled part with only the approved ■ put back to the blank form's □, TEXT-02 findings, ticked options).
+
+    Each approved option's character is restored from the blank part's own bytes at the same character offset, so
+    the result equals the blank part byte for byte iff nothing but the approved ticks changed."""
+    from .constraints import CHECK_ON, normalize_checkbox_value
+
+    try:
+        fidx = index_part(part, data_f, oidx.profile)
+    except (UnsafeXMLError, UnsupportedXMLError) as exc:
+        return data_f, [f"{part}: {exc}"], {}
+    if len(fidx.containers) != len(oidx.containers):
+        return data_f, [f"{part}: container count {len(oidx.containers)}→{len(fidx.containers)}"], {}
+    issues: list[str] = []
+    marks: dict[str, set[str]] = {}
+    edits: list[tuple[int, int, bytes]] = []
+    for ci, (sid, options) in sorted(boxes.items()):
+        co, cf = oidx.containers[ci], fidx.containers[ci]
+        to, tf = oidx.container_text(co), fidx.container_text(cf)
+        labels = [o["label"] for o in options]
+        approved = set(normalize_checkbox_value(prepared[sid], labels)) if sid in prepared else set()
+        want = sorted(o["offset"] for o in options if o["label"] in approved)
+        marks[sid] = {o["label"] for o in options if o["offset"] < len(tf) and tf[o["offset"]] == CHECK_ON}
+        expected = "".join(CHECK_ON if i in want else ch for i, ch in enumerate(to))
+        if tf != expected:
+            issues.append(f"{sid}: expected «{expected[:48]}» got «{tf[:48]}» (■ must be exactly on "
+                          f"{'、'.join(o for o in labels if o in approved) or 'no option'})")
+        if len(tf) != len(to):
+            continue
+        for off in want:
+            if tf[off] != CHECK_ON:
+                continue
+            fspan, ospan = _char_bytes(fidx, cf, off), _char_bytes(oidx, co, off)
+            if fspan is None or ospan is None:
+                continue
+            edits.append((fspan[0], fspan[1], oidx.data[ospan[0] : ospan[1]]))
+    out, cur = bytearray(), 0
+    for s, e, rep in sorted(edits):
+        out += data_f[cur:s] + rep
+        cur = e
+    out += data_f[cur:]
+    return bytes(out), issues, marks
+
+
+def _char_bytes(idx: PartIndex, c, off: int) -> Optional[tuple[int, int]]:
+    """Byte range of the character at ``off`` of a container's text (inside its text node)."""
+    from .ooxml import raw_char_offsets
+
+    for ni, ns, ne in idx.node_layout(c):
+        if ns <= off < ne:
+            node = idx.nodes[ni]
+            offs = raw_char_offsets(idx.data[node.content[0] : node.content[1]])
+            return node.content[0] + offs[off - ns], node.content[0] + offs[off - ns + 1]
+    return None
 
 
 def expected_sheet_values(scan: ScanResult, prepared: dict[str, str]) -> list[tuple[str, str, Optional[str], str]]:
@@ -783,12 +879,18 @@ def expected_sheet_values(scan: ScanResult, prepared: dict[str, str]) -> list[tu
     value (None while it awaits human input); a cell with markers holds its printed text with the markers replaced."""
     if scan.file_type != "xlsx":
         return []
+    from .constraints import CHECK_ON, normalize_checkbox_value
+
     out: dict[tuple[str, str], tuple[str, str, Optional[str], str]] = {}
     for s in scan.slots:
         for o in s.occurrences:
             if not o.cell_ref or not o.sheet_name:
                 continue
-            if o.marker_kind == "empty_cell":
+            if o.marker_kind == "checkbox_text":  # the printed options with ■ on the approved one(s)
+                picked = set(normalize_checkbox_value(prepared.get(s.slot_id, ""), [x["label"] for x in o.checkbox_options]))
+                want = {x["offset"] for x in o.checkbox_options if x["label"] in picked}
+                exp = "".join(CHECK_ON if i in want else ch for i, ch in enumerate(o.context_text))
+            elif o.marker_kind == "empty_cell":
                 exp: Optional[str] = prepared.get(s.slot_id)
             else:
                 idx = scan.parts.get(o.part_name)
@@ -932,7 +1034,8 @@ def _expected_text(text: str, values: dict[str, str]) -> str:
     return "".join(out)
 
 
-def _text_checks(scan, filled_parts, values, pending, designated, checks, stats, slot_keys=None, sheet_audits=None):
+def _text_checks(scan, filled_parts, values, pending, designated, checks, stats, slot_keys=None, sheet_audits=None,
+                 box_text=None):
     from .writer import prepare_value
 
     slot_keys = slot_keys or {}
@@ -941,6 +1044,10 @@ def _text_checks(scan, filled_parts, values, pending, designated, checks, stats,
     boiler_bad, slot_bad = [], []
     n_boiler = n_slot = 0
     residual = []
+    n_slot += sum(1 for s in scan.slots for o in s.occurrences if o.marker_kind == "checkbox_text")
+    if box_text:  # a checkbox whose ■ is not exactly on the approved option(s)
+        slot_ok = False
+        slot_bad += box_text
     if not scan.slots:
         slot_ok = False
         slot_bad.append("0 fillable slots found — designate {{markers}}, [記入欄: ...], or cell coordinates in .slots.json "
@@ -1042,6 +1149,8 @@ def _content_checks(scan, mappings, values, memo, checks, stats):
                 continue
             target = limits if i.code == "max_chars" else formats if i.code in DATE_CODES else options
             target.append(f"{m.slot_id}: {i.message}")
+        if m.status == "filled":  # an AI value may never tick an option that needs a human (協議中 + its date)
+            options += [f"{m.slot_id}: {i.message}" for i in checkbox_hold(slot, m.filled_value)]
     n_filled = sum(1 for m in mappings if m.status == "filled" and m.is_written)
     n_human = sum(1 for m in mappings if m.status == "human_entered" and m.is_written)
     n_recovered = sum(1 for m in mappings if m.status == "recovered" and m.is_written)
@@ -1150,6 +1259,7 @@ _FLAG_TEXT = {
     "unsafe_condensation": "要約で条件が欠ける / condensing would drop a condition — review",
     "weekday": "曜日を付記 / weekday added",
     "recovered_unverified": "出所不明・根拠未検証 / recovered from the file — grounding not verified",
+    "checkbox": "□/■ の記号を外し選択肢名に統一 / checkbox mark removed — the printed option is named",
 }
 
 
@@ -1242,6 +1352,12 @@ def flag_label(flag: str) -> str:
 
 def infer_values_from_filled(scan: ScanResult, filled_path: Union[str, Path]) -> dict[str, str]:
     """Recover the values written into a filled copy by matching each slot container against its template."""
+    if scan.file_type == "pdf":
+        from .pdf_support import infer_pdf_values
+
+        return infer_pdf_values(scan, filled_path)
+    from .constraints import CHECK_ON
+
     zf = zipfile.ZipFile(Path(filled_path))
     names = set(zf.namelist())
     values: dict[str, str] = {}
@@ -1267,10 +1383,18 @@ def infer_values_from_filled(scan: ScanResult, filled_path: Union[str, Path]) ->
             continue
         empty_targets = {o.container_index: s.slot_id for s in scan.slots for o in s.occurrences
                          if o.part_name == part and o.marker_kind == "empty_cell" and scan.file_type == "docx"}
+        boxes = {o.container_index: (s.slot_id, o.checkbox_options) for s in scan.slots for o in s.occurrences
+                 if o.part_name == part and o.marker_kind == "checkbox_text"}
         for co, cf in zip(oidx.containers, fidx.containers):
             to, tf = oidx.container_text(co), fidx.container_text(cf)
             if co.idx in empty_targets and tf:
                 values.setdefault(empty_targets[co.idx], tf)
+                continue
+            if co.idx in boxes:  # the options whose □ became ■
+                sid, opts = boxes[co.idx]
+                ticked = [o["label"] for o in opts if o["offset"] < len(tf) and tf[o["offset"]] == CHECK_ON]
+                if ticked:
+                    values.setdefault(sid, "、".join(ticked))
                 continue
             hits = find_markers(to)
             if not hits:
@@ -1293,6 +1417,10 @@ def infer_values_from_filled(scan: ScanResult, filled_path: Union[str, Path]) ->
 
 def compare_naive(scan: ScanResult, naive_path: Union[str, Path], memo_text: str) -> VerificationReport:
     """Audit a from-scratch regeneration against the blank form (structure, boilerplate, invented numbers)."""
+    if scan.file_type == "pdf":
+        from .pdf_support import compare_naive_pdf
+
+        return compare_naive_pdf(scan, naive_path, memo_text)
     naive_path = Path(naive_path)
     checks: list[AuditCheckItem] = []
     ob, nb = scan.path.read_bytes(), naive_path.read_bytes()

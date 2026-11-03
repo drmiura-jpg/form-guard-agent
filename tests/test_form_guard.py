@@ -675,10 +675,11 @@ def test_api_upload_validation_and_static_ui(api, samples_dir):
     assert up.status_code == 200 and up.json()["report"]["overall_status"] == "PASS"
     assert "naive" not in up.json()["previews"]
     demos = api.get("/api/demos").json()
-    assert [d["id"] for d in demos] == ["form1", "form2", "form3", "form4", "form5"] and "memo_text" in demos[0]
-    assert [d["label"] for d in demos] == ["デモ1", "デモ2", "デモ3", "デモ4", "デモ5"]
-    assert [d["unmarked"] for d in demos] == [False, False, False, True, True]
-    assert [d["badge"] for d in demos] == ["", "", "", "空欄自動検出", "空欄自動検出"]
+    assert [d["id"] for d in demos] == ["form1", "form2", "form3", "form4", "form5", "form6"] and "memo_text" in demos[0]
+    assert [d["label"] for d in demos] == ["デモ1", "デモ2", "デモ3", "デモ4", "デモ5", "デモ6"]
+    assert [d["unmarked"] for d in demos] == [False, False, False, True, True, True]
+    assert [d["pdf"] for d in demos] == [False, False, False, False, False, True]
+    assert [d["badge"] for d in demos] == ["", "", "", "空欄自動検出", "空欄自動検出", "固定PDF・空欄自動検出"]
 
 
 def test_live_engine_through_the_real_anthropic_sdk_with_a_mock_transport(samples_dir):
@@ -1880,7 +1881,7 @@ def test_p01_mcp_server_speaks_json_rpc_over_stdio_in_both_framings(samples_dir,
         assert all(t["inputSchema"]["required"] for t in tools if t["name"] != "form_guard_list_demos")
         demos = call(21, "form_guard_list_demos", {})["structuredContent"]
         assert [(d["id"], d["unmarked"]) for d in demos["demos"]] == [
-            ("form1", False), ("form2", False), ("form3", False), ("form4", True), ("form5", True)]
+            ("form1", False), ("form2", False), ("form3", False), ("form4", True), ("form5", True), ("form6", True)]
         assert all(d["files_present"] and (root / d["form_path"]).is_file() for d in demos["demos"])
         scanned = call(3, "form_guard_scan", {"form_path": "samples/blank_forms/form2_municipal_equipment_subsidy.docx"})
         assert not scanned["isError"] and scanned["structuredContent"]["slot_count"] == 11
@@ -2510,7 +2511,7 @@ def test_p3_5_readme_and_docs_answer_impact_continued_use_and_match_the_measured
 
 HOOK = ROOT / "scripts" / "hook_guard.py"
 TEMPLATE = "samples/blank_forms/form1_research_plan_change.docx"
-SKILLS = ("form-scan", "surgical-fill", "structural-audit", "form-fill-verify", "visual-diff-audit")
+SKILLS = ("form-scan", "surgical-fill", "structural-audit", "form-fill-verify", "visual-diff-audit", "portal-form-fill")
 AGENTS = {"memo-extractor": ("sonnet", ["Read", "Grep", "Glob"]),
           "form-auditor": ("opus", ["Read", "Grep", "Glob", "Bash"]),
           "field-mapper": (MODEL_OPUS, ["Read", "Glob", "Grep", "Bash"]),
@@ -2805,7 +2806,7 @@ def test_mcp_list_demos_and_japanese_payloads_over_real_stdio_on_a_cp932_console
 
     try:
         demos = call(1, "form_guard_list_demos", {})["structuredContent"]
-        assert demos["count"] == 5 and demos["fictional"]
+        assert demos["count"] == 6 and demos["fictional"]
         by = {d["id"]: d for d in demos["demos"]}
         assert by["form4"]["title"].startswith("施設・備品一時使用許可申請書") and by["form5"]["unmarked"]
         assert by["form4"]["next_tool"] == "form_guard_discover_blank_cells" and by["form1"]["naive_path"]
@@ -4371,3 +4372,632 @@ def test_r1_audit2_a15_o8_docs_say_how_to_install_the_claude_code_setup_and_what
         assert "置くだけでは" in text and "リポジトリ直下から" in text
     assert "can drop `.mcp.json` and `.claude/` into their document folder" not in readme
     assert "the others use `Bash` solely for read-only verification commands" not in doc
+
+
+# ===================================================================== Phase 4
+# P4-1 printed text checkboxes (□ → ■) in Word / Excel / PDF; P4-2 fixed PDF forms (pdf_core + pdf_support:
+# PDF gate, blank-box discovery, incremental-update overlay, the 21 checks, previews and pixel diff, naive
+# regeneration); P4-3 the fictional grant portal (/portal, /api/portal/forms), MCP / CLI / web flows and the
+# portal-form-fill skill.
+
+from form_guard import pdf_core, pdf_support  # noqa: E402
+from form_guard.constraints import (  # noqa: E402
+    canonical_checkbox_value,
+    checkbox_constraints,
+    checkbox_hold,
+    normalize_checkbox_value,
+    parse_checkbox_options,
+)
+from form_guard.samples import PDF_FORMS, SPECS, build_form6, form6_layout, pdf_paths  # noqa: E402
+
+CHECKBOX_LINE = "□ 合意済み　　□ 協議中（協議予定日：　　　年　　月　　日）"  # form1, table 0, row 10, col 2
+TWENTY_ONE = ["ZIP-01", "ZIP-02", "ZIP-03", "ZIP-04", "ZIP-05", "XML-01", "XML-02", "XML-03", "LAYOUT-01", "LAYOUT-02",
+              "LAYOUT-03", "LAYOUT-04", "TEXT-01", "TEXT-02", "TEXT-03", "GRD-01", "GRD-02", "CON-01", "CON-02", "CON-03",
+              "APP-01"]
+
+
+def form6(samples_dir):
+    return pdf_paths(PDF_FORMS[0], samples_dir)
+
+
+def _form1_checkbox_spec():
+    spec = json.loads(json.dumps(SPECS["form1_research_plan_change"]))
+    spec["slots"]["共同研究先との合意"] = {"aliases": ["共同研究先との合意", "合意"], "description": "合意状況"}
+    spec["targets"] = [{"slot_id": "共同研究先との合意", "table": 0, "row": 10, "col": 2, "kind": "checkbox_text"}]
+    return spec
+
+
+def failed(rep):
+    return sorted(c.check_id for c in rep.checks if not c.passed)
+
+
+# ------------------------------------------------------------------- P4-1 □ → ■ checkboxes
+
+
+def test_p4_checkbox_options_are_parsed_normalised_and_held_for_a_human():
+    opts = parse_checkbox_options(CHECKBOX_LINE)
+    assert [(o["label"], o["offset"], o["needs_input"], o["checked"]) for o in opts] == [
+        ("合意済み", 0, False, False), ("協議中", 8, True, False)]
+    assert opts[1]["detail"] == "（協議予定日：　　　年　　月　　日）"
+    assert parse_checkbox_options("合意済み") == [] and parse_checkbox_options("□ はい　□ はい") == []
+    assert [o["checked"] for o in parse_checkbox_options("■ はい　□ いいえ")] == [True, False]
+    for v in ("合意済み", "☑ 合意済み", "■合意済み", "■ 合意済み", "□合意済み", " 合意済み "):
+        assert normalize_checkbox_value(v, ["合意済み", "協議中"]) == ["合意済み"], v
+    assert normalize_checkbox_value("協議中（協議予定日：未定）", ["合意済み", "協議中"]) == ["協議中"]
+    assert normalize_checkbox_value("☑協議中 ☑合意済み", ["合意済み", "協議中"]) == ["合意済み", "協議中"]  # printed order
+    assert normalize_checkbox_value("保留", ["合意済み", "協議中"]) == ["保留"]  # unknown: kept, validation rejects it
+    slot = _text_slot("合意状況", fmt="choice", **checkbox_constraints(opts))
+    assert slot.constraints["requires_human_if_selected"] == ["協議中"] and slot.constraints["exclusive"]
+    assert canonical_checkbox_value("☑ 合意済み", slot) == "合意済み" and canonical_checkbox_value("保留", slot) == "保留"
+    assert [i.code for i in checkbox_hold(slot, "■ 協議中")] == ["requires_human"] and checkbox_hold(slot, "合意済み") == []
+    assert [i.code for i in validate_value(slot, "合意済み、協議中") if i.severity == "error"]  # exclusive: one only
+    assert [i.code for i in validate_value(slot, "保留") if i.severity == "error"] == ["allowed_values"]
+    hm = human_mapping(slot, "■ 合意済み")
+    assert (hm.status, hm.filled_value, hm.errors) == ("human_entered", "合意済み", [])
+
+
+def test_p4_word_checkbox_ticks_exactly_one_square_in_place(samples_dir, tmp_path):
+    p = paths(samples_dir, "form1")
+    spec = _form1_checkbox_spec()
+    sc = scan(p["form"], spec)
+    s = sc.slot("共同研究先との合意")
+    assert (s.required_format, s.constraints["allowed_values"], s.occurrences[0].marker_kind) == (
+        "choice", ["合意済み", "協議中"], "checkbox_text")
+    assert s.current_text == CHECKBOX_LINE and "printed □ options designated by coordinates" in s.location_path
+    out = tmp_path / "only_checkbox.docx"
+    res = fill_form(sc, {"共同研究先との合意": "☑ 合意済み"}, out)  # a marked value names the option
+    (patch,) = res.patches
+    assert (patch.kind, patch.old_text, patch.new_text, patch.byte_end - patch.byte_start) == ("checkbox", "□", "■", 3)
+    o = zipfile.ZipFile(p["form"]).read("word/document.xml")
+    f = zipfile.ZipFile(out).read("word/document.xml")
+    diff = [i for i in range(len(o)) if o[i] != f[i]]
+    assert len(o) == len(f) and diff == [patch.byte_start + 2]  # E2 96 A1 → E2 96 A0: one byte, same length
+    assert o[patch.byte_start : patch.byte_end] == b"\xe2\x96\xa1" and f[patch.byte_start : patch.byte_end] == b"\xe2\x96\xa0"
+    assert f.count("■".encode()) == 1 and "□ 協議中".encode() in f  # the unselected □ is untouched
+    raw_o, raw_f = read_raw_zip(p["form"].read_bytes()), read_raw_zip(out.read_bytes())
+    assert [e.raw_sha256 for e in raw_o.entries if e.name != "word/document.xml"] == \
+        [e.raw_sha256 for e in raw_f.entries if e.name != "word/document.xml"]
+    assert infer_values_from_filled(sc, out) == {"共同研究先との合意": "合意済み"}
+    r = run_pipeline(p["form"], read_memo(p["memo"]), tmp_path / "run", mode="demo", slot_spec=spec)
+    m = {x.slot_id: x for x in r.mappings}["共同研究先との合意"]
+    assert m.status == "filled" and m.filled_value == "合意済み" and "合意済み" in m.source_quote
+    assert r.report.overall_status == "PASS" and [c.check_id for c in r.report.checks] == TWENTY_ONE
+    assert docx.Document(r.filled_path).tables[0].cell(10, 2).text == "■ 合意済み　　□ 協議中（協議予定日：　　　年　　月　　日）"
+    assert r.visual["identical_outside_slots"] and 'data-slot-id="共同研究先との合意"' in r.previews["filled"]
+
+
+def test_p4_word_checkbox_tampering_fails_xml03_text01_text02_and_con03(samples_dir, tmp_path):
+    p = paths(samples_dir, "form1")
+    spec = _form1_checkbox_spec()
+    memo = read_memo(p["memo"])
+    r = run_pipeline(p["form"], memo, tmp_path / "run", mode="demo", slot_spec=spec)
+    cases = {
+        "both ticked": (lambda b: b.replace("□ 協議中".encode(), "■ 協議中".encode()),
+                        ["CON-03", "TEXT-01", "TEXT-02", "XML-03"]),
+        "wrong option": (lambda b: b.replace("■ 合意済み".encode(), "□ 合意済み".encode())
+                         .replace("□ 協議中".encode(), "■ 協議中".encode()), ["TEXT-01", "TEXT-02", "XML-03"]),
+        "printed note changed": (lambda b: b.replace("協議予定日".encode(), "協議期日の".encode()),
+                                 ["TEXT-01", "TEXT-02", "XML-03"]),
+        "approved but not ticked": (lambda b: b.replace("■ 合意済み".encode(), "□ 合意済み".encode()), ["TEXT-02"]),
+        "square as a character reference": (lambda b: b.replace("□ 協議中".encode(), "&#9633; 協議中".encode()),
+                                            ["XML-03"]),
+    }
+    for name, (fn, expected) in cases.items():
+        dst = tmp_path / f"{name.replace(' ', '_')}.docx"
+        surgical_rewrite(r.filled_path, dst, "word/document.xml", fn)
+        rep = verify(r.scan, dst, r.mappings, memo)
+        assert failed(rep) == expected, (name, failed(rep))
+        assert rep.overall_status == "FAIL", name
+
+
+def test_p4_an_option_that_needs_more_input_is_never_ticked_by_the_ai(samples_dir, tmp_path):
+    p = paths(samples_dir, "form1")
+    spec = _form1_checkbox_spec()
+    memo = read_memo(p["memo"]).replace("で合意済み（", "の扱いは協議中（")
+    r = run_pipeline(p["form"], memo, tmp_path / "ai", mode="demo", slot_spec=spec)
+    m = {x.slot_id: x for x in r.mappings}["共同研究先との合意"]
+    assert m.status == "needs_human_input" and m.suggested_value == "協議中" and "a human must decide" in " ".join(m.errors)
+    assert r.report.overall_status == "NEEDS_HUMAN_INPUT" and r.report.pending_slots == ["共同研究先との合意"]
+    assert "■".encode() not in zipfile.ZipFile(r.filled_path).read("word/document.xml")
+    # a verifier never accepts an AI value that ticks it (CON-03), whatever produced the file
+    forged = [x.model_copy(update={"status": "filled", "filled_value": "協議中", "source_quote": "の扱いは協議中",
+                                   "source_spans": []}) if x.slot_id == "共同研究先との合意" else x for x in r.mappings]
+    bad = tmp_path / "forged.docx"
+    fill_form(r.scan, {x.slot_id: x.filled_value for x in forged if x.is_written}, bad)
+    rep = verify(r.scan, bad, forged, memo)
+    assert "CON-03" in failed(rep) and "a human must decide" in check(rep, "CON-03").details
+    # the reviewer may tick it (and completes the printed date by hand)
+    human = run_pipeline(p["form"], memo, tmp_path / "human", mode="demo", slot_spec=spec,
+                         overrides={"共同研究先との合意": "■ 協議中"})
+    hm = {x.slot_id: x for x in human.mappings}["共同研究先との合意"]
+    assert (hm.status, hm.filled_value) == ("human_entered", "協議中") and human.report.overall_status == "PASS"
+    assert "■ 協議中".encode() in zipfile.ZipFile(human.filled_path).read("word/document.xml")
+
+
+def _excel_shared_strings(src: Path, dst: Path) -> None:
+    """openpyxl writes inline strings; Excel writes one shared string per distinct text — rebuild it that way."""
+    zin = zipfile.ZipFile(src)
+    sheet = etree.fromstring(zin.read("xl/worksheets/sheet1.xml"))
+    strings: list[str] = []
+    for c in sheet.iter(f"{{{S_NS}}}c"):
+        if c.get("t") == "inlineStr":
+            is_ = c.find(f"{{{S_NS}}}is")
+            text = "".join(t.text or "" for t in is_.iter(f"{{{S_NS}}}t"))
+            c.remove(is_)
+            c.set("t", "s")
+            if text not in strings:
+                strings.append(text)
+            etree.SubElement(c, f"{{{S_NS}}}v").text = str(strings.index(text))
+    sst = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<sst xmlns="{S_NS}" uniqueCount="{len(strings)}">'
+           + "".join(f"<si><t>{s}</t></si>" for s in strings) + "</sst>").encode()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for info in zin.infolist():
+            data = zin.read(info.filename)
+            if info.filename == "xl/worksheets/sheet1.xml":
+                data = etree.tostring(sheet, xml_declaration=True, encoding="UTF-8", standalone=True)
+            elif info.filename == "[Content_Types].xml":
+                data = data.replace(b"</Types>", b'<Override PartName="/xl/sharedStrings.xml" ContentType="application/'
+                                    b'vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/></Types>')
+            elif info.filename == "xl/_rels/workbook.xml.rels":
+                data = data.replace(b"</Relationships>", b'<Relationship Id="rIdSST" Type="http://schemas.openxmlformats.org/'
+                                    b'officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/></Relationships>')
+            z.writestr(info, data)
+        z.writestr("xl/sharedStrings.xml", sst)
+    dst.write_bytes(buf.getvalue())
+
+
+def test_p4_excel_checkbox_in_a_shared_string_used_by_one_cell_only(tmp_path):
+    raw, src, out = tmp_path / "check_inline.xlsx", tmp_path / "check.xlsx", tmp_path / "check_filled.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "点検票"
+    ws["A1"], ws["A3"], ws["B3"] = "架空の点検票（テスト）", "同意", "□ はい　□ いいえ"
+    ws["A4"], ws["B4"], ws["A5"], ws["B5"] = "再確認", "□ はい　□ いいえ", "判定", "□ 良　□ 要注意"
+    wb.save(raw)
+    inline = scan(raw, {"targets": [{"slot_id": "同意", "sheet": 0, "cell": "B3", "kind": "checkbox_text"}]})
+    assert inline.slot("同意").occurrences[0].part_name == "xl/worksheets/sheet1.xml"  # an inline string is its own text
+    _excel_shared_strings(raw, src)
+    spec = {"targets": [{"slot_id": "同意", "sheet": 0, "cell": "B3", "kind": "checkbox_text"},
+                        {"slot_id": "判定", "sheet": 0, "cell": "B5", "kind": "checkbox_text"}]}
+    sc = scan(src, spec)
+    assert [s.slot_id for s in sc.slots] == ["判定"]  # B3 shares its string with B4: ticking it would tick both
+    assert any("shares its text with 1 other cell" in w for w in sc.warnings)
+    assert sc.slot("判定").constraints["allowed_values"] == ["良", "要注意"] and sc.target_parts == ["xl/sharedStrings.xml"]
+    res = fill_form(sc, {"判定": "要注意"}, out)
+    assert [(x.kind, x.old_text, x.new_text) for x in res.patches] == [("checkbox", "□", "■")]
+    rep = verify(sc, out, [human_mapping(sc.slot("判定"), "■ 要注意")], "")
+    assert rep.overall_status == "PASS" and [c.check_id for c in rep.checks] == TWENTY_ONE
+    ws2 = openpyxl.load_workbook(out)["点検票"]
+    assert (ws2["B3"].value, ws2["B4"].value, ws2["B5"].value) == ("□ はい　□ いいえ", "□ はい　□ いいえ", "□ 良　■ 要注意")
+    assert infer_values_from_filled(sc, out) == {"判定": "要注意"}
+    d = discover_blank_cells(src)
+    boxes = {c["slot_id"]: c for c in d["candidates"]}
+    assert boxes["判定"]["kind"] == "checkbox_text" and boxes["判定"]["constraints"]["checkbox"]
+    assert any("shared string other cells use too" in x["reason"] for x in d["rejected"])
+
+
+def test_p4_unmarked_word_discovery_proposes_a_checkbox_cell(samples_dir, tmp_path):
+    p = paths(samples_dir, "form1")
+    d = discover_blank_cells(p["form"])
+    (cb,) = [c for c in d["candidates"] if c.get("kind") == "checkbox_text"]
+    assert (cb["slot_id"], cb["table"], cb["row"], cb["col"], cb["required_format"]) == ("共同研究先との合意", 0, 10, 2, "choice")
+    assert [o["label"] for o in cb["options"]] == ["合意済み", "協議中"] and cb["recommended"]
+    office = [c["slot_id"] for c in d["candidates"] if c["office_only"]]
+    assert office == ["研究協力課受付印"]
+    spec = build_confirmed_slot_spec(d, [cb["candidate_id"]], p["form"])
+    assert spec["targets"] == [{"slot_id": "共同研究先との合意", "part": "word/document.xml", "table": 0, "row": 10, "col": 2,
+                                "label": "共同研究先との合意", "kind": "checkbox_text"}]
+    r = run_pipeline(p["form"], read_memo(p["memo"]), tmp_path / "disc", mode="demo", slot_spec=spec)
+    assert r.report.failed_count == 0 and (r.mappings[0].slot_id, r.mappings[0].filled_value) == ("共同研究先との合意", "合意済み")
+
+
+# ------------------------------------------------------------------- P4-2 fixed PDF forms
+
+
+def _pdf_with(page_extra: dict, catalog_extra: dict | None = None, content: bytes = b"0.5 w 50 700 300 30 re S\n",
+              fonts: dict | None = None) -> bytes:
+    from form_guard.pdf_core import Name, PDFBuilder
+
+    b = PDFBuilder("1.7")
+    catalog, pages, page = b.reserve(), b.reserve(), b.reserve()
+    res = b.add({"Font": fonts or {}})
+    body = b.add({}, content)
+    b.set(page, {"Type": Name("Page"), "Parent": pages, "MediaBox": [0, 0, 595.28, 841.89], "Resources": res,
+                 "Contents": body, **page_extra})
+    b.set(pages, {"Type": Name("Pages"), "Kids": [page], "Count": 1})
+    b.set(catalog, {"Type": Name("Catalog"), "Pages": pages, **(catalog_extra or {})})
+    return b.build(catalog)
+
+
+def test_p4_pdf_gate_refuses_broken_encrypted_active_compressed_and_bomb_pdfs(tmp_path):
+    import zlib
+
+    from form_guard.pdf_core import Name, PDFBuilder, PDFError, check_pdf
+
+    good = _pdf_with({})
+    assert check_pdf(good).pages()[0].mediabox == (0.0, 0.0, 595.28, 841.89)
+    n = len(b"0.5 w 50 700 300 30 re S\n")
+    assert b"/Length %d" % n in good  # the page's content stream
+    bad = {
+        "header": (b"%PDF", "not a PDF file"),
+        "truncated": (good[:-30], "truncated PDF"),
+        "javascript": (_pdf_with({}, {"OpenAction": {"S": Name("JavaScript"), "JS": b"app.alert(1)"}}), "active content"),
+        "launch": (_pdf_with({"AA": {"O": {"S": Name("Launch"), "F": b"calc.exe"}}}), "active content"),
+        "encrypted": (good.replace(b"/Root 1 0 R", b"/Root 1 0 R /Encrypt 3 0 R"), "encrypted PDF"),
+        "length": (good.replace(b"/Length %d" % n, b"/Length %d" % (n + 5)), "stream length mismatch"),
+        # startxref pointing at an object = a PDF 1.5 cross-reference stream
+        "xref stream": (good[: good.rindex(b"startxref\n")] + b"startxref\n%d\n%%%%EOF\n" % good.index(b"1 0 obj"),
+                        "cross-reference streams"),
+    }
+    bomb = zlib.compress(b"\0" * (pdf_core.MAX_STREAM_DECODED + 1024), 9)  # ~20 KB that inflates past the cap
+    pb = PDFBuilder()
+    cat, pgs, pg, body = pb.reserve(), pb.reserve(), pb.reserve(), pb.reserve()
+    pb.objects[body.num] = pdf_core.serialize({"Filter": Name("FlateDecode"), "Length": len(bomb)}) + \
+        b"\nstream\n" + bomb + b"\nendstream"
+    pb.set(pg, {"Type": Name("Page"), "Parent": pgs, "MediaBox": [0, 0, 595.28, 841.89], "Contents": body})
+    pb.set(pgs, {"Type": Name("Pages"), "Kids": [pg], "Count": 1})
+    pb.set(cat, {"Type": Name("Catalog"), "Pages": pgs})
+    bad["bomb"] = (pb.build(cat), "PDF bomb")
+    for name, (data, needle) in bad.items():
+        with pytest.raises(PDFError) as exc:
+            check_pdf(data)
+        assert needle in str(exc.value), (name, str(exc.value))
+    f = tmp_path / "x.pdf"
+    f.write_bytes(bad["javascript"][0])
+    with pytest.raises(ValueError, match="active content"):
+        scan(f)
+
+
+def test_p4_form6_is_a_valid_deterministic_fictional_a4_fixed_pdf(samples_dir):
+    p = form6(samples_dir)
+    blob = p["form"].read_bytes()
+    assert blob.startswith(b"%PDF-1.7\n") and blob.rstrip().endswith(b"%%EOF") and blob == build_form6()
+    doc = pdf_core.check_pdf(blob)
+    (page,) = doc.pages()
+    assert page.mediabox == (0.0, 0.0, 595.28, 841.89) and "AcroForm" not in doc.root
+    fonts = pdf_core.font_resources(doc, page.resources)
+    assert {n: (f.base_font, f.cmap, f.unicode_encoding) for n, f in fonts.items()} == {
+        "F1": ("HeiseiKakuGo-W5", "UniJIS-UCS2-H", True), "F2": ("HeiseiMin-W3", "UniJIS-UCS2-H", True)}
+    form = pdf_support.load_form(blob)
+    text = form.doc_text
+    for needle in ("次世代AI・分散システム研究会", "研究助成申請書（様式第6号・固定PDF様式）", CHECKBOX_LINE.replace("　　　年", "　　年"),
+                   "事務局使用欄（申請者は記入しないでください）", "架空"):
+        assert needle in text, needle
+    banned = ["病院", "患者", "診断", "診療", "医療", "処方", "看護", "病名", "治療"]
+    memo = read_memo(p["memo"])
+    assert not [w for w in banned if w in text + memo] and "@" not in memo
+    for d in find_dates(memo):
+        assert d.weekday and "月火水木金土日"[date(d.year or 2026, d.month, d.day).weekday()] == d.weekday
+    sidecar = json.loads((samples_dir / "blank_forms" / "form6_study_group_grant.slots.json").read_text(encoding="utf-8"))
+    assert sidecar == SPECS["form6_study_group_grant"]
+    assert [t["rect"] for t in sidecar["targets"]] == [r["rect"] for r in form6_layout()["rows"]]
+    assert len(form.pages[0].cells) == 19 and len(form.pages[0].tables) == 2
+    naive = pdf_core.check_pdf(p["naive"].read_bytes()).pages()[0]
+    assert (naive.width, naive.height) == (612.0, 792.0)  # the naive regeneration switched to US Letter
+
+
+def test_p4_pdf_discovery_finds_the_seven_boxes_and_locks_the_office_boxes(samples_dir):
+    p = form6(samples_dir)
+    d = discover_blank_cells(p["form"])
+    assert d["file_type"] == "pdf" and d["requires_human_confirmation"] and d["rejected"] == []
+    assert d["pdf"]["pages"][0]["boxes"] == 19 and d["pdf"]["acroform_fields"] == []
+    assert [(c["slot_id"], c["office_only"], c["required_format"]) for c in d["candidates"]] == [
+        ("申請日", False, "wareki_date"), ("研究課題名", False, "text"), ("申請代表者氏名", False, "person_name"),
+        ("所属機関・部局・職名", False, "text"), ("助成申請金額", False, "yen"), ("共同研究先との合意状況", False, "choice"),
+        ("研究概要", False, "text"), ("事務局受付欄", True, "text"), ("受付印・審査結果欄", True, "text")]
+    by = {c["slot_id"]: c for c in d["candidates"]}
+    assert by["助成申請金額"]["constraints"]["max_value"] == 500_000 and by["研究概要"]["max_chars"] == 150
+    assert by["共同研究先との合意状況"]["kind"] == "checkbox_text" and by["共同研究先との合意状況"]["constraints"] == {
+        "allowed_values": ["合意済み", "協議中"], "multi_select": False, "checkbox": True, "exclusive": True,
+        "requires_human_if_selected": ["協議中"]}
+    assert {"事務局", "受付番号"} <= set(by["事務局受付欄"]["office_keywords"]) and "受付印" in by["受付印・審査結果欄"]["office_keywords"]
+    assert by["事務局受付欄"]["section"] == "事務局使用欄（申請者は記入しないでください）"
+    rec = recommended_ids(d)
+    spec = build_confirmed_slot_spec(d, rec, p["form"])
+    sidecar = json.loads((samples_dir / "blank_forms" / "form6_study_group_grant.slots.json").read_text(encoding="utf-8"))
+    assert spec["targets"] == sidecar["targets"]  # discovery finds exactly the boxes an expert designated by hand
+    office = [c["candidate_id"] for c in d["candidates"] if c["office_only"]]
+    with pytest.raises(ValueError, match="office/administrative use only"):
+        build_confirmed_slot_spec(d, rec + office[:1], p["form"])
+    moved = json.loads(json.dumps(d))
+    moved["candidates"][0]["rect"] = [100, 100, 200, 200]
+    with pytest.raises(ValueError, match="not a blank-cell candidate"):
+        build_confirmed_slot_spec(moved, ["c01"], p["form"])
+
+
+def test_p4_pdf_fill_is_an_incremental_update_that_passes_all_21_checks(samples_dir, tmp_path):
+    p = form6(samples_dir)
+    memo = read_memo(p["memo"])
+    r = run_pipeline(p["form"], memo, tmp_path / "run", mode="demo", naive_path=p["naive"], demo_id="form6", png=True)
+    rep = r.report
+    assert rep.overall_status == "PASS" and [c.check_id for c in rep.checks] == TWENTY_ONE and rep.file_type == "pdf"
+    values = {m.slot_id: m.filled_value for m in r.mappings}
+    summary = values.pop("研究概要")
+    assert values == {"申請日": "令和8年11月3日（火）", "研究課題名": "分散エッジ推論における通信量削減手法の比較検証",
+                      "申請代表者氏名": "見本 六郎", "所属機関・部局・職名": "架空情報大学 大学院情報科学研究科 准教授",
+                      "助成申請金額": "480,000円", "共同研究先との合意状況": "合意済み"}
+    assert len(summary) <= 150 and summary in memo
+    values["研究概要"] = summary
+    assert all(m.status == "filled" and m.source_quote for m in r.mappings) and r.builtin_demo
+    orig, filled = p["form"].read_bytes(), r.filled_path.read_bytes()
+    assert filled[: len(orig)] == orig and filled.count(b"%%EOF") == 2  # the blank file is an exact prefix
+    odoc, fdoc = pdf_core.PDFDocument(orig), pdf_core.PDFDocument(filled)
+    (opage,), (fpage,) = odoc.pages(), fdoc.pages()
+    oobj, fobj = odoc.indirect(opage.num), fdoc.indirect(fpage.num)
+    for key in ("Type", "Parent", "MediaBox", "Resources"):
+        a, b = oobj.dict_spans[key], fobj.dict_spans[key]
+        assert orig[a[0] : a[1]] == filled[b[0] : b[1]], key  # spliced through byte for byte
+    refs = [r_ for r_, _ in fdoc.page_streams(fpage)]
+    assert refs[1:2] == [r_ for r_, _ in odoc.page_streams(opage)] and len(refs) == 4
+    assert [fdoc.get(refs[0]).raw, fdoc.get(refs[2]).raw] == [b"q\n", b"Q\n"]
+    assert check(rep, "XML-01").evidence["content_sha256"] == [hashlib.sha256(odoc.page_streams(opage)[0][1].decoded()).hexdigest()]
+    assert [(x.kind, x.part_name) for x in r.write.patches].count(("pdf_text", "pdf/page1")) == 6
+    (mark,) = [x for x in r.write.patches if x.kind == "pdf_mark"]
+    assert (mark.old_text, mark.new_text) == ("□", "■ 合意済み") and r.write.modified_parts == ["pdf/page1"]
+    assert filled[mark.byte_start : mark.byte_end].count(b"<25A0>") == 1
+    occ = r.scan.slot("共同研究先との合意状況").occurrences[0]
+    x0, y0, x1, y1 = occ.rect  # the printed notes also say 「□を■に」: count the marks inside the checkbox box only
+    marks = [gl for run in pdf_core.interpret_page(fdoc, fpage).runs for gl in run.glyphs
+             if gl.ch == "■" and x0 <= gl.x <= x1 and y0 <= gl.y <= y1]
+    assert [(round(m.x, 2), round(m.y, 2), m.size) for m in marks] == [
+        (round(occ.checkbox_options[0]["x"], 2), round(occ.checkbox_options[0]["y"], 2), occ.checkbox_options[0]["size"])]
+    assert infer_values_from_filled(r.scan, r.filled_path) == {k: v for k, v in values.items()}
+    px = r.visual["pixel_diff"]
+    if px["method"] == "pixel":
+        assert px["outside"] == 0 and px["inside"] > 1000
+    assert r.visual["identical_outside_slots"] and r.visual["drift_count"] == 0
+    assert all(f'data-slot-id="{sid}"' in r.previews["filled"] for sid in values) and "fg-locked" in r.previews["filled"]
+    assert "naive" in r.previews and r.naive_report.overall_status == "FAIL"
+    assert set(failed(r.naive_report)) >= {"LAYOUT-01", "LAYOUT-02", "LAYOUT-04", "TEXT-01", "GRD-02", "ZIP-04"}
+    assert "600,000円" in check(r.naive_report, "GRD-02").details
+    audit = json.loads((r.out_dir / "audit_log.json").read_text(encoding="utf-8"))
+    assert audit["form"]["file_type"] == "pdf" and audit["report"]["overall_status"] == "PASS"
+    assert "原本" in (r.out_dir / "report.html").read_text(encoding="utf-8")
+
+
+def _overlay_edit(filled: Path, dst: Path, old: bytes, new: bytes, after: int) -> None:
+    """A same-length edit inside the appended incremental update (the cross-reference offsets stay valid)."""
+    blob = filled.read_bytes()
+    assert len(old) == len(new)
+    i = blob.index(old, after)
+    dst.write_bytes(blob[:i] + new + blob[i + len(old):])
+
+
+def test_p4_pdf_tampering_is_caught_by_the_21_checks_and_the_pixel_diff(samples_dir, tmp_path):
+    from form_guard.pipeline import build_previews
+
+    p = form6(samples_dir)
+    memo = read_memo(p["memo"])
+    r = run_pipeline(p["form"], memo, tmp_path / "run", mode="demo")
+    n = len(p["form"].read_bytes())
+    blob = r.filled_path.read_bytes()
+    by = {x.slot_id: x for x in r.write.patches}
+    date_tm = re.search(rb"1 0 0 1 ([\d.]+) ([\d.]+) Tm", blob[by["申請日"].byte_start : by["申請日"].byte_end])
+    y_old = date_tm.group(2)
+    occ = r.scan.slot("共同研究先との合意状況").occurrences[0]
+    x_ok, x_other = (pdf_core.fmt_num(round(o["x"], 3)) for o in occ.checkbox_options)
+    cases = {
+        "original byte changed": (b"/Trapped /False", b"/Trapped /True ", 0, ["ZIP-02", "ZIP-03", "ZIP-04"]),
+        "value moved outside its box": (b" " + y_old + b" Tm", b" " + b"234.9".ljust(len(y_old)) + b" Tm", n,
+                                        ["XML-03"]),
+        "value written into the office-only box": (b" " + y_old + b" Tm", b" " + b"310.9".ljust(len(y_old)) + b" Tm", n,
+                                                   ["LAYOUT-04", "XML-03"]),
+        "■ on the other option": (b"1 0 0 1 " + x_ok + b" ", b"1 0 0 1 " + x_other + b" ", n, ["TEXT-02"]),
+        "page size changed": (b"/MediaBox [0 0 595.28 841.89]", b"/MediaBox [0 0 612.00 792.00]", n,
+                              ["LAYOUT-02", "XML-02"]),
+    }
+    for name, (old, new, after, expected) in cases.items():
+        dst = tmp_path / f"{name.replace(' ', '_')}.pdf"
+        _overlay_edit(r.filled_path, dst, old, new, after)
+        rep = verify(r.scan, dst, r.mappings, memo)
+        assert set(expected) <= set(failed(rep)) and rep.overall_status == "FAIL", (name, failed(rep))
+    moved = tmp_path / "value_moved_outside_its_box.pdf"
+    visual = build_previews(r.scan, moved, {m.slot_id: m.filled_value for m in r.mappings}, None, None)[1]
+    if visual["pixel_diff"]["method"] == "pixel":
+        assert visual["pixel_diff"]["outside"] > 0 and not visual["identical_outside_slots"]
+    # a second incremental update that re-defines the catalog: one update only, no foreign object re-defined
+    doc = pdf_core.PDFDocument(blob)
+    cat = doc.indirect(1)
+    twice, _ = pdf_core.incremental_update(blob, doc, {1: blob[cat.dict_span[0] : cat.dict_span[1]]})
+    (tmp_path / "twice.pdf").write_bytes(twice)
+    rep = verify(r.scan, tmp_path / "twice.pdf", r.mappings, memo)
+    assert {"ZIP-03", "ZIP-04"} <= set(failed(rep))
+
+
+def test_p4_pdf_spec_targets_must_be_ruled_empty_boxes_and_never_office_only(samples_dir, tmp_path):
+    from form_guard.mcp_server import FormGuardMCP
+
+    p = form6(samples_dir)
+    lay = form6_layout()
+    spec = {"targets": [{"slot_id": "どこでもない", "page": 0, "rect": [10, 10, 50, 50]},
+                        {"slot_id": "ラベル", "page": 0, "rect": lay["rows"][0]["label_rect"]},
+                        {"slot_id": "偽チェック", "page": 0, "rect": lay["rows"][1]["rect"], "kind": "checkbox_text"},
+                        {"slot_id": "表の座標", "table": 0, "row": 1, "col": 1},
+                        {"slot_id": "申請日", "page": 0, "rect": lay["rows"][0]["rect"]}]}
+    sc = scan(p["form"], spec)
+    assert [s.slot_id for s in sc.slots] == ["申請日"]
+    joined = " | ".join(sc.warnings)
+    for needle in ("no ruled box at page 0", "the box is not empty", "prints no □ options", "use page + rect"):
+        assert needle in joined, needle
+    office = {"targets": [{"slot_id": "受付印", "page": 0, "rect": lay["office"][1]["rect"]}]}
+    assert office_only_targets(p["form"], office) and "受付印" in office_only_targets(p["form"], office)[0]
+    with pytest.raises(ValueError, match="office-only"):
+        run_pipeline(p["form"], read_memo(p["memo"]), tmp_path / "x", mode="demo", slot_spec=office)
+    root = _mcp_root(tmp_path, samples_dir)
+    (root / "office.slots.json").write_text(json.dumps(office), encoding="utf-8")
+    res = FormGuardMCP(root=root).call_tool("form_guard_fill", {
+        "form_path": "samples/blank_forms/form6_study_group_grant.pdf", "slot_spec_path": "office.slots.json",
+        "memo_path": "samples/memos/memo6_study_group_grant.txt"})
+    assert res["isError"] and "office" in res["content"][0]["text"]
+
+
+def test_p4_pdf_overlay_never_changes_page_resources_and_acroform_fields_are_not_filled(tmp_path):
+    from form_guard.pdf_core import Name
+
+    helv = {"F1": {"Type": Name("Font"), "Subtype": Name("Type1"), "BaseFont": Name("Helvetica"),
+                   "Encoding": Name("WinAnsiEncoding")}}
+    content = b"0.5 w 50 700 100 30 re S 150 700 250 30 re S BT /F1 10 Tf 1 0 0 1 55 711 Tm (Name) Tj ET\n"
+    src = tmp_path / "latin.pdf"
+    src.write_bytes(_pdf_with({}, None, content, helv))
+    d = discover_blank_cells(src)
+    assert [c["slot_id"] for c in d["candidates"]] == ["Name"]
+    spec = build_confirmed_slot_spec(d, ["c01"], src)
+    with pytest.raises(pdf_core.PDFError, match="never changes a page's /Resources"):
+        run_pipeline(src, "Name: Taro Example\n", tmp_path / "run", mode="demo", slot_spec=spec)
+    widget = {"Type": Name("Annot"), "Subtype": Name("Widget"), "FT": Name("Tx"), "T": b"applicant", "TU": b"Applicant",
+              "Rect": [150, 600, 400, 630]}
+    form = tmp_path / "acro.pdf"
+    from form_guard.pdf_core import PDFBuilder
+
+    b = PDFBuilder()
+    cat, pgs, pg = b.reserve(), b.reserve(), b.reserve()
+    w = b.add({**widget, "P": pg})
+    body = b.add({}, content)
+    b.set(pg, {"Type": Name("Page"), "Parent": pgs, "MediaBox": [0, 0, 595.28, 841.89], "Resources": {"Font": helv},
+               "Contents": body, "Annots": [w]})
+    b.set(pgs, {"Type": Name("Pages"), "Kids": [pg], "Count": 1})
+    b.set(cat, {"Type": Name("Catalog"), "Pages": pgs, "AcroForm": {"Fields": [w]}})
+    form.write_bytes(b.build(cat))
+    d = discover_blank_cells(form)
+    assert d["pdf"]["acroform_fields"][0]["field"] == "applicant"
+    assert any("interactive AcroForm field" in x["reason"] for x in d["rejected"])
+
+
+def test_p4_web_demo6_discovery_preview_confirm_approve_and_download_the_pdf(api, samples_dir):
+    p = form6(samples_dir)
+    res = api.post("/api/run-demo", json={"demo_id": "form6", "mode": "demo"}).json()
+    assert res["unmarked"] and res["auto_preview"] and not res["run"]["can_approve"]
+    assert res["run"]["form"]["file_type"] == "pdf" and "naive" in res["run"]["previews"]
+    rec = [c["candidate_id"] for c in res["discovery"]["candidates"] if c["recommended"]]
+    office = [c["candidate_id"] for c in res["discovery"]["candidates"] if c["office_only"]]
+    assert len(rec) == 7 and len(office) == 2
+    refused = api.post("/api/runs/from-discovery", json={"discovery_id": res["discovery"]["discovery_id"],
+                                                         "confirmed_targets": rec + office, "mode": "demo"})
+    assert refused.status_code == 422 and "office/administrative use only" in refused.json()["detail"]
+    run = api.post("/api/runs/from-discovery", json={"discovery_id": res["discovery"]["discovery_id"],
+                                                     "confirmed_targets": rec, "mode": "demo"}).json()
+    assert run["report"]["overall_status"] == "PASS" and run["can_approve"] and run["is_builtin_demo"]
+    assert api.get(run["links"]["download"]).status_code == 403
+    required = [i["item_id"] for i in run["report"]["hitl_checklist"] if i["required"]]
+    ok = api.post(f"/api/runs/{run['run_id']}/approve", json={"reviewer": "架空 花子", "checked": required, **_seen(run)})
+    assert ok.status_code == 200, ok.text
+    dl = api.get(run["links"]["download"])
+    assert dl.status_code == 200 and dl.headers["content-type"] == "application/pdf"
+    assert dl.content.startswith(p["form"].read_bytes()) and hashlib.sha256(dl.content).hexdigest() == run["filled"]["sha256"]
+    sidecar = api.post("/api/runs", json={"demo_id": "form6", "mode": "demo"}).json()
+    assert sidecar["report"]["overall_status"] == "PASS" and sidecar["demo_id"] == "form6"
+    up = api.post("/api/discover", files={"file": ("研究会 申請書.pdf", p["form"].read_bytes())}, data={"mode": "demo"})
+    assert up.status_code == 200 and len(up.json()["candidates"]) == 9
+    for raw in (b"%PDF-1.7 not really a pdf", _pdf_with({}, {"OpenAction": {"S": pdf_core.Name("JavaScript"), "JS": b"x"}})):
+        bad = api.post("/api/runs/upload", files={"file": ("x.pdf", raw)}, data={"memo_text": "m", "mode": "demo"})
+        assert bad.status_code == 400, bad.text
+
+
+def test_p4_portal_lists_forms_rules_sha256_with_download_and_open_links(api, samples_dir):
+    page = api.get("/portal")
+    assert page.status_code == 200 and "default-src 'self'" in page.headers["content-security-policy"]
+    html = page.text
+    for needle in ("架空学術振興ポータル — 公募・研究会指定様式ダウンロード窓口", "Fictional Academic Grant &amp; Study Group Form Portal",
+                   "⬇ 白紙様式をダウンロード (.pdf)", "🚀 Form-Guard で自動空欄発見・外科的差込を開く", 'href="/"',
+                   "portal-form-fill", "form_guard_discover_blank_cells", "review_url", "架空のもの"):
+        assert needle in html, needle
+    assert "<script" not in html  # server-rendered, readable without running any script
+    forms = api.get("/api/portal/forms").json()
+    assert forms["fictional"] and [f["id"] for f in forms["forms"]] == ["form6", "form4", "form5", "form1", "form2", "form3"]
+    for f in forms["forms"]:
+        assert f'data-form-id=\'{f["id"]}\'' in html and f["sha256"] in html
+        blob = (samples_dir / "blank_forms" / f["form"]).read_bytes()
+        assert f["sha256"] == hashlib.sha256(blob).hexdigest() and f["size"] == len(blob)
+        dl = api.get(f["download_url"])
+        assert dl.status_code == 200 and dl.content == blob and dl.headers["x-form-guard-sha256"] == f["sha256"]
+        assert "attachment" in dl.headers["content-disposition"]
+    f6 = forms["forms"][0]
+    assert (f6["file_type"], f6["open_url"], f6["next_tool"]) == ("pdf", "/#pdf=form6", "form_guard_discover_blank_cells")
+    assert f6["office_only"] == ["事務局受付欄", "受付印・審査結果欄"] and f6["deadline"] == "2026年11月30日（月）17:00"
+    rules = {r["field"]: r["rule"] for r in f6["rules"]}
+    assert "上限500,000円" in rules["助成申請金額"] and "150字以内" in rules["研究概要"]
+    assert rules["共同研究先との合意状況"].startswith("□→■ で選択：合意済み／協議中（一つだけ）")
+    assert {f["id"]: f["open_url"] for f in forms["forms"]}["form1"] == "/#demo=form1"
+    assert api.get("/api/portal/forms/form9/download").status_code == 404
+    index, js = api.get("/").text, api.get("/static/app.js").text
+    assert 'href="/portal"' in index and "🌐 公募様式ポータル (/portal)" in index and 'id="pdfList"' in index
+    assert 'params.get("pdf")' in js and 'accept=".docx,.xlsx,.pdf"' in index
+
+
+def test_p4_mcp_fills_the_fixed_pdf_and_the_web_app_signs_off_the_exact_draft(samples_dir, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from form_guard.mcp_server import FormGuardMCP
+    from form_guard.server import create_app
+
+    root = _mcp_root(tmp_path, samples_dir)
+    srv = FormGuardMCP(root=root)
+    demos = srv.call_tool("form_guard_list_demos", {})["structuredContent"]
+    (d6,) = [d for d in demos["demos"] if d["id"] == "form6"]
+    assert d6["pdf"] and d6["file_type"] == "pdf" and d6["next_tool"] == "form_guard_discover_blank_cells"
+    assert d6["slot_spec_path"].endswith("form6_study_group_grant.slots.json")
+    scanned = srv.call_tool("form_guard_scan", {"form_path": d6["form_path"]})["structuredContent"]
+    assert scanned["file_type"] == "pdf" and scanned["slot_count"] == 7
+    assert {s["slot_id"]: s["marker_kind"] for s in scanned["slots"]}["共同研究先との合意状況"] == "checkbox_text"
+    disc = srv.call_tool("form_guard_discover_blank_cells", {"form_path": d6["form_path"]})["structuredContent"]
+    rec = [c["candidate_id"] for c in disc["candidates"] if c["recommended"]]
+    fill = srv.call_tool("form_guard_fill", {"form_path": d6["form_path"], "memo_path": d6["memo_path"],
+                                             "discovery": disc, "confirmed_ids": rec, "mode": "demo"})["structuredContent"]
+    assert fill["approval_status"] == "UNAPPROVED_DRAFT_REQUIRES_HUMAN_SIGN_OFF"
+    assert fill["verification"]["overall_status"] == "PASS" and fill["draft_path"].endswith(".pdf")
+    ver = srv.call_tool("form_guard_verify", {"original_path": d6["form_path"], "filled_path": fill["draft_path"],
+                                              "slot_spec_path": fill["slot_spec_path"]})["structuredContent"]
+    assert ver["overall_status"] == "PASS" and ver["grounding_verified"] and ver["visual"]["checked"]
+    assert ver["values_found"]["共同研究先との合意状況"] == "合意済み"
+    api = TestClient(create_app(run_root=tmp_path / "web", samples_dir=samples_dir, import_roots=[root / "output" / "mcp_runs"]))
+    run = api.get(f"/api/runs/{fill['run_id']}").json()
+    assert run["report"]["overall_status"] == "PASS" and run["filled"]["sha256"] == fill["filled_sha256"]
+    assert run["form"]["file_type"] == "pdf" and run["imported_from"]
+
+
+def test_p4_cli_scans_discovers_fills_and_verifies_a_fixed_pdf(samples_dir, tmp_path, capsys):
+    from form_guard.cli import main
+
+    p = form6(samples_dir)
+    assert main(["--scan", str(p["form"])]) == 0
+    out = capsys.readouterr().out
+    assert "(pdf) — 7 slots" in out and "page 1 › box" in out
+    assert main(["--discover-blanks", str(p["form"]), "--out-dir", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "9 candidate cells (7 recommended)" in out and "checkbox □→■ 合意済み/協議中" in out and "page 1 box (" in out
+    assert main(["--form", str(p["form"]), "--memo", str(p["memo"]), "--out-dir", str(tmp_path / "run"), "--mode", "demo"]) == 0
+    assert "PASS · 7/7 fields filled · 21/21 checks passed" in capsys.readouterr().out
+    filled = tmp_path / "run" / "filled_form6_study_group_grant.pdf"
+    assert main(["--verify", str(p["form"]), str(filled), "--memo", str(p["memo"])]) == 0
+    assert "PASS (21 passed, 0 failed)" in capsys.readouterr().out
+
+
+def test_p4_hook_guard_protects_blank_pdf_templates():
+    pdf = "samples/blank_forms/form6_study_group_grant.pdf"
+    for tool, ti in (("Write", {"file_path": pdf}), ("Bash", {"command": f"cp output/x.pdf {pdf}"}),
+                     ("Bash", {"command": f"rm {pdf}"}), ("PowerShell", {"command": f"Remove-Item {pdf}"})):
+        assert "BLOCKED by the Form-Guard template guard" in _denied(_hook("PreToolUse", tool, ti)), (tool, ti)
+    for tool, ti in (("Read", {"file_path": pdf}), ("Bash", {"command": f"cp {pdf} output/copy.pdf"}),
+                     ("Write", {"file_path": "samples/blank_forms/form6_study_group_grant.slots.json"})):
+        proc = _hook("PreToolUse", tool, ti)
+        assert proc.returncode == 0 and proc.stdout == b"", (tool, ti)
+
+
+def test_p4_portal_form_fill_skill_and_docs_describe_the_pdf_checkbox_and_portal_workflow():
+    meta, body = frontmatter(ROOT / ".claude" / "skills" / "portal-form-fill" / "SKILL.md")
+    assert meta["name"] == "portal-form-fill" and "Use when" in meta["description"] and "/portal" in meta["description"]
+    for word in ("/api/portal/forms", "Claude in Chrome", "form_guard_discover_blank_cells", "form_guard_fill",
+                 "form_guard_verify", "review_url", "--discover-blanks", "unapproved", "office-only", "□ → ■",
+                 "X-Form-Guard-SHA256", "samples/memos/memo6_study_group_grant.txt"):
+        assert word in body, word
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    doc = (ROOT / "docs" / "BUILT_WITH_CLAUDE_CODE.md").read_text(encoding="utf-8")
+    script = (ROOT / "docs" / "DEMO_VIDEO_SCRIPT_JA.md").read_text(encoding="utf-8")
+    for text in (readme, doc, script):
+        for needle in ("form6_study_group_grant.pdf", "□", "■", "/portal", "Claude in Chrome"):
+            assert needle in text, needle
+    for text in (readme, doc):
+        for needle in ("incremental update", "増分更新", "portal-form-fill", "GET /api/portal/forms", "pdf_support.py",
+                       "requires_human_if_selected", "VIS-01"):
+            assert needle in text, needle

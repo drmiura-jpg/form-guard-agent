@@ -82,6 +82,7 @@ class Prim:
     stroke_w: float = 1.0
     dash: Optional[str] = None
     sans: bool = False
+    xs: Optional[list[float]] = None  # text: the x of every glyph (PDF previews place each glyph where the PDF does)
 
 
 @dataclass
@@ -878,6 +879,7 @@ def svg_document(layout: Layout, overlays: list[Overlay], title: str = "", banne
            ".fg-marker{fill:rgba(37,99,235,.14);stroke:#2563eb;stroke-width:1.2}"
            ".fg-pending{fill:rgba(250,178,25,.28);stroke:#b97a00;stroke-width:1.6;stroke-dasharray:5 3}"
            ".fg-drift{fill:rgba(236,131,90,.18);stroke:#c4562b;stroke-width:2}"
+           ".fg-locked{fill:rgba(100,116,139,.13);stroke:#64748b;stroke-width:1.2;stroke-dasharray:3 3}"
            ".nv-alter{fill:rgba(208,59,59,.13);stroke:#d03b3b;stroke-width:1.6}"
            ".nv-border{fill:none;stroke:#d03b3b;stroke-width:2;stroke-dasharray:7 4}"
            ".nv-invent{fill:rgba(208,59,59,.24);stroke:#a32525;stroke-width:2}"
@@ -921,7 +923,8 @@ def _svg_prim(p: Prim) -> str:
                 f'stroke-width="{p.stroke_w:.2f}" stroke-linecap="square"{d}/>')
     fam = SANS if p.sans else SERIF
     weight = ' font-weight="700"' if p.bold else ""
-    return (f'<text x="{p.x:.1f}" y="{p.y:.1f}" font-size="{p.size:.1f}" font-family="{fam}"{weight} '
+    xpos = (" ".join(f"{x:.1f}" for x in p.xs) if p.xs and len(p.xs) == len(p.text) else f"{p.x:.1f}")
+    return (f'<text x="{xpos}" y="{p.y:.1f}" font-size="{p.size:.1f}" font-family="{fam}"{weight} '
             f'fill="{_attr(p.color)}" class="fg-t" xml:space="preserve">{html.escape(p.text)}</text>')
 
 
@@ -945,6 +948,16 @@ def png_available() -> Optional[str]:
 
 def render_png(layout: Layout, overlays: list[Overlay], out_path: Union[str, Path], scale: float = 1.5) -> Optional[Path]:
     """Raster version of the preview (needs Pillow and a CJK font); returns None if unavailable."""
+    img = render_image(layout, overlays, scale)
+    if img is None:
+        return None
+    out_path = Path(out_path)
+    img.save(out_path)
+    return out_path
+
+
+def render_image(layout: Layout, overlays: list[Overlay], scale: float = 1.5):
+    """The preview as a Pillow image (None without Pillow or a CJK font) — also the rasteriser of the PDF pixel diff."""
     font_path = png_available()
     if not font_path:
         return None
@@ -967,7 +980,8 @@ def render_png(layout: Layout, overlays: list[Overlay], out_path: Union[str, Pat
     colors = {"fg-slot": ((12, 163, 12, 45), (10, 138, 10, 255)), "fg-pending": ((250, 178, 25, 75), (185, 122, 0, 255)),
               "fg-marker": ((37, 99, 235, 40), (37, 99, 235, 255)), "nv-alter": ((208, 59, 59, 38), (208, 59, 59, 255)),
               "nv-invent": ((208, 59, 59, 65), (163, 37, 37, 255)), "nv-border": ((0, 0, 0, 0), (208, 59, 59, 255)),
-              "fg-drift": ((236, 131, 90, 50), (196, 86, 43, 255)), "fg-slot-cell": ((0, 0, 0, 0), (12, 163, 12, 255))}
+              "fg-drift": ((236, 131, 90, 50), (196, 86, 43, 255)), "fg-slot-cell": ((0, 0, 0, 0), (12, 163, 12, 255)),
+              "fg-locked": ((100, 116, 139, 34), (100, 116, 139, 255))}
     for pi, p in enumerate(layout.pages):
         S = lambda v: v * scale
         ox = 8.0
@@ -979,6 +993,9 @@ def render_png(layout: Layout, overlays: list[Overlay], out_path: Union[str, Pat
             elif pr.kind == "line":
                 draw.line([S(ox + pr.x), S(oy + pr.y), S(ox + pr.x2), S(oy + pr.y2)], fill=pr.stroke or "#000",
                           width=max(1, int(pr.stroke_w * scale)))
+            elif pr.xs and len(pr.xs) == len(pr.text):  # glyph by glyph, at the positions the PDF uses
+                for ch, gx in zip(pr.text, pr.xs):
+                    draw.text((S(ox + gx), S(oy + pr.y - pr.size * 0.86)), ch, fill=pr.color, font=font(pr.size))
             else:
                 draw.text((S(ox + pr.x), S(oy + pr.y - pr.size * 0.86)), pr.text, fill=pr.color, font=font(pr.size))
         for ov in overlays:
@@ -988,9 +1005,7 @@ def render_png(layout: Layout, overlays: list[Overlay], out_path: Union[str, Pat
             draw.rectangle([S(ox + ov.x - 1.5), S(oy + ov.y - 1), S(ox + ov.x + ov.w + 1.5), S(oy + ov.y + ov.h + 1)],
                            fill=fill, outline=outline, width=max(1, int(1.5 * scale)))
         oy += p.height + gap
-    out_path = Path(out_path)
-    img.save(out_path)
-    return out_path
+    return img
 
 
 # ---------------------------------------------------------------- comparison

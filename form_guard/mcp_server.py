@@ -8,7 +8,7 @@ Claude Code picks it up from ``.mcp.json`` (server name ``form-guard``). Message
 JSON (the MCP stdio transport) or Content-Length framed; every answer uses the framing of its request.
 
 Tools: ``form_guard_list_demos``, ``form_guard_scan``, ``form_guard_discover_blank_cells``, ``form_guard_fill``,
-``form_guard_verify``.
+``form_guard_verify`` — for .docx / .xlsx and fixed .pdf forms alike (a PDF is filled by an incremental update).
 
 Human approval is never bypassed: ``form_guard_fill`` only writes an unapproved draft into
 ``output/mcp_runs/<run id>/`` — never inside ``samples/`` and never over a blank form — and marks it
@@ -60,9 +60,10 @@ FORBIDDEN_PATH_PARTS = frozenset({".git", ".ssh", ".claude-hackathon"})
 RUNTIME_DEPENDENCIES = ("pydantic", "lxml", "openpyxl", "docx")
 SERVER_INFO = {"name": "form-guard", "title": "Form-Guard Agent", "version": __version__}
 INSTRUCTIONS = (
-    "Form-Guard fills only the designated fields of .docx/.xlsx forms and proves nothing else changed. "
+    "Form-Guard fills only the designated fields of .docx/.xlsx forms and fixed .pdf forms and proves nothing else "
+    "changed (a PDF is filled by an incremental update: the blank file stays an exact byte prefix). "
     "Use form_guard_list_demos to find the fictional demo forms and form_guard_scan to list slots; for an unmarked "
-    "blank form use form_guard_discover_blank_cells, show the candidates to the user and let them choose; "
+    "blank form or a fixed PDF use form_guard_discover_blank_cells, show the candidates to the user and let them choose; "
     "form_guard_fill writes an UNAPPROVED draft — tell the user that a named human reviewer must sign it off "
     "(python -m form_guard.cli --serve, then open the review_url from the result) before it is used; "
     "form_guard_verify audits any filled copy against its blank original. mode defaults to demo (offline); use live "
@@ -82,20 +83,23 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "form_guard_list_demos",
         "title": "List the fictional demo forms",
-        "description": "List the 5 built-in demo forms (100% fictional, non-medical) with paths relative to the server "
+        "description": "List the 6 built-in demo forms (100% fictional, non-medical) with paths relative to the server "
                        "root: 3 MARKED forms whose fields are designated by {{markers}}, [記入欄: …] or cell coordinates "
                        "(form1 .docx, form2 .docx, form3 .xlsx — each with its memo, slot spec and a simulated naive AI "
-                       "regeneration) and 2 UNMARKED blank forms (form4 .docx, form5 .xlsx) that need "
-                       "form_guard_discover_blank_cells and the user's confirmation before form_guard_fill. Read-only.",
+                       "regeneration), 2 UNMARKED blank forms (form4 .docx, form5 .xlsx) and 1 FIXED PDF form (form6 "
+                       ".pdf, a study-group grant application with a printed □ 合意済み / □ 協議中 checkbox) that need "
+                       "form_guard_discover_blank_cells and the user's confirmation before form_guard_fill (form6 also "
+                       "ships a .slots.json designating the same boxes by page coordinates). Read-only.",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         "annotations": _READ_ONLY,
     },
     {
         "name": "form_guard_scan",
         "title": "Scan a form for fillable slots",
-        "description": "List the fillable slots of a .docx/.xlsx form ({{markers}}, [記入欄: …] or cell coordinates in a "
-                       ".slots.json) with the rules printed on the form (character limits, 和暦, digits, caps, "
-                       "drop-down options) and the Claude model live auto mode would route each slot to. Read-only.",
+        "description": "List the fillable slots of a .docx/.xlsx/.pdf form ({{markers}}, [記入欄: …], cell coordinates "
+                       "or PDF page boxes in a .slots.json, printed □ checkbox options) with the rules printed on the form "
+                       "(character limits, 和暦, digits, caps, drop-down / checkbox options) and the Claude model live "
+                       "auto mode would route each slot to. Read-only.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -110,10 +114,11 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "form_guard_discover_blank_cells",
         "title": "Discover empty cells of an unmarked blank form",
-        "description": "4-stage discovery for a form without markers: (1) empty cells next to a printed label, "
-                       "(2) applicant_fillable vs office_only (事務局・受付印・受付番号・審査欄・決裁…) with unique slot ids "
-                       "and printed rules, (3) deterministic safety checks (formula and merged-continuation cells are "
-                       "rejected), (4) a report for HUMAN confirmation. Nothing is written. Read-only.",
+        "description": "4-stage discovery for a form without markers (.docx/.xlsx, or a fixed .pdf whose boxes are "
+                       "rebuilt from its ruled lines): (1) empty cells — and cells printing □ checkbox options — next to "
+                       "a printed label, (2) applicant_fillable vs office_only (事務局・受付印・受付番号・審査欄・決裁…) with "
+                       "unique slot ids and printed rules, (3) deterministic safety checks (formula and merged-continuation "
+                       "cells are rejected), (4) a report for HUMAN confirmation. Nothing is written. Read-only.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -167,8 +172,10 @@ TOOLS: list[dict[str, Any]] = [
         "title": "Verify a filled copy against its blank original",
         "description": "Re-run the deterministic checks (archive safety, ZIP/SHA-256, XML skeleton, tables/borders/merges, "
                        "boilerplate text, designated cells, printed rules) plus VIS-01 layout drift / cell overflow on any "
-                       "filled .docx/.xlsx. Grounding is checked against memo_text / memo_path, or a matching "
-                       "audit_log.json next to the filled file. Read-only.",
+                       "filled .docx/.xlsx — or, for a fixed .pdf, the same 21 check ids (blank file an exact byte prefix, "
+                       "original content stream SHA-256, page dictionary keys, overlay only inside the slot boxes, "
+                       "office-only boxes untouched) plus a pixel diff outside the boxes. Grounding is checked against "
+                       "memo_text / memo_path, or a matching audit_log.json next to the filled file. Read-only.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -369,7 +376,7 @@ class FormGuardMCP:
     # ---------------------------------------------------------------------- tools
 
     def tool_list_demos(self, args: dict[str, Any]) -> dict[str, Any]:
-        from .samples import DEMOS, UNMARKED_FORMS, demo_paths, unmarked_paths
+        from .samples import DEMOS, PDF_FORMS, UNMARKED_FORMS, demo_paths, pdf_paths, unmarked_paths
 
         base = self._samples_dir()
 
@@ -396,6 +403,19 @@ class FormGuardMCP:
                           "next_tool": "form_guard_discover_blank_cells",
                           "form_path": where(p["form"])["path"], "memo_path": where(p["memo"])["path"],
                           "slot_spec_path": None, "naive_path": None, "highlights": list(u.get("highlights", [])),
+                          "files_present": all(x.is_file() for x in (p["form"], p["memo"]))})
+        for f in PDF_FORMS:
+            p = pdf_paths(f, base)
+            spec = p["form"].with_suffix(".slots.json")
+            demos.append({"id": f["id"], "title": f["title"], "title_en": f.get("title_en", ""), "org": f.get("org", ""),
+                          "file_type": f["file_type"], "marked": False, "unmarked": True, "pdf": True,
+                          "designation": "fixed PDF — blank-box discovery + human confirmation (the .slots.json "
+                                         "designates the same boxes by page coordinates)",
+                          "next_tool": "form_guard_discover_blank_cells",
+                          "form_path": where(p["form"])["path"], "memo_path": where(p["memo"])["path"],
+                          "slot_spec_path": where(spec)["path"] if spec.is_file() else None,
+                          "naive_path": where(p["naive"])["path"], "highlights": list(f.get("highlights", [])),
+                          "portal": "http://127.0.0.1:8000/portal",
                           "files_present": all(x.is_file() for x in (p["form"], p["memo"]))})
         return {"samples_dir": self._rel(base) if base.resolve().is_relative_to(self.root) else str(base),
                 "fictional": True, "count": len(demos), "demos": demos,

@@ -140,17 +140,19 @@ def _map(scan_r: ScanResult, memo: str, mode: str, model: Optional[str], client:
 def is_builtin_demo(demo_id: Optional[str], form_path: Path, memo_text: str, mappings: list[FieldMapping]) -> bool:
     """True only for an unmodified built-in demo (marked, or unmarked with reviewer-confirmed cells): its sample
     form, its sample memo, no reviewer-entered values."""
-    from .samples import MEMOS, demo_by_id, unmarked_by_id
+    from .samples import MEMOS, demo_by_id, pdf_by_id, unmarked_by_id
 
     if not demo_id:
         return False
-    try:
-        demo = demo_by_id(demo_id)
-    except KeyError:
+    demo = None
+    for lookup in (demo_by_id, unmarked_by_id, pdf_by_id):
         try:
-            demo = unmarked_by_id(demo_id)
+            demo = lookup(demo_id)
+            break
         except KeyError:
-            return False
+            continue
+    if demo is None:
+        return False
     return (Path(form_path).name == demo["form"] and memo_text == MEMOS.get(demo["memo"])
             and not any(m.status == "human_entered" for m in mappings))
 
@@ -307,6 +309,8 @@ def apply_overrides(scan_r: ScanResult, mappings: list[FieldMapping], overrides:
 
 def _occurrence_ranges(scan_r: ScanResult, values: dict[str, str]):
     """Yield (slot_id, box_id, orig_range, new_range, state) for every slot occurrence."""
+    from .constraints import normalize_checkbox_value
+
     seen = set()
     for s in scan_r.slots:
         for o in s.occurrences:
@@ -315,6 +319,18 @@ def _occurrence_ranges(scan_r: ScanResult, values: dict[str, str]):
                 v = values.get(s.slot_id)
                 para_box = _para_box(o)
                 yield s.slot_id, o.box_id, para_box, None, (0, len(v)) if v else None, "filled" if v else "pending"
+                continue
+            if o.marker_kind == "checkbox_text":  # highlight the □ of every option (■ where ticked)
+                v = values.get(s.slot_id)
+                picked = set(normalize_checkbox_value(v, [x["label"] for x in o.checkbox_options])) if v else set()
+                if o.paragraph_index is None:  # an Excel cell: the cell itself
+                    yield s.slot_id, o.box_id, None, None, None, "filled" if picked else "pending"
+                    continue
+                for x in o.checkbox_options:
+                    on = x["label"] in picked
+                    rng = (x["offset"], x["offset"] + 1)
+                    yield s.slot_id, o.box_id, _para_box(o), rng, rng if on or not v else None, \
+                        "filled" if on else "pending"
                 continue
             if key in seen:
                 continue
@@ -353,6 +369,10 @@ def build_previews(result_scan: ScanResult, filled_path: Path, values: dict[str,
                    naive_path: Optional[Path], naive_report: Optional[VerificationReport],
                    png_dir: Optional[Path] = None) -> tuple[dict[str, str], dict[str, Any]]:
     ft = result_scan.file_type
+    if ft == "pdf":  # fixed PDF: same SVG / PNG pipeline, plus a pixel diff outside the slot boxes
+        from .pdf_support import build_pdf_previews
+
+        return build_pdf_previews(result_scan, filled_path, values, naive_path, naive_report, png_dir)
     labels = _labels(result_scan)
     if ft == "docx":
         blank_layout, blank_r = layout_docx(result_scan.path)
@@ -565,7 +585,11 @@ def _drift_check(visual: dict[str, Any]):
     if n_over:
         parts.append(f"{n_over} value(s) overflow their cell ("
                      + "; ".join(f"{d['box']}: {d['issue']}" for d in drift if "overflow" in d.get("issue", ""))[:200] + ")")
-    if n_moved:
+    px = visual.get("pixel_diff") or {}
+    if px.get("method") == "pixel" and px.get("outside"):
+        n_moved -= 1  # the pixel finding is listed on its own
+        parts.append(f"{px['outside']} px differ outside the designated boxes (pixel diff of the rendered pages)")
+    if n_moved > 0:
         parts.append(f"{n_moved} boxes moved (max {visual.get('max_shift_px')}px)")
     if visual.get("pages_blank") != visual.get("pages_filled"):
         parts.append(f"pages {visual.get('pages_blank')}→{visual.get('pages_filled')}")
@@ -604,7 +628,7 @@ def write_run_outputs(result: PipelineResult) -> dict[str, Path]:
 HANDOFF_NAME = "web_handoff.json"
 HANDOFF_SCHEMA = "form-guard/web-handoff@1"
 HANDOFF_BLANK_DIR = "_blank"
-_PLAIN_NAME = re.compile(r"^[^\\/:*?\"<>|\x00-\x1f]{1,200}\.(?:docx|xlsx)$", re.I)
+_PLAIN_NAME = re.compile(r"^[^\\/:*?\"<>|\x00-\x1f]{1,200}\.(?:docx|xlsx|pdf)$", re.I)
 
 
 class HandoffError(ValueError):
@@ -714,8 +738,13 @@ def load_handoff_draft(run_dir: Union[str, Path], out_dir: Union[str, Path]) -> 
     form_path.write_bytes(blank_blob)
     filled_path.write_bytes(filled_blob)
     try:
-        check_archive(form_path)
-        check_archive(filled_path)
+        for p in (form_path, filled_path):  # the archive gate, or the PDF gate for a fixed PDF form
+            if p.read_bytes()[:5] == b"%PDF-":
+                from .pdf_core import check_pdf
+
+                check_pdf(p)
+            else:
+                check_archive(p)
         scan_r = scan(form_path, spec)
     except (ZipSurgeryError, ValueError) as exc:
         raise HandoffError(f"the draft cannot be re-verified: {exc}") from exc

@@ -41,6 +41,14 @@ and DTD / entity declarations (XXE) are refused before anything parses the file.
 ``GET /api/claude-suite`` describes the repository's Claude Code skills, subagents, two-stage
 hook guard and MCP server (read from the files), the model routing policy and the measured
 workflow numbers.
+
+Fixed PDF forms (Phase 4): デモ6 ``form6_study_group_grant.pdf`` runs blank-box discovery like
+form4 / form5 (``POST /api/run-demo``), or its sidecar spec (``POST /api/runs``). Uploads accept
+``.pdf`` behind the PDF gate (encryption, JavaScript / launch actions, embedded files, XFA,
+compressed cross-references and decompression bombs are refused). ``GET /portal`` is a fictional
+grant / study-group portal (架空学術振興ポータル) listing the blank forms with their printed rules and
+SHA-256, a download link (``GET /api/portal/forms/{id}/download``) and a link that opens the form
+in this app; ``GET /api/portal/forms`` is the same list as JSON for Claude Code / Claude in Chrome.
 """
 
 from __future__ import annotations
@@ -72,10 +80,13 @@ from .models import FieldMapping
 from .pipeline import HANDOFF_NAME, HandoffError, PipelineResult, load_handoff_draft, new_run_id, run_pipeline
 from .samples import (
     DEMOS,
+    PDF_FORMS,
     UNMARKED_FORMS,
     demo_by_id,
     demo_paths,
     ensure_samples,
+    pdf_by_id,
+    pdf_paths,
     read_memo,
     unmarked_by_id,
     unmarked_paths,
@@ -92,7 +103,8 @@ _DISCOVERY_ID = re.compile(r"^[0-9a-f]{24}$")
 SHA256_HEX = r"^[0-9a-fA-F]{64}$"
 ModelTier = Literal["auto", "opus", "sonnet", "haiku"]
 MEDIA = {".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-         ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}
+         ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+         ".pdf": "application/pdf"}
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]", "testserver"})
 UNSAFE_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
 
@@ -343,15 +355,25 @@ def _payload(run_id: str, st: RunState) -> dict[str, Any]:
 
 
 def _check_package(path: Path) -> str:
-    """The archive gate (path traversal, entry count, ZIP bomb, DTD / entities), then the OOXML type."""
+    """The archive gate (path traversal, entry count, ZIP bomb, DTD / entities) then the OOXML type — or, for a PDF,
+    the PDF gate (encryption, active content, compressed cross-references, decompression bombs)."""
     try:
-        check_archive(path, max_uncompressed=MAX_UNCOMPRESSED_BYTES)
+        if path.read_bytes()[:5] != b"%PDF-":
+            check_archive(path, max_uncompressed=MAX_UNCOMPRESSED_BYTES)
         return detect_file_type(path)
     except ZipSurgeryError as exc:
         raise HTTPException(400, str(exc) if "refused" in str(exc) else
-                            "not a .docx / .xlsx file (ZIP container expected)") from exc
+                            "not a .docx / .xlsx file (ZIP container expected) or a .pdf form") from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+
+
+def discoverable(demo_id: str) -> tuple[dict, bool]:
+    """A demo filled through blank-cell discovery: (form4 / form5, False) or the fixed PDF (form6, True)."""
+    try:
+        return unmarked_by_id(demo_id), False
+    except KeyError:
+        return pdf_by_id(demo_id), True
 
 
 def default_import_roots(project_root: Path) -> list[Path]:
@@ -420,7 +442,7 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
         """Store an uploaded .docx / .xlsx in a fresh staging folder after size, ZIP-bomb and type checks."""
         suffix = Path(file.filename or "").suffix.lower()
         if suffix not in MEDIA:
-            raise HTTPException(400, "upload a .docx or .xlsx form")
+            raise HTTPException(400, "upload a .docx, .xlsx or .pdf form")
         data = file.file.read(MAX_UPLOAD_BYTES + 1)
         if len(data) > MAX_UPLOAD_BYTES:
             raise HTTPException(413, "file larger than 15 MB")
@@ -517,25 +539,34 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
 
     @app.get("/api/demos")
     def demos():
-        """All five fictional demos: デモ1–3 with designated fields, デモ4–5 unmarked (blank-cell discovery)."""
+        """All six fictional demos: デモ1–3 with designated fields, デモ4–5 unmarked (blank-cell discovery), デモ6 a fixed
+        PDF (blank-box discovery; its sidecar spec also designates the boxes)."""
         base = samples()
         out = []
-        for n, d in enumerate([*DEMOS, *UNMARKED_FORMS], start=1):
-            unmarked = d["id"] in {u["id"] for u in UNMARKED_FORMS}
-            p = unmarked_paths(d, base) if unmarked else demo_paths(d, base)
+        pdf_ids = {x["id"] for x in PDF_FORMS}
+        for n, d in enumerate([*DEMOS, *UNMARKED_FORMS, *PDF_FORMS], start=1):
+            pdf = d["id"] in pdf_ids
+            unmarked = pdf or d["id"] in {u["id"] for u in UNMARKED_FORMS}
+            p = pdf_paths(d, base) if pdf else unmarked_paths(d, base) if unmarked else demo_paths(d, base)
             out.append({**{k: d[k] for k in ("id", "title", "title_en", "org", "file_type", "highlights")},
-                        "number": n, "label": f"デモ{n}", "unmarked": unmarked, "marked": not unmarked,
-                        "badge": "空欄自動検出" if unmarked else "", "has_naive": not unmarked,
+                        "number": n, "label": f"デモ{n}", "unmarked": unmarked, "marked": not unmarked, "pdf": pdf,
+                        "badge": "固定PDF・空欄自動検出" if pdf else "空欄自動検出" if unmarked else "",
+                        "has_naive": not unmarked or pdf,
                         "form": p["form"].name, "memo_name": p["memo"].name, "memo_text": read_memo(p["memo"])})
         return out
 
     @app.post("/api/runs")
     def run_demo(req: RunRequest):
+        """A demo with designated fields (form1–3), or the fixed PDF form6 through its sidecar .slots.json."""
         try:
             d = demo_by_id(req.demo_id)
-        except KeyError as exc:
-            raise HTTPException(404, "unknown demo") from exc
-        p = demo_paths(d, samples())
+            p = demo_paths(d, samples())
+        except KeyError:
+            try:
+                d = pdf_by_id(req.demo_id)
+            except KeyError as exc:
+                raise HTTPException(404, "unknown demo") from exc
+            p = pdf_paths(d, samples())
         memo = req.memo_text if req.memo_text is not None else read_memo(p["memo"])
         run_id, st = _run(p["form"], memo, req.mode, naive=p["naive"], spec=None, demo_id=d["id"], display=p["form"].name,
                           model_tier=req.model_tier)
@@ -574,12 +605,12 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
 
     @app.post("/api/discover/demo")
     def discover_demo(req: DiscoverDemoRequest):
-        """Stages 1-3 on a built-in unmarked form (form4 .docx / form5 .xlsx), with its sample memo."""
+        """Stages 1-3 on a built-in unmarked form (form4 .docx / form5 .xlsx / form6 fixed .pdf), with its memo."""
         try:
-            u = unmarked_by_id(req.demo_id)
+            u, pdf = discoverable(req.demo_id)
         except KeyError as exc:
             raise HTTPException(404, "unknown unmarked demo") from exc
-        p = unmarked_paths(u, samples())
+        p = pdf_paths(u, samples()) if pdf else unmarked_paths(u, samples())
         d = _discover(p["form"], req.mode, req.model_tier)
         memo = read_memo(p["memo"])
         token = discoveries.put(d, p["form"], memo_text=memo, demo_id=u["id"], display_name=p["form"].name)
@@ -621,10 +652,10 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
                               display=p["form"].name, model_tier=tier)
             return {"demo_id": d["id"], "unmarked": False, "auto_preview": False, "run": _payload(run_id, st)}
         try:
-            u = unmarked_by_id(req.demo_id)
+            u, pdf = discoverable(req.demo_id)
         except KeyError as exc:
             raise HTTPException(404, "unknown demo") from exc
-        p = unmarked_paths(u, samples())
+        p = pdf_paths(u, samples()) if pdf else unmarked_paths(u, samples())
         sample_memo = read_memo(p["memo"])
         if req.discovery_id:  # the stored discovery — never anything the client sends — defines the cells
             entry = discoveries.get(req.discovery_id)
@@ -641,8 +672,8 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         memo = req.memo_text if req.memo_text is not None else sample_memo
-        run_id, st = _run(p["form"], memo, req.mode, naive=None, spec=spec, demo_id=u["id"], display=p["form"].name,
-                          model_tier=tier, auto_preview=preview)
+        run_id, st = _run(p["form"], memo, req.mode, naive=p.get("naive"), spec=spec, demo_id=u["id"],
+                          display=p["form"].name, model_tier=tier, auto_preview=preview)
         discovery = {**report, "discovery_id": token, "demo_id": u["id"], "title": u["title"], "title_en": u["title_en"],
                      "org": u["org"], "memo_text": sample_memo}
         return {"demo_id": u["id"], "unmarked": True, "auto_preview": preview, "discovery": discovery,
@@ -662,6 +693,53 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
                     "note": "measured on this machine with the offline engine (no network); the manual columns are "
                             "counted from the files, not a timed study of a person"}
         return {**suite, "workflow": app.state.workflow}
+
+    # ------------------------------------------------ 架空学術振興ポータル (fictional grant / study-group portal)
+    portal_lock = threading.Lock()
+    app.state.portal = None  # built once per process from the blank forms themselves
+
+    def portal_forms() -> list[dict[str, Any]]:
+        from .portal import build_portal
+
+        with portal_lock:
+            if app.state.portal is None:
+                app.state.portal = build_portal(samples(), app.state.project_root)
+            return app.state.portal
+
+    @app.get("/portal", response_class=HTMLResponse)
+    def portal():
+        """The fictional portal: calls, blank forms, printed rules, SHA-256, download and open-in-Form-Guard links."""
+        from .portal import portal_html
+
+        return HTMLResponse(portal_html(portal_forms()), headers={"Cache-Control": "no-cache"})
+
+    @app.get("/api/portal/forms")
+    def portal_forms_api():
+        """The portal's forms as JSON (for Claude Code and Claude in Chrome)."""
+        from .portal import PORTAL_TITLE_EN, PORTAL_TITLE_JA
+
+        return {"portal": PORTAL_TITLE_JA, "portal_en": PORTAL_TITLE_EN, "fictional": True,
+                "forms": portal_forms(),
+                "workflow": ["download the blank form (download_url) or use mcp_form_path",
+                             "form_guard_discover_blank_cells (or form_guard_scan for marked forms) — the user confirms",
+                             "form_guard_fill with the memo — an unapproved draft and its review_url",
+                             "form_guard_verify — the 21 checks + VIS-01",
+                             "open review_url in Chrome — a named human reviewer approves"]}
+
+    @app.get("/api/portal/forms/{form_id}/download")
+    def portal_download(form_id: str):
+        """The blank form exactly as published (its SHA-256 in X-Form-Guard-SHA256)."""
+        entry = next((f for f in portal_forms() if f["id"] == form_id), None)
+        if entry is None:
+            raise HTTPException(404, "unknown form")
+        base = samples()
+        path = base / "blank_forms" / entry["form"]
+        blob = path.read_bytes()
+        sha = hashlib.sha256(blob).hexdigest()
+        suffix = path.suffix.lower()
+        headers = {"Content-Disposition": f"attachment; filename=\"blank{suffix}\"; filename*=UTF-8''{quote(path.name)}",
+                   "X-Form-Guard-SHA256": sha}
+        return Response(content=blob, media_type=MEDIA.get(suffix, "application/octet-stream"), headers=headers)
 
     @app.post("/api/runs/upload")
     def run_upload(file: UploadFile = File(...), memo_text: str = Form(...), mode: str = Form("auto"),
