@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
+from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 
 # ----------------------------------------------------------------------- dates
@@ -169,13 +170,24 @@ def weekday_ja(d: date) -> str:
 
 
 def to_wareki(d: date, include_weekday: bool = True) -> str:
-    """令和8年11月2日（月） — human-facing dates carry the weekday unless ``include_weekday`` is False."""
+    """令和8年11月2日（月） — human-facing dates carry the weekday unless ``include_weekday`` is False.
+
+    Raises ValueError for a date before 昭和 (1926-12-25), the first era this tool writes (``pre_era_problem``)."""
     for name, start in ERAS:
         if d >= start:
             y = d.year - start.year + 1
             out = f"{name}{'元' if y == 1 else y}年{d.month}月{d.day}日"
             return out + (f"（{weekday_ja(d)}）" if include_weekday else "")
     raise ValueError(f"date before supported eras: {d}")
+
+
+def pre_era_problem(d: Optional[date]) -> Optional[str]:
+    """Why ``d`` cannot be written as 和暦 here (it is before 昭和元年12月25日), or None."""
+    first = ERAS[-1][1]
+    if d is None or d >= first:
+        return None
+    return (f"{d.isoformat()} is before the supported eras (昭和 began on {first.isoformat()}) — it cannot be written as "
+            f"a 和暦 date / 昭和より前の日付は和暦で記入できません")
 
 
 def to_western(d: date, include_weekday: bool = True) -> str:
@@ -239,34 +251,53 @@ def _to_float(s: str) -> float:
     return float(s)
 
 
+# Comma grouping must be groups of three digits: 1,612,000 — never 52,00 / 1,,000 / 1,00,000.
+_GROUPED_RE = re.compile(r"^[0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?$")
+
+
+def _decimal_term(tok: str) -> Decimal:
+    if "," in tok and not _GROUPED_RE.match(tok):
+        raise ValueError(f"malformed digit grouping {tok!r} (commas must separate groups of three digits)")
+    try:
+        return Decimal(tok.replace(",", ""))
+    except InvalidOperation as exc:
+        raise ValueError(f"not a number: {tok!r}") from exc
+
+
 def parse_compound(num: str) -> int:
-    """Parse '483万6千' / '1,612,000' / '1億2,000万' into an integer."""
-    num = unicodedata.normalize("NFKC", num).replace(",", "").replace(" ", "")
-    total = 0
+    """Parse '483万6千' / '1,612,000' / '1億2,000万' / '1.5万' / '0万5千' into an integer.
+
+    Exact decimal arithmetic: malformed comma grouping (52,00 / 1,,000) and a total that is not a whole number
+    (1.5 / 0.5) raise ValueError instead of being read as another number or rounded. An explicit 0 before a unit
+    stays 0 (0万 = 0); only a unit with nothing before it counts as one (万 = 10,000)."""
+    num = unicodedata.normalize("NFKC", num).replace(" ", "")
+    total = Decimal(0)
     cur = ""
     for ch in num:
-        if ch.isdigit() or ch == ".":
+        if ch.isdigit() or ch in ".,":
             cur += ch
         elif ch in _UNIT_MULT:
-            total += round(float(cur or "1") * _UNIT_MULT[ch])
+            total += (_decimal_term(cur) if cur else Decimal(1)) * Decimal(_UNIT_MULT[ch])
             cur = ""
     if cur:
-        total += round(float(cur))
+        total += _decimal_term(cur)
+    if total != int(total):
+        raise ValueError(f"{num!r} is not a whole number")
     return int(total)
 
 
 def kanji_to_int(s: str) -> Optional[int]:
-    total, section, digit = 0, 0, None
+    total, section, digit, seen = 0, 0, None, False  # seen: the section states a number (〇万 = 0, 万 = 1万)
     for ch in s:
         if ch in _KANJI_DIGITS:
-            digit = _KANJI_DIGITS[ch]
+            digit, seen = _KANJI_DIGITS[ch], True
         elif ch in _KANJI_SMALL:
             section += (digit if digit is not None else 1) * _KANJI_SMALL[ch]
-            digit = None
+            digit, seen = None, True
         elif ch in _KANJI_BIG:
             section += digit or 0
-            total += (section or 1) * _KANJI_BIG[ch]
-            section, digit = 0, None
+            total += (section if seen else 1) * _KANJI_BIG[ch]
+            section, digit, seen = 0, None, False
         else:
             return None
     return total + section + (digit or 0)
@@ -283,10 +314,12 @@ class AmountMatch:
 
 def find_amounts(text: str) -> list[AmountMatch]:
     out: list[AmountMatch] = []
+    refused: list[tuple[int, int]] = []  # 52,00万円 / 1.5円: not an amount, and nothing inside them is read as one
     for m in _AMOUNT_RE.finditer(text):
         try:
             v = parse_compound(m.group("num"))
         except ValueError:
+            refused.append((m.start(), m.end()))
             continue
         if m.group("k"):
             v *= 1000
@@ -294,7 +327,10 @@ def find_amounts(text: str) -> list[AmountMatch]:
         out.append(AmountMatch(start, m.end(), v, bool(m.group("approx")), text[start : m.end()]))
     for m in _KANJI_AMOUNT_RE.finditer(text):
         v = kanji_to_int(m.group("num"))
-        if v is None or any(a.start <= m.start() < a.end for a in out):
+        s = m.start("num")
+        # the 万円 / 千円 of a number that is no amount (52,00万円, 1.23456万円) or of 数万円 / 何千円 is never one either
+        if (v is None or any(a.start <= s < a.end for a in out) or any(rs <= s < re_ for rs, re_ in refused)
+                or (s > 0 and text[s - 1] in "0123456789０１２３４５６７８９,，.．数何")):
             continue
         start = m.start("approx") if m.group("approx") else m.start("num")
         out.append(AmountMatch(start, m.end(), v, bool(m.group("approx")), text[start : m.end()]))
@@ -334,8 +370,8 @@ def quantities(text: str) -> set[float]:
     for m in re.finditer(rf"(?:{_NUM}\s*[億万千]\s*)+(?:{_NUM})?", t):
         try:
             vals.add(float(parse_compound(m.group(0))))
-        except ValueError:
-            continue
+        except ValueError:  # 52,00万 / 1.23456万: states no number — its digits do not support anything either
+            pass
         covered.append((m.start(), m.end()))
     for m in _PLAIN_NUM_RE.finditer(t):
         if any(s <= m.start() < e for s, e in covered):
@@ -360,7 +396,10 @@ def value_quantities(text: str) -> list[tuple[str, float]]:
     for m in re.finditer(rf"(?:{_NUM}\s*[億万千]\s*)+(?:{_NUM})?", t):
         if any(s <= m.start() < e for s, e in covered):
             continue
-        out.append((m.group(0), float(parse_compound(m.group(0)))))
+        try:
+            out.append((m.group(0), float(parse_compound(m.group(0)))))
+        except ValueError:  # 52,00万 / 1.23456万: asserts no number (the memo side reads it the same way)
+            pass
         covered.append((m.start(), m.end()))
     for m in _PLAIN_NUM_RE.finditer(t):
         if any(s <= m.start() < e for s, e in covered):
@@ -380,8 +419,11 @@ def to_halfwidth_id(s: str) -> str:
 
 
 # Invisible characters pasted from web pages, PDFs and chat tools (zero-width space, word joiner, BOM, direction
-# marks, soft hyphen). They would end up invisible inside a filled form and split IDs and numbers apart.
-_INVISIBLE = dict.fromkeys(map(ord, "​⁠﻿‎‏­"))
+# marks, soft hyphen, Arabic letter mark and the bidirectional embedding / override / isolate controls U+202A–U+202E,
+# U+2066–U+2069). They would end up invisible inside a filled form, split IDs and numbers apart, or — like U+202E
+# RIGHT-TO-LEFT OVERRIDE — make the reviewer read a value in a different order than it is stored.
+_INVISIBLE = dict.fromkeys([0x200B, 0x2060, 0xFEFF, 0x200E, 0x200F, 0x00AD, 0x061C, *range(0x202A, 0x202F),
+                            *range(0x2066, 0x206A)])
 # A kana followed by a combining (semi-)voiced sound mark — NFD text, e.g. from macOS: フ + U+309A instead of プ.
 _KANA_COMBINING_RE = re.compile("[ぁ-ゖゝゞァ-ヺヽヾ][゙゚]")
 
@@ -424,9 +466,19 @@ def clean_person_name(s: str) -> str:
     return re.sub(r"[ \t]+", " ", s)
 
 
+_TRAILING_NOTE_RE = re.compile(r"\s*[（(]\s*(?:※|注|メモ|note)[^（）()]*[）)]\s*$")
+
+
 def strip_trailing_note(s: str) -> str:
-    """Drop trailing asides such as '（※…）' or '(note …)' that annotate a value."""
-    return re.sub(r"\s*[（(]\s*(?:※|注|メモ|note)[^（）()]*[）)]\s*$", "", s).strip()
+    """Drop a trailing aside such as '（※…）' or '(note …)' that annotates a value.
+
+    An aside that states a condition, restriction, interim measure or scope limit (「（※利用は平日に限る）」
+    「（※利用は平日のみ）」, ``protection > 0``) is part of the value and is kept: shortening such a value goes
+    through ``condense_extractive``, which never deletes it without handing the field to a human."""
+    m = _TRAILING_NOTE_RE.search(s)
+    if m is None or protection(m.group(0)) > 0:
+        return s.strip()
+    return s[: m.start()].strip()
 
 
 def char_width_em(ch: str) -> float:
@@ -460,8 +512,12 @@ RESTRICTIVE_WORDS = re.compile(r"ただし|但し|場合に限り|限り|限る|
                                r"できない|できません|してはならない|してはいけない|しないこと")
 # Interim measures / scope limits: kept ahead of anything else, but deletable as a last resort.
 _SAFETY_WORDS = re.compile(r"完了まで|短縮|のみ")
+# The core decision / remedy of the text (「そこで…こととした」「…で補う」「…に変更する」): what is done about the
+# problem it describes. Without it the text jumps from the problem straight to the next topic.
+_DECISION_WORDS = re.compile(r"^そこで|こととした|ことにした|こととする|ことにする|で補う|で代替|に変更する|に変更した|"
+                             r"に切り替え")
 _PAREN_RE = re.compile(r"[（(][^（）()]*[）)]")
-_WEEKDAY_NOTE_RE = re.compile(r"[（(][月火水木金土日](?:曜日?)?[）)]")
+WEEKDAY_NOTE_RE = re.compile(r"[（(][月火水木金土日](?:曜日?)?[）)]")
 
 
 def split_sentences(text: str) -> list[tuple[int, int]]:
@@ -502,12 +558,15 @@ def is_remark(sentence: str) -> bool:
 
 
 def protection(piece: str) -> int:
-    """2 = states a condition / restriction, 1 = interim measure or scope limit, 0 = neither."""
+    """2 = states a condition / restriction, 1 = interim measure, scope limit or the core decision / remedy
+    (「そこで…こととした」), 0 = none of these. Deleting a piece with protection > 0 needs a human."""
     if RESTRICTIVE_WORDS.search(piece):
         return 2
     if _SAFETY_WORDS.search(piece):
         if is_remark(piece) and not re.search(r"完了まで|短縮", piece):
             return 0  # 「なお、…清掃のみで異常なし」: 'のみ' in a status remark is not a condition
+        return 1
+    if _DECISION_WORDS.search(piece.lstrip()) and not is_remark(piece):
         return 1
     return 0
 
@@ -538,7 +597,10 @@ class Condensed:
     text: str
     fragments: list[str]
     removed: list[str]
-    unsafe: bool = False  # a deleted piece stated a condition / restriction: a human must confirm the wording
+    # A deleted piece stated a condition, restriction, interim measure, scope limit or the core decision
+    # (protection > 0), or a date lost its weekday: a human must confirm the wording.
+    unsafe: bool = False
+    held: list[str] = field(default_factory=list)  # the deleted pieces that made it unsafe, in reading order
 
 
 def condense_extractive(text: str, max_chars: int, joiner: str = "") -> Optional[Condensed]:
@@ -549,12 +611,15 @@ def condense_extractive(text: str, max_chars: int, joiner: str = "") -> Optional
 
       1. supplementary or status remarks (「なお、…」「…異常なし」) and content-free sentences;
       2. long parenthetical asides that state no condition;
-      3. weekday notes after dates (「11月6日（金）」→「11月6日」), redundant once the date is given;
-      4. other sentences without conditions or interim measures (redundancy penalised);
-      5. last resort: interim measures (完了まで, 短縮, のみ), then conditions / restrictions
-         (ただし, 場合に限り, に限る, 禁止, 除く, 不可, 以外, 対象外, できない, 条件 …) — deleting the latter
-         marks the result ``unsafe`` so it is only offered as a suggestion, never written automatically.
+      3. other sentences without conditions, interim measures or the core decision (redundancy penalised);
+      4. last resort: the weekday notes after dates (「11月6日（金）」→「11月6日」, the dates stay), then interim
+         measures, scope limits and the core decision / remedy (完了まで, 短縮, のみ, 「そこで…こととした」,
+         「…で補う」, 「…に変更する」), then conditions / restrictions (ただし, 場合に限り, に限る, 禁止, 除く,
+         不可, 以外, 対象外, できない, 条件 …).
 
+    Deleting anything from step 4 (a weekday, or a piece with ``protection > 0``) marks the result ``unsafe``: it is
+    only offered as a suggestion, never written automatically, and ``held`` names the pieces a human has to decide
+    about.
     Anything deleted that fits back afterwards is restored. ``removed`` lists every deleted piece
     in reading order. Returns None if the text cannot fit without rewriting.
     """
@@ -569,7 +634,7 @@ def condense_extractive(text: str, max_chars: int, joiner: str = "") -> Optional
         for m in _PAREN_RE.finditer(sent):
             if m.start() > cur:
                 units.append({"kind": "body", "start": s + cur, "end": s + m.start(), "kept": True})
-            weekday = bool(_WEEKDAY_NOTE_RE.fullmatch(m.group(0))) and m.start() > 0 and sent[m.start() - 1] == "日"
+            weekday = bool(WEEKDAY_NOTE_RE.fullmatch(m.group(0))) and m.start() > 0 and sent[m.start() - 1] == "日"
             units.append({"kind": "weekday" if weekday else "paren", "start": s + m.start(), "end": s + m.end(),
                           "kept": True})
             cur = m.end()
@@ -633,14 +698,14 @@ def condense_extractive(text: str, max_chars: int, joiner: str = "") -> Optional
             drop_sentence(it)
     # 2) long parenthetical asides that state no condition (short ones such as IDs are kept)
     drop_asides(0, 10)
-    # 3) weekday notes after dates
+    # 3) sentences without conditions, interim measures or the core decision
+    drop_sentences(0)
+    # 4) last resort: the weekday notes after dates (the dates stay, but a human decides), then interim measures /
+    #    scope limits / the core decision, then conditions / restrictions
     if total() > max_chars:
         notes = [u for it in kept_items() for u in it["units"] if u["kept"] and u["kind"] == "weekday"]
         if notes:
             drop_units(notes)
-    # 4) sentences without conditions or interim measures
-    drop_sentences(0)
-    # 5) last resort: interim measures, then conditions / restrictions
     for level in (1, 2):
         drop_asides(level, 0)
         drop_sentences(level)
@@ -660,10 +725,13 @@ def condense_extractive(text: str, max_chars: int, joiner: str = "") -> Optional
                     u["kept"] = False
 
     removed: list[str] = []
+    held: list[str] = []
     fragments: list[str] = []
     for it in items:
         if not it["kept"]:
             removed.append(text[it["start"] : it["end"]])
+            if protection(removed[-1]) > 0:
+                held.append(removed[-1])
             continue
         run: list[str] = []
         for u in it["units"]:
@@ -671,6 +739,8 @@ def condense_extractive(text: str, max_chars: int, joiner: str = "") -> Optional
                 run.append(unit_text(u))
                 continue
             removed.append(unit_text(u))
+            if u["kind"] == "weekday" or protection(removed[-1]) > 0:  # a date without its weekday, or a condition
+                held.append(removed[-1])
             if run:
                 fragments.append("".join(run))
             run = []
@@ -680,4 +750,4 @@ def condense_extractive(text: str, max_chars: int, joiner: str = "") -> Optional
     out = joiner.join(sent_text(it) for it in kept_items())
     if len(out) > max_chars:
         return None
-    return Condensed(out, fragments, removed, unsafe=any(protection(r) == 2 for r in removed))
+    return Condensed(out, fragments, removed, unsafe=bool(held), held=held)

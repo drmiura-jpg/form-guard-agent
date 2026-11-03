@@ -97,11 +97,11 @@ Form-Guard columns are measured. Reproduce with `python docs/measure_workflow.py
 |---|---|---|---|---|---|---|
 | form1 `form1_research_plan_change.docx` | 8 (markers / coordinates already designated) | 325 | 492 XML tags · 35 printed text blocks · 19 merged cells/ranges · 9 border definitions · 18 package parts | 189 ms | 21/21 (PASS) | 10 checklist items |
 | form2 `form2_municipal_equipment_subsidy.docx` | 11 (markers / coordinates already designated) | 174 | 519 XML tags · 34 printed text blocks · 7 merged cells/ranges · 12 border definitions · 18 package parts | 183 ms | 21/21 (NEEDS_HUMAN_INPUT) | 13 checklist items, 1 field(s) to enter |
-| form3 `form3_facility_safety_inspection.xlsx` | 10 (markers / coordinates already designated) | 180 | 323 XML tags · 34 printed text blocks · 40 merged cells/ranges · 350 border definitions · 9 package parts | 246 ms | 21/21 (PASS) | 12 checklist items |
+| form3 `form3_facility_safety_inspection.xlsx` | 10 (markers / coordinates already designated) | 184 | 323 XML tags · 34 printed text blocks · 40 merged cells/ranges · 350 border definitions · 9 package parts | 246 ms | 21/21 (PASS) | 12 checklist items |
 | form4 `form4_unmarked_blank.docx` | 7 (locate 11 empty cells, decide office vs applicant) | 113 | 503 XML tags · 38 printed text blocks · 24 merged cells/ranges · 10 border definitions · 18 package parts | 120 ms | 21/21 (PASS) | 9 checklist items |
 | form5 `form5_unmarked_blank.xlsx` | 5 (locate 6 empty cells, decide office vs applicant) | 52 | 282 XML tags · 30 printed text blocks · 34 merged cells/ranges · 269 border definitions · 9 package parts | 154 ms | 21/21 (PASS) | 7 checklist items |
 
-Across the five forms, Form-Guard wrote 40 values (844 characters) into 41 designated fields and compared 2,119 XML
+Across the five forms, Form-Guard wrote 40 values (848 characters) into 41 designated fields and compared 2,119 XML
 tags, 171 printed text blocks, 124 merged cells/ranges and 650 border definitions, in about 0.1–0.25 s per form
 (wall-clock varies with machine load; the counted columns do not). What is left for the person is the 51-item sign-off
 checklist (each value next to its verbatim source) and the one fact the memo does not contain (法人番号 in form2),
@@ -283,7 +283,7 @@ API が返した思考の要約（「API-returned thinking summary」と明記�
 作業量を同じスクリプトでファイルから数えたもので、人の作業時間を計ったものではありません。右側の列が Form-Guard の
 計測値です。`python docs/measure_workflow.py` で再現できます（表は英語版と同じ）。
 
-5 つの様式で、Form-Guard は 41 の指定欄に 40 件（844 文字）を記入し、XML タグ 2,119 個・定型文 171 か所・結合セル 124・
+5 つの様式で、Form-Guard は 41 の指定欄に 40 件（848 文字）を記入し、XML タグ 2,119 個・定型文 171 か所・結合セル 124・
 罫線定義 650 を 1 様式あたり約 0.1〜0.25 秒で照合しました（時間は PC の負荷で変わりますが、数えた列は変わりません）。
 人に残るのは、各値を原文と並べて確認する計 51 項目の最終確認と、メモに無い事実（様式 2 の法人番号）の入力だけです。
 Form-Guard はその欄を推測で埋めません。同じ数値は Web 画面の Claude Code タブでもその場で計測して表示します。

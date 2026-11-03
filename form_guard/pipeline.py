@@ -20,6 +20,7 @@ from .mapper import (
     DemoEngine,
     LiveEngineError,
     MappingRun,
+    advance_notice_warnings,
     human_mapping,
     make_engine,
     map_fields,
@@ -27,7 +28,7 @@ from .mapper import (
     resolve_mode,
 )
 from .models import FieldMapping, PatchRecord, VerificationReport
-from .scanner import ScanResult, find_markers, scan
+from .scanner import ScanResult, era_date_template, find_markers, scan
 from .textnorm import clean_text
 from .verifier import compare_naive, verify
 from .visual_diff import (
@@ -279,6 +280,7 @@ def verify_filled_copy(original: Union[str, Path], filled: Union[str, Path], mem
     memo = clean_text(memo.replace("\r\n", "\n").replace("\r", "\n"))[0]
     recorded = [FieldMapping.model_validate(m) for m in audit.get("mappings", [])] if audit else []
     maps = reconstruct_mappings(sc, values, memo, recorded, attested or {})
+    maps = advance_notice_warnings(sc.slots, maps, memo)  # printed deadlines between two dates, on the values found
     rep = verify(sc, filled, maps, memo)
     if not memo:
         basis = "none"
@@ -315,10 +317,19 @@ def _occurrence_ranges(scan_r: ScanResult, values: dict[str, str]):
     for s in scan_r.slots:
         for o in s.occurrences:
             key = (o.part_name, o.container_index)
-            if o.marker_kind == "empty_cell":
+            if o.marker_kind == "empty_cell" or (o.marker_kind == "date_template" and o.cell_ref):
                 v = values.get(s.slot_id)
                 para_box = _para_box(o)
                 yield s.slot_id, o.box_id, para_box, None, (0, len(v)) if v else None, "filled" if v else "pending"
+                continue
+            if o.marker_kind == "date_template":  # Word: the printed 「令和　　年　　月　　日」 is replaced by the date
+                idx = scan_r.parts[o.part_name]
+                span = era_date_template(idx.container_text(idx.containers[o.container_index]))
+                if span is None:
+                    continue
+                v = values.get(s.slot_id)
+                new = (span[0], span[0] + len(v)) if v is not None else span
+                yield s.slot_id, o.box_id, _para_box(o), span, new, "filled" if v is not None else "pending"
                 continue
             if key in seen:
                 continue
@@ -548,6 +559,8 @@ def run_pipeline(
         run, engine_info = _map(scan_r, memo_text, mode, model, client, model_tier)
         mappings = run.mappings
     mappings = apply_overrides(scan_r, mappings, overrides or {})
+    # printed deadlines that relate two dates (「変更予定日の30日前までに提出」), on the final values incl. edits
+    mappings = advance_notice_warnings(scan_r.slots, mappings, memo_text)
     timings["map"] = time.perf_counter() - t
 
     t = time.perf_counter()

@@ -72,10 +72,10 @@ const FLAG = {
   human: ["人が入力", "entered by the reviewer"], re_anchored: ["引用を付け替え", "quote re-anchored — check the wording"],
   low_conf: ["低信頼度", "low confidence"], needs_input: ["要入力", "needs input"], has_suggestion: ["候補あり", "has a suggestion"],
   unsafe_condensation: ["要約で条件が欠ける", "condensing would drop a condition"], weekday: ["曜日を付記", "weekday added"],
-  recovered_unverified: ["根拠未検証", "not verified"],
+  recovered_unverified: ["根拠未検証", "not verified"], advance_notice: ["提出期限を確認", "check the printed deadline"],
 };
 const flagText = (f) => (FLAG[f] ? L(...FLAG[f]) : f);
-const ATTENTION = new Set(["year_inferred", "low_conf", "needs_input", "re_extracted", "condensed", "unsafe_condensation", "re_anchored"]);
+const ATTENTION = new Set(["year_inferred", "low_conf", "needs_input", "re_extracted", "condensed", "unsafe_condensation", "re_anchored", "advance_notice"]);
 const FORMAT = {
   text: ["文章", "text"], person_name: ["氏名", "person name"], wareki_date: ["和暦日付", "Japanese era date"],
   wareki_period: ["和暦期間", "Japanese era period"], date: ["日付", "date"], yen: ["金額（円）", "yen amount"],
@@ -88,6 +88,8 @@ const fmtJa = (f) => (FORMAT[f] || [f])[0];
 // shows a translation; the original text stays in the tooltip.
 const REASON_JA = [
   [/^applicant field — empty cell next to a printed label$/, () => "申請者欄 — 印字ラベルの隣の空欄"],
+  [/^applicant field — printed era-date template next to a printed label; the template is replaced by the date$/,
+    () => "申請者欄 — 印字ラベルの隣の「令和　年　月　日」欄（印刷された部分を日付で置き換え）"],
   [/^office\/administrative use only — excluded from applicant fill(.*)$/, (m) => `事務局専用 — 申請者の記入対象から除外${m[1]}`],
   [/^not an input field \(Claude: (.*)\)$/, (m) => `入力欄ではない（Claude: ${m[1]}）`],
   [/^vertically merged continuation \(vMerge\)/, () => "縦に結合したセルの続き（vMerge）— 結合の先頭セルだけが記入対象"],
@@ -151,7 +153,7 @@ const CHECK_JA = {
   "Numbers and dates in values appear in the quoted evidence": "値に含まれる数値・日付が引用の中にある",
   "No numbers that are absent from both the memo and the blank form": "メモにも白紙様式にも無い数値が入っていない",
   "Character limits printed on the form are respected": "様式に印刷された字数制限を守っている",
-  "Formats (和暦 dates, yen amounts, ID patterns) are valid": "書式（和暦の日付・円金額・番号の形式）が正しい",
+  "Formats (Japanese era dates, yen amounts, ID patterns) are valid": "書式（和暦の日付・円金額・番号の形式）が正しい",
   "Form constraints respected (best-effort label matching)": "様式の記入ルールを守っている（項目名から推定して照合）",
   "Options, caps and rounding rules are respected": "選択肢・上限額・端数処理のルールを守っている",
   "File opens in an independent OOXML library": "別の OOXML ライブラリでファイルを開ける",
@@ -1124,6 +1126,7 @@ function renderDetail(id) {
   if (s.constraints.max_value) cons.push(`${L("上限", "cap")}: ${Number(s.constraints.max_value).toLocaleString()}円`);
   if (s.constraints.multiple_of) cons.push(L(`${s.constraints.multiple_of} の倍数`, `multiple of ${s.constraints.multiple_of}`));
   if (s.constraints.pattern && s.required_format !== "choice") cons.push(`${L("書式", "pattern")}: ${s.constraints.example || s.constraints.pattern}`);
+  for (const r of s.constraints.advance_notice || []) cons.push(L(`${r.target}の${r.days}日前までに${r.action}`, `${r.days} days before ${r.target}`));
   const quotes = (m.source_spans || []).map((sp) => h("div", { class: "quote" },
     h("b", {}, sp.line_start === sp.line_end ? `L${sp.line_start} ` : `L${sp.line_start}–${sp.line_end} `), `「${sp.text}」`));
   const attempts = (m.attempts || []).map((a) => h("li", { class: a.passed ? "ok" : "err" },

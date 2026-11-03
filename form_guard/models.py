@@ -11,7 +11,9 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field
 
 FileType = Literal["docx", "xlsx"]
-MarkerKind = Literal["braces", "kinyuran", "empty_cell"]
+# date_template = a cell printed as an era-date skeleton (「令和　　年　　月　　日」), designated by coordinates: Word replaces
+# the skeleton's characters like a marker; Excel rewrites the cell as one inline string
+MarkerKind = Literal["braces", "kinyuran", "empty_cell", "date_template"]
 # recovered = a value read back from a filled file whose provenance is unknown (CLI --verify without memo / audit log)
 MappingStatus = Literal["filled", "needs_human_input", "human_entered", "recovered"]
 Severity = Literal["critical", "major", "minor", "info"]
@@ -168,9 +170,10 @@ class PatchRecord(BaseModel):
 
     part_name: str
     slot_id: str
-    # text / attr: marker characters; insert_run / expand_empty: a run in an empty Word cell;
-    # fill_cell: an existing empty worksheet <c>; insert_cell: a worksheet <c> (and row) that did not exist yet
-    kind: Literal["text", "attr", "insert_run", "expand_empty", "fill_cell", "insert_cell"]
+    # text / attr: marker characters (or a Word 「令和　　年　　月　　日」 skeleton); insert_run / expand_empty: a run in an
+    # empty Word cell; fill_cell: an existing empty worksheet <c>; fill_template_cell: a worksheet <c> printed as
+    # 「令和　　年　　月　　日」, rewritten as the date; insert_cell: a worksheet <c> (and row) that did not exist yet
+    kind: Literal["text", "attr", "insert_run", "expand_empty", "fill_cell", "fill_template_cell", "insert_cell"]
     byte_start: int
     byte_end: int
     old_text: str

@@ -34,11 +34,11 @@ left-hand columns are counted from the files, **not** a timed study of a person)
 |---|---|---|---|---|---|---|
 | form1 `form1_research_plan_change.docx` | 8 (markers / coordinates already designated) | 325 | 492 XML tags · 35 printed text blocks · 19 merged cells/ranges · 9 border definitions · 18 package parts | 189 ms | 21/21 (PASS) | 10 checklist items |
 | form2 `form2_municipal_equipment_subsidy.docx` | 11 (markers / coordinates already designated) | 174 | 519 XML tags · 34 printed text blocks · 7 merged cells/ranges · 12 border definitions · 18 package parts | 183 ms | 21/21 (NEEDS_HUMAN_INPUT) | 13 checklist items, 1 field(s) to enter |
-| form3 `form3_facility_safety_inspection.xlsx` | 10 (markers / coordinates already designated) | 180 | 323 XML tags · 34 printed text blocks · 40 merged cells/ranges · 350 border definitions · 9 package parts | 246 ms | 21/21 (PASS) | 12 checklist items |
+| form3 `form3_facility_safety_inspection.xlsx` | 10 (markers / coordinates already designated) | 184 | 323 XML tags · 34 printed text blocks · 40 merged cells/ranges · 350 border definitions · 9 package parts | 246 ms | 21/21 (PASS) | 12 checklist items |
 | form4 `form4_unmarked_blank.docx` | 7 (locate 11 empty cells, decide office vs applicant) | 113 | 503 XML tags · 38 printed text blocks · 24 merged cells/ranges · 10 border definitions · 18 package parts | 120 ms | 21/21 (PASS) | 9 checklist items |
 | form5 `form5_unmarked_blank.xlsx` | 5 (locate 6 empty cells, decide office vs applicant) | 52 | 282 XML tags · 30 printed text blocks · 34 merged cells/ranges · 269 border definitions · 9 package parts | 154 ms | 21/21 (PASS) | 7 checklist items |
 
-Across the 5 built-in forms Form-Guard filled 41 designated fields (40 values, 844 characters written) and verified
+Across the 5 built-in forms Form-Guard filled 41 designated fields (40 values, 848 characters written) and verified
 2,119 XML tags, 171 printed text blocks, 124 merged cells/ranges and 650 border definitions in about 0.1–0.25 s per
 form. What is left for the person is the 51-item source-linked sign-off checklist and 1 unstated fact — `法人番号` in
 form2 — which stays empty for the human instead of being hallucinated.
@@ -65,14 +65,15 @@ form2 — which stays empty for the human instead of being hallucinated.
         │
  1 Scan ............ find {{markers}} / [記入欄: …] / coordinate-designated empty cells (Word table cells and
         │            Excel cells), read the rules printed on the form (200字以内, 和暦, 13桁, 上限1,000,000円,
-        │            drop-down lists); an UNMARKED blank form gets a 4-stage blank-cell discovery instead
-        │            (applicant vs office-only cells) and a human confirms the cells to fill
+        │            drop-down lists, deadlines between two dates such as 「変更予定日の30日前までに提出」); an
+        │            UNMARKED blank form gets a 4-stage blank-cell discovery instead (applicant vs office-only
+        │            cells) and a human confirms the cells to fill
  2 Map & self-correct  Claude (live, Haiku / Sonnet / Opus routed per field) or a deterministic offline engine
         │            proposes a value + VERBATIM memo quotes; an independent validator checks quotes, numbers,
         │            dates (real calendar date, era, weekday), names, IDs, options and printed rules; failures are
         │            repaired (和暦 with weekday, 483万6千円 → 4,836,000円, half-width IDs, deletion-only
-        │            condensation that never silently drops a condition) or sent back to Claude (Opus) with the
-        │            validator's findings
+        │            condensation that never silently drops a condition, interim measure, decision or weekday) or
+        │            sent back to Claude (Opus) with the validator's findings
  3 Surgical write .... replace ONLY the marker characters inside the XML bytes; every other ZIP entry is copied
         │            as raw compressed bytes (not even re-compressed)
  4 Verify ............ 21 deterministic checks (plus VIS-01 if layout drift or overflow is detected): ZIP/SHA-256,
@@ -94,7 +95,7 @@ pip install -r requirements.txt
 
 python -m form_guard.cli --all-demos     # runs the 3 fictional demos -> output/index.html
 python -m form_guard.cli --serve         # web UI on http://127.0.0.1:8000
-pytest -v                                # 236 tests
+pytest -v                                # 246 tests
 ```
 
 Requires Python 3.10+. Without `ANTHROPIC_API_KEY` everything runs on the deterministic **offline demo engine**, so the
@@ -248,11 +249,13 @@ python -m form_guard.cli --form samples/blank_forms/form5_unmarked_blank.xlsx --
     --discovery output/form5_unmarked_blank.discovery.json --confirm recommended --out-dir output/form5 --mode demo
 ```
 
-1. **Heuristics** — empty cells with a printed label immediately to the left (or above, in a column-header table).
+1. **Heuristics** — empty cells with a printed label immediately to the left (or above, in a column-header table), and
+   date cells printed only with an era-date skeleton such as 「令和　　年　　月　　日」 (offered as `wareki_date`; when
+   confirmed, exactly that skeleton is replaced by the date).
 2. **Classification** — applicant field vs office-only (`事務局`, `受付印`, `受付番号`, `審査欄`, `決裁`, `検印` …: never
    recommended); duplicate labels get unique ids (`研究代表者_氏名` / `事務担当者_氏名`); format and character limit are
    inferred from the label. In live mode Claude (Haiku) also classifies the labels, but can only make a cell *less* fillable.
-3. **Safety** — formula cells, merged continuations and cells with content are rejected.
+3. **Safety** — formula cells, merged continuations and cells with any other content are rejected.
 4. **Human gate** — `--confirm c01,c02,…` (or `recommended`) builds the slot spec only if the blank form still has the
    SHA-256 it had at discovery, at least one cell is confirmed, and no office-only cell is included.
 
@@ -284,7 +287,7 @@ The discovery stays on the server: the client only names candidate ids, and any 
 |---|---|---|
 | 共同研究計画変更届出書（様式第3号） — 架空学術大学 | `.docx` | split-run markers, `2026年11月2日（月）` → `令和8年11月2日（月）`, full-width ID → `JR-2026-047`, 257 → 181 chars by deletion only (deleted text listed for the reviewer), merged label cells (vMerge) |
 | 地域中小企業省エネ設備導入補助金 交付申請書（様式第1号） — 架空市 | `.docx` | `483万6千円` → `4,836,000円`, printed cap `上限1,000,000円` forces re-extraction (1,612,000円 → 1,000,000円), **missing 法人番号 left for the human**, empty cell filled by table coordinates |
-| 月次設備安全点検および改善報告書（様式A-4） — 架空施設 | `.xlsx` | drop-down list values, `COUNTIF` formulas and 40 merged ranges preserved, 179 → 116 chars keeping the interim measure 「交換完了までは…」, year of 「12月8日（火）」 inferred and flagged |
+| 月次設備安全点検および改善報告書（様式A-4） — 架空施設 | `.xlsx` | drop-down list values, `COUNTIF` formulas and 40 merged ranges preserved, 177 → 120 chars keeping the interim measure 「交換完了までは…」 and the weekdays of both deadlines, year of 「12月8日（火）」 inferred and flagged |
 
 Each demo also ships a scripted **naive regeneration** (`samples/broken_before/`) that reproduces the usual failure
 modes — US-Letter page, borders and merged cells lost, legal clauses paraphrased, invented numbers such as
@@ -456,7 +459,7 @@ License: MIT (see [LICENSE](LICENSE)).
 
 **計測による定量的な裏付け**（`python docs/measure_workflow.py`、オフラインエンジン、架空のサンプル様式。様式ごとの表は
 英語版を参照。手作業の列はファイルから数えた作業量で、人の作業時間を計ったものではありません）：5つの付属様式で、
-Form-Guard は 41 の指定欄に 40 件（844 文字）を記入し、XML タグ 2,119 個・定型文 171 か所・結合セル／範囲 124・罫線定義 650 を
+Form-Guard は 41 の指定欄に 40 件（848 文字）を記入し、XML タグ 2,119 個・定型文 171 か所・結合セル／範囲 124・罫線定義 650 を
 1 様式あたり約 0.1〜0.25 秒で照合しました。人に残るのは、各値を原文と並べて確認する計 51 項目の最終確認と、メモに無い事実
 1 件（様式2の法人番号）の入力だけです。Form-Guard はその欄を推測で埋めません。
 
@@ -480,11 +483,11 @@ Form-Guard は 41 の指定欄に 40 件（844 文字）を記入し、XML タ�
 メモにない数字が紛れ込むこともあります（付属の比較用ファイルは、こうした失敗を再現した模擬データです）。
 Form-Guard Agent は次の流れで、**指定欄だけ**を書き換えます。
 
-1. **スキャン** — `{{項目名}}`・`[記入欄: 項目名]`・座標指定の空欄（Word の表のセル、Excel のセル）を見つけ、様式に印刷された記入ルール（字数・和暦・桁数・上限額・選択肢）も読み取ります。マーカーの無い白紙様式では、空欄候補を4段階で発見し（申請者欄か事務局欄かも判定）、記入する欄を人が確定します。
+1. **スキャン** — `{{項目名}}`・`[記入欄: 項目名]`・座標指定の空欄（Word の表のセル、Excel のセル）を見つけ、様式に印刷された記入ルール（字数・和暦・桁数・上限額・選択肢、「変更予定日の30日前までに提出」のような2つの日付の間の期限）も読み取ります。マーカーの無い白紙様式では、空欄候補を4段階で発見し（申請者欄か事務局欄かも判定）、記入する欄を人が確定します。
 2. **対応付けと自己修正** — Claude（ライブ。欄の種類に応じて Haiku・Sonnet・Opus を使い分け）またはオフラインの決定論エンジンが、値と**メモ原文そのままの引用**を返します。独立した検証器が引用・数値・日付・記入ルールを確認し、和暦変換・金額表記の統一・半角化・削除のみの要約で直すか、指摘内容を添えて Claude（Opus）に再依頼します。
 3. **外科的な書き込み** — XML 内のマーカー文字だけを置き換えます。それ以外の ZIP 内パーツは圧縮済みバイト列のまま複製します。
 4. **構造検査** — ZIP・SHA-256、XML骨格、表構造・罫線・結合セル、定型文、根拠、記入ルールなど21項目を決定論的に検査します（描画位置のずれやセルはみ出しが検出された場合は VIS-01 を追加）。
-5. **人による最終確認** — 各値をその根拠と並べて確認し、AIが記入した欄も含めてどの欄でも修正できます（修正すると再検査され、承認は取り消されます）。字数制限のために削除した文は全文を表示し、条件（ただし・場合に限り・禁止など）が欠ける要約は記入せず候補として人に回します。確認者名の入力と全項目のチェックが済むまで、ダウンロードはサーバー側でロックされます。承認は画面上の版（revision）と、検査したファイルの SHA-256 に結び付けて記録します。承認（`POST /api/runs/{id}/approve`）とダウンロード（`GET /api/runs/{id}/download`）では `filled_sha256`（16進64桁）と `revision` の両方が**必須**で、欠けている・形式が違う場合は 422、現在の承認済みの版と違う場合は 409 で拒否します。
+5. **人による最終確認** — 各値をその根拠と並べて確認し、AIが記入した欄も含めてどの欄でも修正できます（修正すると再検査され、承認は取り消されます）。字数制限のために削除した文は全文を表示し、条件（ただし・場合に限り・禁止など）・暫定措置・対応策や日付の曜日が欠ける要約は記入せず候補として人に回します。印刷された期限（「変更予定日の30日前までに提出」など）に2つの日付が合わない場合は、その欄の確認項目に注意を付けます。確認者名の入力と全項目のチェックが済むまで、ダウンロードはサーバー側でロックされます。承認は画面上の版（revision）と、検査したファイルの SHA-256 に結び付けて記録します。承認（`POST /api/runs/{id}/approve`）とダウンロード（`GET /api/runs/{id}/download`）では `filled_sha256`（16進64桁）と `revision` の両方が**必須**で、欠けている・形式が違う場合は 422、現在の承認済みの版と違う場合は 409 で拒否します。
 6. **MCP で作った下書きも同じ画面で承認** — `form_guard_fill` は下書きの隣に `web_handoff.json`（白紙様式の複製・メモ・スロット定義・対応付け・SHA-256）を残し、結果の `review_url`（`http://127.0.0.1:8000/?run_id=<run id>`）を開くと、その**同じファイル**をモデルを動かさずに読み込み、21項目と VIS-01 を白紙様式に対して再検査します。`audit_log.json` の SHA-256 と一致しない（改ざんされた）下書きや検査に不合格の下書きは読み込みません（`POST /api/runs/import` でも可）。
 
 メモに根拠がない項目は**推測で埋めません**（デモ2の法人番号）。人が入力します。
@@ -536,7 +539,8 @@ python -m form_guard.cli --form samples/blank_forms/form4_unmarked_blank.docx --
     --discovery output/form4_unmarked_blank.discovery.json --confirm recommended --out-dir output/form4 --mode demo
 ```
 
-印字されたラベルの右（または列見出しの下）の空欄を候補にし、事務局・受付印・受付番号・審査欄・決裁・検印などの欄は推奨せず、
+印字されたラベルの右（または列見出しの下）の空欄と、「令和　　年　　月　　日」だけが印刷された日付欄（確定すると、その印刷部分
+だけを和暦の日付で置き換えます）を候補にし、事務局・受付印・受付番号・審査欄・決裁・検印などの欄は推奨せず、
 同じラベル（「氏名」など）には区分名を付けて区別します（`研究代表者_氏名`／`事務担当者_氏名`）。計算式のセルや結合セルの続きは
 除外します。記入する欄は人が `--confirm` で確定し、白紙様式の SHA-256 が発見時と違う場合・0 件の場合・事務局欄を含む場合は
 記入前に拒否します。確定時には実際の白紙様式でもう一度決定論的に空欄を発見し直し、座標が候補に無い欄・事務局欄・

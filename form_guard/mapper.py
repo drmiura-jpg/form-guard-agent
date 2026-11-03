@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import MODEL_HAIKU, MODEL_OPUS, MODEL_SONNET
-from .constraints import FORMAT_GUIDE, split_choice, validate_value
+from .constraints import ADVANCE_NOTICE_PREFIX, FORMAT_GUIDE, split_choice, validate_value
 from .grounding import (
     ground_value,
     lexical_support,
@@ -50,7 +50,8 @@ from .grounding import (
 )
 from .models import CorrectionAttempt, FieldMapping, FormSlot, ValidationIssue
 from .textnorm import (
-    RESTRICTIVE_WORDS,
+    WEEKDAY_NOTE_RE,
+    check_full_date,
     check_wareki,
     clean_person_name,
     clean_text,
@@ -59,6 +60,8 @@ from .textnorm import (
     find_dates,
     format_yen,
     normalize_for_match,
+    pre_era_problem,
+    protection,
     split_sentences,
     strip_trailing_note,
     to_halfwidth_id,
@@ -189,14 +192,23 @@ def slot_aliases(slot: FormSlot, all_slots: list[FormSlot]) -> list[str]:
 
 
 def _same_fact(slot: FormSlot, a: str, b: str) -> bool:
-    """Do two memo values state the same fact for this field? (2026/11/2 = 令和8年11月2日; 483万6千円 = 4,836,000円)"""
+    """Do two memo values state the same fact for this field? (2026/11/2 = 令和8年11月2日; 483万6千円 = 4,836,000円)
+
+    Two dates are only the same fact if both are real dates and their stated weekdays agree: 2026/11/2 written once
+    with （月） and once with （火） contradicts itself, and a statement with an impossible date or weekday is never
+    folded into a clean one. The same text written twice is one statement (its own problem is reported by validation)."""
     fmt = slot.required_format or "text"
+    if normalize_for_match(a) == normalize_for_match(b):
+        return True
     if fmt in ("wareki_date", "date", "wareki_period"):
         da, db = find_dates(a), find_dates(b)
         if da and db:
-            return len(da) == len(db) and all((x.month, x.day) == (y.month, y.day) and
-                                              (x.year is None or y.year is None or x.year == y.year)
-                                              for x, y in zip(da, db))
+            if len(da) != len(db) or any(x.problem() or y.problem() for x, y in zip(da, db)):
+                return False
+            return all((x.month, x.day) == (y.month, y.day) and
+                       (x.year is None or y.year is None or x.year == y.year) and
+                       not (x.weekday and y.weekday and x.weekday != y.weekday)
+                       for x, y in zip(da, db))
     if fmt == "yen":
         aa, ab = find_amounts(a), find_amounts(b)
         if aa and ab:
@@ -207,6 +219,22 @@ def _same_fact(slot: FormSlot, a: str, b: str) -> bool:
     if fmt == "person_name":
         return normalize_for_match(clean_person_name(a)) == normalize_for_match(clean_person_name(b))
     return normalize_for_match(a) == normalize_for_match(b)
+
+
+def explicit_aliases(slot: FormSlot) -> list[str]:
+    """The names a field is given explicitly: spec aliases, slot id and label (no generated short forms)."""
+    out = [a.strip() for a in (*slot.aliases, slot.slot_id, slot.slot_id.replace("_", ""), slot.label)]
+    return [a for a in dict.fromkeys(out) if len(a) >= 2]
+
+
+# formats whose 「label：value」 lines under two names of one field state one fact (compared by DemoEngine._conflict)
+CROSS_ALIAS_FORMATS = ("wareki_date", "date", "wareki_period", "yen", "digits", "pattern")
+
+
+def _label_line_re(alias: str) -> re.Pattern[str]:
+    """A memo line 「alias：value」 (also 「・alias（注）：value」), value in group ``v``."""
+    return re.compile(rf"(?:^|[\s・\-\*●■◆○〇▶【\[（(])\s*{re.escape(alias)}\s*(?:[（(][^）)\n]*[）)])?\s*[:：]\s*"
+                      rf"(?P<v>[^\n]+?)\s*$", re.M)
 
 
 def _subsequence_cover(alias: str, key: str) -> float:
@@ -276,9 +304,8 @@ class DemoEngine:
     def _regions(self, slot: FormSlot, all_slots: list[FormSlot], memo: str) -> list[tuple[int, int, str, float]]:
         aliases = slot_aliases(slot, all_slots)
         regions: list[tuple[int, int, str, float]] = []
-        for alias in aliases:
-            pat = re.compile(rf"(?:^|[\s・\-\*●■◆○〇▶【\[（(])\s*{re.escape(alias)}\s*(?:[（(][^）)\n]*[）)])?\s*[:：]\s*(?P<v>[^\n]+?)\s*$", re.M)
-            for m in pat.finditer(memo):
+        for alias in aliases:  # the value comes from the 「label：」 lines of the first name the memo uses
+            for m in _label_line_re(alias).finditer(memo):
                 regions.append((m.start("v"), m.end("v"), f"「{alias}：」 line", 0.93))
             if regions:
                 return regions
@@ -340,14 +367,25 @@ class DemoEngine:
 
     def _conflict(self, slot: FormSlot, memo: str, regions: list[tuple[int, int, str, float]], chosen: int,
                   draft: Draft) -> Optional[ValidationIssue]:
-        """Another 「label：value」 line for the same field with a different fact (申請日 2026年11月2日 vs 11月9日)."""
-        if (slot.required_format or "text") == "text" or not regions[chosen][2].endswith("」 line"):
+        """Another 「label：value」 line for the same field with a different fact (申請日 2026年11月2日 vs 11月9日).
+
+        Dates, amounts and IDs are also compared across the field's other explicit names (spec aliases, slot id,
+        label): 「申請日：2026/11/2」 and 「提出日：2026/11/9」 for one field contradict each other. Generated short
+        names (変更 for 変更予定日) are not used for that — their lines are often about something else."""
+        fmt = slot.required_format or "text"
+        if fmt == "text" or not regions[chosen][2].endswith("」 line"):
             return None
         starts = line_starts(memo)
         seen = [(offset_to_line(starts, regions[chosen][0]), draft.value)]
-        for rs, re_, how, _conf in regions[chosen + 1:]:
-            if not how.endswith("」 line"):
-                continue
+        others = [r for r in regions[chosen + 1:] if r[2].endswith("」 line")]
+        if fmt in CROSS_ALIAS_FORMATS:
+            spans = {(r[0], r[1]) for r in regions}
+            for alias in explicit_aliases(slot):
+                for m in _label_line_re(alias).finditer(memo):
+                    if (m.start("v"), m.end("v")) not in spans:
+                        spans.add((m.start("v"), m.end("v")))
+                        others.append((m.start("v"), m.end("v"), f"「{alias}：」 line", 0.93))
+        for rs, re_, _how, _conf in sorted(others):
             other = self._refine(slot, memo, rs, re_)
             if other is not None and other.value and not _same_fact(slot, draft.value, other.value):
                 seen.append((offset_to_line(starts, rs), other.value))
@@ -537,7 +575,7 @@ HUMAN_ROUTE = ("human reviewer", "entered by the human reviewer — no model inv
 # What --model-tier auto sends where, and why (README, docs/BUILT_WITH_CLAUDE_CODE.md, GET /api/claude-suite).
 ROUTING_POLICY: list[dict[str, str]] = [
     {"task": "structured", "tier": "haiku",
-     "en": "Structured fields — 和暦 dates, periods, digits, ID patterns, choices",
+     "en": "Structured fields — Japanese era dates, periods, digits, ID patterns, choices",
      "ja": "定型の欄（和暦日付・期間・桁数・書式・選択肢）",
      "why_en": "Short, checkable tokens; the deterministic validator re-checks the format and the quote anyway.",
      "why_ja": "短く検証しやすい値で、形式と引用は検証器が必ず確認します。"},
@@ -1082,13 +1120,18 @@ def _date_fix(slot: FormSlot, draft: Draft, memo: str, warnings: list[str]):
             warnings.append(f"{year}年{d.month}月{d.day}日 is not a real calendar date — left for the reviewer")
             return None
         render = to_wareki if fmt in ("wareki_date", "wareki_period") else to_western
+        try:
+            text = render(dt, include_weekday=False)
+        except ValueError:  # before 昭和 (1926-12-25): no 和暦 to write; validation names the problem
+            warnings.append(f"{pre_era_problem(dt)} — left for the reviewer")
+            return None
         if d.weekday and weekday_ja(dt) != d.weekday:
             warnings.append(f"weekday mismatch: {dt.isoformat()} is a {weekday_ja(dt)}曜日 but the memo says （{d.weekday}）")
-            out.append(render(dt, include_weekday=False) + f"（{d.weekday}）")
+            out.append(text + f"（{d.weekday}）")
             continue
         if d.weekday:
             flags.append("weekday_ok")
-        out.append(render(dt))
+        out.append(text + f"（{weekday_ja(dt)}）")
     value = "～".join(out)
     label = "和暦" if fmt != "date" else "the form's date format"
     return draft.with_value(value), f"normalise date → {label} «{value}»", flags
@@ -1164,11 +1207,14 @@ def repair(slot: FormSlot, draft: Draft, errors: list[ValidationIssue], memo: st
                 removed.extend(c.removed)
             new, flags = draft.with_value(c.text, c.fragments), ["condensed"]
             if c.unsafe:
-                cut = "」「".join(r for r in c.removed if RESTRICTIVE_WORDS.search(r))
+                # every protected piece that would be cut (protection > 0: condition, restriction, interim measure,
+                # scope limit, core decision) and every weekday a date would lose
+                cut = "」「".join(r for r in c.removed if protection(r) > 0 or WEEKDAY_NOTE_RE.fullmatch(r))
                 new.hold = [ValidationIssue(
                     code="unsafe_condensation",
-                    message=f"fitting {slot.max_chars} chars would delete a condition or restriction: 「{cut}」 — a human "
-                            f"must decide the wording / 字数制限に収めると条件・制限の記載「{cut}」が欠けるため、人が判断してください",
+                    message=f"fitting {slot.max_chars} chars would delete a condition, restriction, measure or a date's "
+                            f"weekday: 「{cut}」 — a human must decide the wording / 字数制限に収めると条件・制限・措置または"
+                            f"日付の曜日「{cut}」が欠けるため、人が判断してください",
                 )]
                 flags.append("unsafe_condensation")
             return new, f"condense extractively {len(draft.value)}→{len(c.text)} chars (removed: {gone})", flags
@@ -1189,12 +1235,16 @@ def canonicalize(slot: FormSlot, draft: Draft):
         v = clean_person_name(draft.value)
         if v and v != draft.value:
             return draft.with_value(v), f"remove honorifics / annotations «{v}»", ["name"]
-    if slot.required_format in ("wareki_date", "wareki_period"):
+    if slot.required_format in ("wareki_date", "wareki_period", "date"):
+        # human-facing dates carry the weekday: 令和8年11月4日 → 令和8年11月4日（水）, 2026/11/4 → 2026年11月4日（水）
         parts = re.split(r"\s*[～〜~]\s*", draft.value)
-        dates = [check_wareki(p)[0] for p in parts]
+        wareki = slot.required_format != "date"
+        dates = [(check_wareki(p)[0] if wareki else check_full_date(p)[0]) for p in parts]
         if all(dates) and any(not re.search(r"[（(][月火水木金土日][）)]$", p) for p in parts):
-            v = "～".join(to_wareki(d) for d in dates)  # type: ignore[arg-type]
-            return draft.with_value(v), f"add the weekday «{v}»", ["weekday"]
+            v = "～".join((to_wareki(d) if wareki or check_wareki(p)[0] else to_western(d))  # type: ignore[arg-type]
+                         for p, d in zip(parts, dates))
+            if not slot.max_chars or len(v) <= slot.max_chars:
+                return draft.with_value(v), f"add the weekday «{v}»", ["weekday"]
     return None
 
 
@@ -1336,13 +1386,20 @@ def normalize_reviewer_value(slot: FormSlot, value: str) -> tuple[str, list[str]
 
     The same deterministic conversions the AI path applies, never a guess: invisible characters removed,
     ``１２３４-５６７８-９０１２３`` → ``1234567890123`` (digits), ``ＪＲ－２０２６－０４７`` → ``JR-2026-047`` (ID),
-    ``52000`` / ``５万２千円`` → ``52,000円`` (yen; ``約…`` is left alone), ``2026/11/4`` → ``令和8年11月4日（水）`` (和暦).
-    A value that is ambiguous or impossible (bad digit grouping, 2月30日, a weekday that contradicts the calendar)
-    is returned unchanged, so validation tells the reviewer what is wrong. Returns (value, normalization flags).
+    ``52000`` / ``５万２千円`` / ``1.5万円`` → ``52,000円`` / ``15,000円`` (yen; ``約…`` is left alone),
+    ``2026/11/4`` → ``令和8年11月4日（水）`` (和暦), and a date typed without its weekday gets it (``令和8年11月4日`` →
+    ``令和8年11月4日（水）``, ``2026/11/4`` → ``2026年11月4日（水）`` in a date field). A value that is ambiguous or
+    impossible (bad digit grouping such as 52,00 or 1,,000, a fraction of a yen, 2月30日, a weekday that contradicts
+    the calendar, a date before 昭和 in a 和暦 field) is returned unchanged, so validation tells the reviewer what is
+    wrong. Returns (value, normalization flags).
     """
     v = clean_text(value.strip())[0]
     fmt = slot.required_format or "text"
-    if not v or not [i for i in validate_value(slot, v) if i.severity == "error"]:
+    if not v:
+        return v, []
+    if fmt in ("wareki_date", "wareki_period", "date"):
+        return _normalize_reviewer_date(slot, v)  # also when the value is already valid: the weekday may be missing
+    if not [i for i in validate_value(slot, v) if i.severity == "error"]:
         return v, []
     if fmt in ("digits", "pattern"):
         h = to_halfwidth_id(v)
@@ -1353,22 +1410,44 @@ def normalize_reviewer_value(slot: FormSlot, value: str) -> tuple[str, list[str]
         t = to_halfwidth_id(v).removesuffix("円")
         if re.fullmatch(r"[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+", t):
             return format_yen(int(t.replace(",", ""))), ["yen"]
-        amts = find_amounts(to_halfwidth_id(v))
+        amts = find_amounts(to_halfwidth_id(v))  # 52,00円 / 1,,000円 / 1.5円 are not amounts: left unchanged
         if len(amts) == 1 and not amts[0].approx and amts[0].text == to_halfwidth_id(v):
             return format_yen(amts[0].value), ["yen"]
         return v, []
-    if fmt in ("wareki_date", "wareki_period", "date"):
-        ds = find_dates(v)
-        need = 2 if fmt == "wareki_period" else (len(ds) if fmt == "date" and len(ds) in (1, 2) else 1)
-        rest = v
-        for d in sorted(ds, key=lambda d: -d.start):
-            rest = rest[: d.start] + rest[d.end :]
-        if len(ds) != need or not _DATE_GLUE.fullmatch(rest) or any(d.year is None or d.problem() for d in ds):
-            return v, []
-        render = to_western if fmt == "date" else to_wareki
-        out = "～".join(render(d.as_date) for d in ds)  # type: ignore[arg-type]
-        return (out, ["wareki"] if fmt != "date" else ["weekday"]) if out != v else (v, [])
     return v, []
+
+
+_WEEKDAY_TAIL = re.compile(r"\s*[（(][月火水木金土日](?:曜日?)?[）)]$")
+
+
+def _normalize_reviewer_date(slot: FormSlot, v: str) -> tuple[str, list[str]]:
+    fmt = slot.required_format or "text"
+    ds = find_dates(v)
+    need = 2 if fmt == "wareki_period" else (len(ds) if fmt == "date" and len(ds) in (1, 2) else 1)
+    rest = v
+    for d in sorted(ds, key=lambda d: -d.start):
+        rest = rest[: d.start] + rest[d.end :]
+    if len(ds) != need or not _DATE_GLUE.fullmatch(rest) or any(d.year is None or d.problem() for d in ds):
+        return v, []
+    # a date field keeps the calendar the reviewer typed (令和… stays 和暦); a 和暦 field gets 和暦
+    renders = [to_wareki if fmt != "date" or d.kind == "wareki" else to_western for d in ds]
+    try:
+        plain = [r(d.as_date, include_weekday=False) for r, d in zip(renders, ds)]  # type: ignore[arg-type]
+    except ValueError:  # before 昭和 (1926-12-25): validation reports it, the value stays as typed
+        return v, []
+    out = "～".join(p + f"（{weekday_ja(d.as_date)}）" for p, d in zip(plain, ds))  # type: ignore[arg-type]
+    if slot.max_chars and len(out) > slot.max_chars:  # the weekday is added only where it fits the printed limit
+        if any(d.weekday for d in ds) or not [i for i in validate_value(slot, v) if i.severity == "error"]:
+            return v, []  # a weekday the reviewer typed is never dropped; a valid value that fits stays as typed
+        out = "～".join(plain)
+    if out == v:
+        return v, []
+    flags = []
+    if fmt != "date" and any(_WEEKDAY_TAIL.sub("", v[d.start : d.end]) != p for d, p in zip(ds, plain)):
+        flags.append("wareki")
+    if any(not d.weekday for d in ds) and out.endswith("）"):
+        flags.append("weekday")
+    return out, flags
 
 
 def human_mapping(slot: FormSlot, value: str) -> FieldMapping:
@@ -1388,6 +1467,106 @@ def human_mapping(slot: FormSlot, value: str) -> FieldMapping:
         attempts=[CorrectionAttempt(attempt=1, action="entered by the reviewer" + (f" (typed «{typed}»)" if note else ""),
                                     value=v, issues=issues, passed=not errors)],
     )
+
+
+# ===================================================== cross-field printed rules
+
+
+def _memo_date_for(memo: str, label: str) -> Optional[tuple[Any, str, int]]:
+    """The date the memo gives right after ``label`` (「変更予定日（2026年12月15日（火））」「変更予定日：…」
+    「変更予定日は…」) as (date, its text, memo line), or None. The label must stand on its own (line start, bullet
+    or punctuation before it: 「め日」 is not found inside 「締め日」), and a date further along the sentence
+    (「変更予定日の30日前（11月15日）」) is not taken for it."""
+    starts = line_starts(memo)
+    for m in re.finditer(r"(?:^|(?<=[\s・\-\*●■◆○〇▶【\[（(、。,，]))" + re.escape(label), memo, re.M):
+        end = memo.find("\n", m.end())
+        seg = memo[m.end() : end if end >= 0 else len(memo)][:60]
+        d = next(iter(find_dates(seg)), None)
+        if d is None or not re.fullmatch(r"\s*(?:[（(:：]|は|を)?\s*", seg[: d.start]) or d.problem():
+            continue
+        dt = d.as_date
+        if dt is None:  # 12月15日 without a year: the memo's other dates give it
+            inf = _infer_year(memo, d.month, d.day)
+            if inf is None:
+                continue
+            from datetime import date as _date
+
+            try:
+                dt = _date(inf[0], d.month, d.day)
+            except ValueError:
+                continue
+        return dt, seg[d.start : d.end], offset_to_line(starts, m.start())
+    return None
+
+
+def _advance_rules(raw: Any) -> list[dict[str, Any]]:
+    """The well-formed advance-notice rules of a slot (a hand-written .slots.json may hold anything here)."""
+    out = []
+    for rule in raw if isinstance(raw, list) else []:
+        if not isinstance(rule, dict) or not str(rule.get("target") or "").strip():
+            continue
+        try:
+            days = int(rule.get("days"))
+        except (TypeError, ValueError):
+            continue
+        if days > 0:
+            out.append({**rule, "target": str(rule["target"]).strip(), "days": days})
+    return out
+
+
+def _deadline_date(printed: str, own: str, slots: list[FormSlot], by_id: dict[str, FieldMapping],
+                   memo: str) -> Optional[tuple[str, Any, str, str]]:
+    """(name, date, its text, where) of the other date of a deadline rule. ``printed`` is the phrase before 「の30日前」
+    (「変更予定日」, or 「本届出書は変更予定日」 / 「必ず変更予定日」 when no 、 separates it): its longest ending of 3+
+    characters that names another field (with a date value) or stands as a memo label followed by a date is used."""
+    for name in (printed[i:] for i in range(len(printed) - 2)):
+        holder = next((s for s in slots if s.slot_id != own and name in explicit_aliases(s)), None)
+        hm = by_id.get(holder.slot_id) if holder is not None else None
+        hv = (hm.filled_value if hm.is_written else (hm.suggested_value or "")) if hm is not None else ""
+        other = check_full_date(hv.strip())[0] if hv else None
+        if other is not None:
+            return name, other, hv, f"field «{holder.label}»"  # type: ignore[union-attr]
+        found = _memo_date_for(memo, name)
+        if found is not None:
+            return name, found[0], found[1], f"memo L{found[2]}"
+    return None
+
+
+def advance_notice_warnings(slots: list[FormSlot], mappings: list[FieldMapping], memo: str) -> list[FieldMapping]:
+    """Check printed deadlines that relate two dates (「変更予定日の30日前までに提出すること」, recorded by the scanner
+    as ``constraints["advance_notice"]`` on the submission-date field) against the final values.
+
+    The other date comes from the field that holds it, or else from the memo (「変更予定日（2026年12月15日（火））」).
+    When it is fewer than N days after the submission date, the submission-date mapping gets a warning (prefix
+    ``ADVANCE_NOTICE_PREFIX``) that the HITL checklist shows: the value is kept — it is what the memo states — and
+    the reviewer decides. Idempotent: earlier advance-notice warnings are replaced."""
+    by_id = {m.slot_id: m for m in mappings}
+    out: list[FieldMapping] = []
+    for m in mappings:
+        warnings = [w for w in m.warnings if not w.startswith(ADVANCE_NOTICE_PREFIX)]
+        slot = next((s for s in slots if s.slot_id == m.slot_id), None)
+        rules = _advance_rules(slot.constraints.get("advance_notice")) if slot is not None else []
+        value = m.filled_value if m.is_written else (m.suggested_value or "")
+        submitted = check_full_date(value.strip())[0] if value and rules else None
+        for rule in rules if submitted is not None else []:
+            days = rule["days"]
+            found = _deadline_date(rule["target"], m.slot_id, slots, by_id, memo)
+            if found is None:  # the other date is in no field and the memo does not give it: nothing to compare
+                continue
+            target, other, when, where = found
+            diff = (other - submitted).days
+            if diff >= days:
+                continue
+            en_gap = (f"only {diff} day(s) after" if diff >= 0 else f"{-diff} day(s) before")
+            ja_gap = (f"{target}（{when}）まで{diff}日しかありません" if diff >= 0
+                      else f"{target}（{when}）が{slot.label}より{-diff}日前です")  # type: ignore[union-attr]
+            warnings.append(
+                f"{ADVANCE_NOTICE_PREFIX} the form requires 「{rule.get('printed') or target}」 ({days} days before "
+                f"{target}) — {target} {when} ({where}) is {en_gap} {slot.label} {value}; check both dates "  # type: ignore[union-attr]
+                f"/ 様式の注意事項「{target}の{days}日前までに{rule.get('action') or '提出'}」に対し、{ja_gap}。"
+                f"提出日と{target}を確認してください")
+        out.append(m if warnings == list(m.warnings) else m.model_copy(update={"warnings": warnings}))
+    return out
 
 
 def make_engine(mode: str, model: Optional[str] = None, client: Any = None, effort: Optional[str] = None,

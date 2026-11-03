@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, Union
 
-from .constraints import infer_slot_constraints
+from .constraints import infer_slot_constraints, infer_template_constraints
 from .models import FormSlot, SlotOccurrence
 from .ooxml import (
     MAX_XLSX_COL,
@@ -76,6 +76,24 @@ def strip_markers(text: str) -> str:
 
 def has_marker(text: str) -> bool:
     return MARKER_ANY_RE.search(text) is not None
+
+
+# 「令和　　年　　月　　日」: an era date printed with blanks for the applicant to complete (an optional （　） for the
+# weekday). A cell that holds nothing else is a fill target: the whole skeleton is replaced by the 和暦 date.
+_TEMPLATE_BLANK = "[ 　_＿]+"
+ERA_DATE_TEMPLATE_RE = re.compile(rf"(?:令和|平成|昭和){_TEMPLATE_BLANK}年{_TEMPLATE_BLANK}月{_TEMPLATE_BLANK}日"
+                                  r"(?:[ 　]*[（(][ 　_＿]*[）)])?")
+TEMPLATE_REASON = "applicant field — printed era-date template next to a printed label; the template is replaced by the date"
+
+
+def era_date_template(text: str) -> Optional[tuple[int, int]]:
+    """``(start, end)`` of an unfilled era-date skeleton such as 「令和　　年　　月　　日」 or 「令和   年   月   日（　）」
+    when it is all the text holds (blanks around it allowed, no digit filled in yet), else None."""
+    s = (text or "").strip()
+    if not s or not ERA_DATE_TEMPLATE_RE.fullmatch(s):
+        return None
+    start = len(text) - len(text.lstrip())
+    return start, start + len(s)
 
 
 @dataclass
@@ -173,6 +191,16 @@ class _Acc:
 
 def _cell_text(idx: PartIndex, cell: CellInfo) -> str:
     return "\n".join(idx.container_text(idx.containers[ci]) for ci in cell.containers).strip()
+
+
+def _template_container(idx: PartIndex, cell: CellInfo) -> Optional[int]:
+    """The paragraph of a Word cell that holds an unfilled era-date skeleton (「令和　　年　　月　　日」) when no other
+    paragraph of the cell has text, else None."""
+    texts = [(ci, idx.container_text(idx.containers[ci])) for ci in cell.containers]
+    filled = [(ci, t) for ci, t in texts if t.strip()]
+    if len(filled) == 1 and era_date_template(filled[0][1]):
+        return filled[0][0]
+    return None
 
 
 def _cell_at(table: TableInfo, row: int, grid_col: int) -> Optional[CellInfo]:
@@ -334,21 +362,28 @@ def _add_coordinate_target(idx: Optional[PartIndex], tgt: dict, accs: dict, warn
         warnings.append(f"coordinate target {slot_id!r}: cell (table={tgt.get('table')}, row={tgt.get('row')}, "
                         f"col={tgt.get('col')}) not found")
         return
-    if _cell_text(idx, cell):
+    template = _template_container(idx, cell) if _cell_text(idx, cell) else None
+    if _cell_text(idx, cell) and template is None:
         warnings.append(f"coordinate target {slot_id!r}: cell is not empty — refusing to overwrite printed text")
         return
     if cell.vmerge == "continue":
         warnings.append(f"coordinate target {slot_id!r}: cell is a vertically merged continuation — designate the "
                         f"first cell of the merge")
         return
-    c = idx.containers[cell.containers[0]]
+    c = idx.containers[template if template is not None else cell.containers[0]]
     if any(tok in idx.data[c.span[0] : c.span[1]] for tok in _UNSAFE_PARAGRAPH_TOKENS):
         warnings.append(f"coordinate target {slot_id!r}: the cell holds a field, content control or object — "
                         f"refusing to write into it")
         return
     acc = accs.setdefault(slot_id, _Acc(slot_id))
-    occ = _docx_occurrence(idx, c, "document", "", "empty_cell", "")
-    occ.location_path += " (empty cell designated by coordinates)"
+    if template is not None:  # 「令和　　年　　月　　日」: only the skeleton's characters are replaced, like a marker
+        text = idx.container_text(c)
+        span = era_date_template(text)
+        occ = _docx_occurrence(idx, c, "document", text[span[0] : span[1]], "date_template", text)  # type: ignore[index]
+        occ.location_path += " (printed era-date template designated by coordinates)"
+    else:
+        occ = _docx_occurrence(idx, c, "document", "", "empty_cell", "")
+        occ.location_path += " (empty cell designated by coordinates)"
     acc.occurrences.append(occ)
     labels, col_header, section, hints = _docx_cell_context(idx, cell)
     acc.labels += labels + ([col_header] if col_header else []) + ([tgt["label"]] if tgt.get("label") else [])
@@ -525,7 +560,8 @@ def _scan_xlsx(path: Path, spec: dict) -> ScanResult:
         if (el is not None and "f" in el.children) or (oc is not None and oc.data_type == "f"):
             warnings.append(f"coordinate target {slot_id!r}: {ref} contains a formula — formulas are never fill targets")
             return
-        if (el is not None and el.children) or (oc is not None and oc.value not in (None, "")):
+        template = xlsx_template_cell(el, oc)
+        if not template and ((el is not None and el.children) or (oc is not None and oc.value not in (None, ""))):
             warnings.append(f"coordinate target {slot_id!r}: {ref} is not empty — refusing to overwrite printed text")
             return
         if (part, ref) in claimed:
@@ -535,9 +571,11 @@ def _scan_xlsx(path: Path, spec: dict) -> ScanResult:
         acc = accs.setdefault(slot_id, _Acc(slot_id))
         labels, header, box, opts, mlen = context(sidx, sname, ref)
         acc.occurrences.append(SlotOccurrence(
-            part_name=part, container_index=-1, marker="", marker_kind="empty_cell", cell_ref=ref, sheet_name=sname,
-            sheet_index=sidx, box_id=box, context_text="",
-            location_path=f"{part} › sheet '{sname}' › {ref} (empty cell designated by coordinates)",
+            part_name=part, container_index=-1, marker=template, marker_kind="date_template" if template else "empty_cell",
+            cell_ref=ref, sheet_name=sname, sheet_index=sidx, box_id=box, context_text=template,
+            location_path=f"{part} › sheet '{sname}' › {ref} "
+                          + ("(printed era-date template designated by coordinates — the cell is rewritten as the date)"
+                             if template else "(empty cell designated by coordinates)"),
         ))
         acc.labels += labels + ([header] if header else []) + ([tgt["label"]] if tgt.get("label") else [])
         acc.context_label = acc.context_label or " › ".join(labels + ([header] if header else []))
@@ -551,6 +589,16 @@ def _scan_xlsx(path: Path, spec: dict) -> ScanResult:
     result = ScanResult(path, "xlsx", [], parts, "\n".join(doc_texts), spec, warnings, sheets)
     result.slots = [_make_slot(a, "xlsx") for a in accs.values()]
     return result
+
+
+def xlsx_template_cell(el: Any, oc: Any) -> str:
+    """The printed text of a worksheet cell that holds only an era-date skeleton (「令和　　年　　月　　日」) as a shared or
+    inline string — no formula, no rich content — else "". Such a cell is written as one inline string (the date)."""
+    if el is None or oc is None or not isinstance(oc.value, str) or not era_date_template(oc.value):
+        return ""
+    if el.children not in (["v"], ["is"]) or el.attrs.get("t") not in ("s", "inlineStr"):
+        return ""
+    return oc.value
 
 
 def _resolve_sheet(sheets: list[tuple[int, str, str]], key: Any) -> Optional[tuple[int, str, str]]:
@@ -597,7 +645,8 @@ def _make_slot(acc: _Acc, file_type: str) -> FormSlot:
         hints=_dedupe([h for h in acc.hints if h]),
         occurrences=acc.occurrences,
         constraints={"_labels": _dedupe([x for x in acc.labels if x]),
-                     "_allowed": acc.__dict__.get("allowed"), "_maxlen": acc.__dict__.get("maxlen")},
+                     "_allowed": acc.__dict__.get("allowed"), "_maxlen": acc.__dict__.get("maxlen"),
+                     "_template": any(o.marker_kind == "date_template" for o in acc.occurrences)},
     )
 
 
@@ -616,7 +665,10 @@ def _finalise_slots(result: ScanResult) -> None:
         labels = slot.constraints.pop("_labels", [])
         allowed = slot.constraints.pop("_allowed", None)
         maxlen = slot.constraints.pop("_maxlen", None)
+        template = slot.constraints.pop("_template", False)
         inferred = infer_slot_constraints(slot.slot_id, labels, slot.hints, result.doc_text, allowed, maxlen)
+        if template:  # the printed 「令和　　年　　月　　日」 says what goes in: a 和暦 date
+            inferred = infer_template_constraints(slot.slot_id, result.doc_text, inferred)
         slot.required_format = inferred["required_format"]
         slot.max_chars = inferred["max_chars"]
         slot.constraints = inferred["constraints"]
@@ -684,6 +736,7 @@ class _Cand:
     merged_range: str = ""
     allowed: Optional[list[str]] = None
     maxlen: Optional[int] = None
+    template: str = ""  # the printed era-date skeleton the cell holds (「令和　　年　　月　　日」), "" for an empty cell
 
 
 def _label_parts(text: str) -> tuple[str, list[str]]:
@@ -737,15 +790,15 @@ def _docx_blank_candidates(path: Path) -> tuple[list[_Cand], str]:
 
     def label_for(t: TableInfo, cell: CellInfo) -> tuple[Optional[CellInfo], str]:
         left = _cell_at(t, cell.row_idx, cell.col_idx - 1) if cell.col_idx > 0 else None
-        if left is not None and text_of(t, left):
+        if left is not None and text_of(t, left) and not era_date_template(text_of(t, left)):
             return left, "left"
         r = cell.row_idx - 1
         while r >= 0 and not is_banner(t, r):  # column-header table: walk up through empty cells
             above = _cell_at(t, r, cell.col_idx)
             if above is None:
                 break
-            if text_of(t, above):
-                return above, "above"
+            if text_of(t, above):  # a printed 「令和　年　月　日」 is a field to fill, never another cell's label
+                return (None, "") if era_date_template(text_of(t, above)) else (above, "above")
             r -= 1
         return None, ""
 
@@ -761,8 +814,11 @@ def _docx_blank_candidates(path: Path) -> tuple[list[_Cand], str]:
             if is_banner(t, ri):
                 continue
             for cell in row:
-                if not cell.containers or _cell_text(idx, cell):
+                if not cell.containers:
                     continue
+                template_ci = _template_container(idx, cell) if _cell_text(idx, cell) else None
+                if _cell_text(idx, cell) and template_ci is None:
+                    continue  # printed text, not a field (a printed 「令和　　年　　月　　日」 is one: it is completed)
                 origin = _resolve_vmerge(t, cell)
                 if origin is not cell and _cell_text(idx, origin):
                     continue  # the lower part of a vertically merged printed label
@@ -783,14 +839,15 @@ def _docx_blank_candidates(path: Path) -> tuple[list[_Cand], str]:
                 if cell.vmerge == "continue":
                     rejected = "vertically merged continuation (vMerge) — only the first cell of the merge can be filled"
                 else:
-                    c0 = idx.containers[cell.containers[0]]
+                    c0 = idx.containers[template_ci if template_ci is not None else cell.containers[0]]
                     if any(tok in idx.data[c0.span[0] : c0.span[1]] for tok in _UNSAFE_PARAGRAPH_TOKENS):
                         rejected = "the cell holds a field, content control or object — never a fill target"
                 span = f"+{cell.grid_span}" if cell.grid_span > 1 else ""
                 cands.append(_Cand(
                     "docx", (0, t.table_idx, ri, cell.col_idx), label_text, base, hints, group, section_of(t, ri),
                     direction, f"word/document.xml › tbl[{t.table_idx}] › tr[{ri}] › tc[grid {cell.col_idx}{span}]",
-                    {"part": "word/document.xml", "table": t.table_idx, "row": ri, "col": cell.col_idx}, rejected))
+                    {"part": "word/document.xml", "table": t.table_idx, "row": ri, "col": cell.col_idx}, rejected,
+                    template=_cell_text(idx, cell) if template_ci is not None else ""))
     return cands, doc_text
 
 
@@ -847,7 +904,11 @@ def _xlsx_blank_candidates(path: Path) -> tuple[list[_Cand], str]:
         def is_label(r: int, c: int) -> bool:
             x = origin_cell(r, c)
             return (x is not None and x.data_type != "f" and isinstance(x.value, str) and bool(x.value.strip())
-                    and not _is_sentence(x.value))
+                    and not _is_sentence(x.value) and not era_date_template(x.value))
+
+        def template_of(r: int, c: int) -> str:
+            b = box(r, c)
+            return xlsx_template_cell(sheet_idx.cells.get(f"{get_column_letter(b[1])}{b[0]}"), origin_cell(r, c))
 
         def is_banner(r: int) -> bool:
             b = box(r, 1)
@@ -868,7 +929,8 @@ def _xlsx_blank_candidates(path: Path) -> tuple[list[_Cand], str]:
         seen: set[tuple[int, int]] = set()
 
         def consider(r: int, c: int, label_rc: tuple[int, int], direction: str) -> None:
-            if (r, c) in seen or literal(r, c):
+            template = template_of(r, c)
+            if (r, c) in seen or (literal(r, c) and not template):
                 return
             seen.add((r, c))
             b = box(r, c)
@@ -890,12 +952,12 @@ def _xlsx_blank_candidates(path: Path) -> tuple[list[_Cand], str]:
                 rejected = "the worksheet has rows/cells without an r attribute — cells cannot be addressed safely"
             else:
                 el = sheet_idx.cells.get(ref)
-                if el is not None and el.children:
+                if el is not None and el.children and not template:
                     rejected = "the cell already holds content"
             cands.append(_Cand(
                 "xlsx", (sidx, 0, r, c), label_text, base, hints, group, section_of(r), direction,
                 f"{part} › sheet '{sname}' › {ref}", {"sheet": sidx, "sheet_name": sname, "cell": ref}, rejected,
-                merged_range=rng, allowed=rule_for("list", r, c), maxlen=rule_for("len", r, c)))
+                merged_range=rng, allowed=rule_for("list", r, c), maxlen=rule_for("len", r, c), template=template))
 
         cells = sorted(ws._cells.values(), key=lambda x: (x.row, x.column))
         for x in cells:  # (a) the cell right of a printed label (each row of a multi-row label)
@@ -907,7 +969,8 @@ def _xlsx_blank_candidates(path: Path) -> tuple[list[_Cand], str]:
                     consider(rr, b[3] + 1, (x.row, x.column), "left")
         for x in cells:  # (b) an empty table cell below a column header (no label on its left)
             r, c = x.row, x.column
-            if (r, c) in seen or x.value is not None or r > max_row or c > max_col or literal(r, c):
+            blank = x.value is None or bool(template_of(r, c))  # empty, or a printed 「令和　年　月　日」 to complete
+            if (r, c) in seen or not blank or r > max_row or c > max_col or (literal(r, c) and not template_of(r, c)):
                 continue
             if box(r, c)[:2] != (r, c):
                 continue
@@ -968,20 +1031,26 @@ def discover_blank_cells(path: Union[str, Path], mode: str = "demo", client: Any
         hits = _office_hits(c.label_text, c.section, c.group, *c.hints)
         labels = [c.label_text] + ([c.group] if c.group else [])
         inferred = infer_slot_constraints(sid, labels, c.hints, doc_text, c.allowed, c.maxlen)
+        if c.template:  # 「令和　　年　　月　　日」 printed in the cell: a 和暦 date, completed by replacing the skeleton
+            inferred = infer_template_constraints(sid, doc_text, inferred)
         aliases = ([c.base] if base_counts[c.base] == 1 else []) + ([c.group + c.base, c.group] if c.group else [])
         cand: dict[str, Any] = {
             "candidate_id": f"c{i:02d}", "slot_id": sid, "label": sid.replace("_", " "), "file_type": file_type,
             "evidence_label": c.label_text, "group_label": c.group, "section": c.section,
             "label_direction": c.direction, "location": c.location, **c.coords,
             "merged_range": c.merged_range, "office_only": bool(hits), "applicant_fillable": not hits,
-            "recommended": not hits, "reason": OFFICE_REASON if hits else APPLICANT_REASON,
+            "recommended": not hits,
+            "reason": OFFICE_REASON if hits else (TEMPLATE_REASON if c.template else APPLICANT_REASON),
             "category": "office_only" if hits else "applicant_fillable", "classified": True,
             "office_keywords": hits, "required_format": inferred["required_format"],
             "max_chars": inferred["max_chars"], "constraints": inferred["constraints"],
             "aliases": [a for a in dict.fromkeys(aliases) if a and a != sid],
             "classified_by": "rules",
-            "safety": {"empty": True, "formula": False, "merged_continuation": False},
+            "safety": {"empty": not c.template, "formula": False, "merged_continuation": False},
         }
+        if c.template:
+            cand["printed_template"] = c.template
+            cand["safety"]["printed_template"] = True
         candidates.append(cand)
     engine = _classify_with_claude(candidates, _package_title(path), mode, client, model_tier)
     # a live classification that failed after the API answered: its calls and tokens stay on record

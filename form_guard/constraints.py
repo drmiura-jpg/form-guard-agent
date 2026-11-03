@@ -13,7 +13,14 @@ import unicodedata
 from typing import Any, Iterable, Optional
 
 from .models import FormSlot, ValidationIssue
-from .textnorm import check_full_date, check_wareki, find_invalid_dates, parse_compound, parse_yen_exact
+from .textnorm import (
+    check_full_date,
+    check_wareki,
+    find_invalid_dates,
+    parse_compound,
+    parse_yen_exact,
+    pre_era_problem,
+)
 
 FORMAT_GUIDE = {
     "wareki_date": "和暦の年月日（曜日つき）— e.g. 令和8年11月2日（月） (2026 = 令和8年, 2019-05-01 = 令和元年)",
@@ -35,6 +42,26 @@ _OPTIONS_SLASH_RE = re.compile(
     r"([^\s※（）()「」:：、。／/]+(?:[／/][^\s※（）()「」／/:：、。]+)+)\s*(?:のうち|から|より|のいずれか)"
 )
 _OPTIONS_QUOTED_RE = re.compile(r"((?:「[^」]+」[、・]?){2,})\s*(?:のいずれか|から|のうち)")
+# A deadline printed relative to another date of the form: 「本届出書は、変更予定日の30日前までに…へ提出すること」.
+# "target" is the printed phrase before 「の30日前」 (「本届出書は変更予定日」 when no 、 separates it); which field or
+# memo label it names is decided after mapping, from its longest ending that is one (mapper.advance_notice_warnings).
+_ADVANCE_RE = re.compile(r"([^\s、。，,.．（）()「」『』:：]{2,30}?)の\s*([0-9０-９]+)\s*日前まで(?:に)?[^。\n]{0,40}?"
+                         r"(提出|申請|届け?出)")
+# the field that holds the date the form is submitted on (提出日・申請日・届出日・提出年月日 …)
+SUBMISSION_DATE_RE = re.compile(r"(?:提出|申請|届出|届け出)(?:年月)?日")
+ADVANCE_NOTICE_PREFIX = "advance notice:"  # mapping warnings raised by mapper.advance_notice_warnings
+
+
+def advance_notice_rules(doc_text: str) -> list[dict[str, Any]]:
+    """Printed deadlines relative to another date: 「変更予定日の30日前までに…提出すること」 →
+    ``[{"target": "変更予定日", "days": 30, "action": "提出", "printed": "変更予定日の30日前までに…提出"}]``."""
+    out: list[dict[str, Any]] = []
+    for m in _ADVANCE_RE.finditer(doc_text or ""):
+        rule = {"target": m.group(1), "days": int(unicodedata.normalize("NFKC", m.group(2))), "action": m.group(3),
+                "printed": m.group(0)}
+        if rule["days"] > 0 and rule not in out:
+            out.append(rule)
+    return out
 
 
 def pattern_from_example(example: str) -> str:
@@ -108,7 +135,10 @@ def infer_slot_constraints(
             constraints["multiple_of"] = 1000
         cap = _CAP_RE.search(blob)
         if cap:
-            constraints["max_value"] = parse_compound(cap.group(1))
+            try:
+                constraints["max_value"] = parse_compound(cap.group(1))
+            except ValueError:  # a cap printed with odd digit grouping is not guessed
+                pass
     else:
         dm = _DIGITS_RE.search(blob)
         ex = _EXAMPLE_RE.search(blob)
@@ -124,9 +154,30 @@ def infer_slot_constraints(
                 constraints["halfwidth"] = True
         elif name.endswith("氏名"):
             fmt = "person_name"
+    if fmt in ("wareki_date", "date"):
+        constraints.update(_date_rules(slot_id, doc_text))
 
     importance = "normal" if fmt == "text" else "high"
     return {"required_format": fmt, "max_chars": max_chars, "constraints": constraints, "importance": importance}
+
+
+def _date_rules(slot_id: str, doc_text: str) -> dict[str, Any]:
+    """Printed rules of a date field that involve another date: a submission date (提出日・申請日・届出日) gets the
+    form's 「…の30日前までに提出」 deadlines, checked across fields after mapping (mapper.advance_notice_warnings)."""
+    name = slot_id.replace("_", "")
+    if not SUBMISSION_DATE_RE.search(name):
+        return {}
+    rules = [r for r in advance_notice_rules(doc_text) if r["target"] not in (name, slot_id)]
+    return {"advance_notice": rules} if rules else {}
+
+
+def infer_template_constraints(slot_id: str, doc_text: str, inferred: dict[str, Any]) -> dict[str, Any]:
+    """Rules for a cell printed as an era-date skeleton (「令和　　年　　月　　日」): always a 和暦 date, whatever its
+    label says."""
+    if inferred.get("required_format") == "wareki_date":
+        return inferred
+    return {"required_format": "wareki_date", "max_chars": None, "constraints": _date_rules(slot_id, doc_text),
+            "importance": "high"}
 
 
 def _issue(code: str, message: str, severity: str = "error") -> ValidationIssue:
@@ -155,7 +206,10 @@ def _date_issues(parts: list[str], check, kind: str) -> list[ValidationIssue]:
             # wrong syntax (e.g. a Western date in a 和暦 field): say what is wrong with the date itself first
             # (2026年2月30日, wrong （曜）), then "format" so the repair step can still convert it
             issues += [_issue(code, f"«{p}»: {msg}") for _, code, msg in find_invalid_dates(p)]
-            if not any(i.code == "format" for i in issues):  # one format complaint per value, not per endpoint
+            before_eras = pre_era_problem(check_full_date(p)[0]) if check is check_wareki else None
+            if before_eras:  # 1926/12/24 in a 和暦 field: a real date with no 和暦 to convert it to — nothing to repair
+                issues.append(_issue("date_invalid", f"«{p}»: {before_eras}"))
+            elif not any(i.code == "format" for i in issues):  # one format complaint per value, not per endpoint
                 issues.append(_issue("format", kind))
         dates.append(d)
     if not issues and len(dates) == 2 and dates[0] > dates[1]:  # type: ignore[operator]

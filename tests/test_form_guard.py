@@ -2194,7 +2194,7 @@ def test_p01_measured_workflow_script_reproduces_the_table(samples_dir, tmp_path
     assert [r["form"] for r in rows] == ["form1", "form2", "form3", "form4", "form5"]
     assert all(r["passed"] == r["total"] == 21 for r in rows)
     assert [r["status"] for r in rows] == ["PASS", "NEEDS_HUMAN_INPUT", "PASS", "PASS", "PASS"]
-    assert sum(r["written"] for r in rows) == 40 and sum(r["chars"] for r in rows) == 844
+    assert sum(r["written"] for r in rows) == 40 and sum(r["chars"] for r in rows) == 848
     table = mod.markdown(rows)
     doc = (ROOT / "docs" / "BUILT_WITH_CLAUDE_CODE.md").read_text(encoding="utf-8")
     for line in table.splitlines()[2:]:  # the counted columns in the doc match a fresh run (timings may vary)
@@ -2442,7 +2442,7 @@ def test_p3_3_claude_suite_endpoint_reads_the_repository_assets(api, tmp_path):
     assert all(p["ja"] and p["en"] and p["why_ja"] and p["why_en"] for p in s["routing"]["policy"])
     t = s["workflow"]["totals"]
     assert (t["forms"], t["fields"], t["written"], t["chars"], t["tags"], t["text_blocks"], t["merges"], t["borders"],
-            t["hitl"]) == (5, 41, 40, 844, 2119, 171, 124, 650, 51)
+            t["hitl"]) == (5, 41, 40, 848, 2119, 171, 124, 650, 51)
     assert t["pending_slots"] == ["form2:法人番号"] and t["all_checks_passed"] and t["checks_per_form"] == [21]
     assert [row["form"] for row in s["workflow"]["rows"]] == ["form1", "form2", "form3", "form4", "form5"]
     assert api.get("/api/claude-suite").json()["workflow"] == s["workflow"]  # measured once per process
@@ -2491,7 +2491,7 @@ def test_p3_5_readme_and_docs_answer_impact_continued_use_and_match_the_measured
                    "### 誰のどんな課題を解決し、ハッカソン後にどこで使われ続けるか", "差し戻し", "Post-hackathon continued use",
                    "ハッカソン後の継続利用場面", "approval.json", "report.html", ".mcp.json", "--discover-blanks",
                    "POST /api/discover/demo", "POST /api/runs/from-discovery", "GET /api/claude-suite", "41 designated fields",
-                   "844 characters", "2,119 XML tags", "171 printed text blocks", "124 merged cells/ranges",
+                   "848 characters", "2,119 XML tags", "171 printed text blocks", "124 merged cells/ranges",
                    "650 border definitions", "51-item", "法人番号", "routed_model"):
         assert needle in readme, needle
     for needle in ("form4", "form5", "routed_model", "GET /api/claude-suite", "Claude Code 連携 · Architecture",
@@ -4586,3 +4586,291 @@ def test_playtest_web_ui_language_and_layout_fixes(api, demo_runs):
     assert ".run-links .pill, .run-links .pill .pri, .run-links .pill .sub { white-space: normal; }" in css  # 1280 px
     assert "@media (max-width: 1366px) { .top-actions .sub { display: none; } }" in css
     assert ".preview-side .btn { white-space: normal;" in css and "background: var(--surface); max-width: 300px; }" in css
+
+
+# ------------------------------------------- playtest round 2: R1 /check fixes and the T11 / T25 extensions
+
+
+def test_playtest_r1_a1_conditions_in_a_trailing_note_and_interim_measures_are_never_cut_silently():
+    from form_guard.textnorm import strip_trailing_note
+
+    for note in ("（※利用は平日に限る）", "（※利用は平日のみ）", "(note: 交換完了までは使用しない)"):
+        assert strip_trailing_note("設備を使用する。" + note) == "設備を使用する。" + note, note  # part of the value
+    assert strip_trailing_note("架空 太郎（※先方に確認済み）") == "架空 太郎"  # a note to self is still dropped
+    m = map_fields([_text_slot("利用条件")], "利用条件：設備を使用する。（※利用は平日に限る）\n", DemoEngine()).mappings[0]
+    assert m.status == "filled" and m.filled_value == "設備を使用する。（※利用は平日に限る）"  # the note used to be cut
+    # an interim measure / scope limit (protection 1) goes only as a last resort, and then a human decides
+    text = "点検結果を報告する。交換完了までは運転時間を短縮する。"
+    c = condense_extractive(text, 10)
+    assert c is not None and c.text == "点検結果を報告する。" and c.unsafe and c.held == ["交換完了までは運転時間を短縮する。"]
+    slot = _text_slot("報告", max_chars=10)
+    m = map_fields([slot], text, FixedEngine({"報告": Draft("報告", value=text, quotes=[text], confidence=0.9)})).mappings[0]
+    assert m.status == "needs_human_input" and not m.is_written and "unsafe_condensation" in m.normalizations
+    assert any("「交換完了までは運転時間を短縮する。」" in e for e in m.errors), m.errors  # the cut measure is named
+    remark = condense_extractive("点検は完了した。なお、給湯室の換気扇は清掃のみで異常なし。", 8)
+    assert remark is not None and not remark.unsafe  # 'のみ' in a status remark is no scope limit
+
+
+def test_playtest_r1_a2_odd_digit_grouping_and_fractions_of_a_yen_are_never_read_as_amounts(samples_dir):
+    for bad in ("52,00", "1,,000", "1,00,000", "1.5", "0.5", "52,00万"):
+        with pytest.raises(ValueError):
+            parse_compound(bad)
+    assert [parse_compound(s) for s in ("1.5万", "1.5千", "0万", "0万5千", "2億0万", "1,612,000", "1億2,000万", "483万6千")] \
+        == [15_000, 1_500, 0, 5_000, 200_000_000, 1_612_000, 120_000_000, 4_836_000]  # exact decimal arithmetic
+    assert kanji_to_int("〇万") == 0 and kanji_to_int("〇万五千") == 5_000 and kanji_to_int("万") == 10_000
+    assert [a.value for a in find_amounts("〇万円")] == [0] and [a.value for a in find_amounts("〇万五千円")] == [5_000]
+    for text in ("52,00円", "1,,000円", "1.5円", "0.5円"):  # used to become 5,200円 / 1,000円 / 2円 / 0円
+        assert find_amounts(text) == [], text
+    for text in ("52,00万円", "52,00 万円", "1.23456万円", "12,34千円"):  # nor is their bare 万円 / 千円 read as 1万 / 1千
+        assert find_amounts(text) == [] and quantities(text) == set(), text
+    assert [a.value for a in find_amounts("千円、5千円、1.5万円、数万円、何千円、十数万円")] == [1_000, 5_000, 15_000]
+    cap = _text_slot("補助金申請額", fmt="yen", max_value=1_000_000, multiple_of=1000)
+    m = map_fields([cap], "補助金申請額：52,00万円\n", DemoEngine()).mappings[0]
+    assert m.status == "needs_human_input" and not m.filled_value  # was written as 10,000円
+    sc = scan(paths(samples_dir, "form2")["form"])
+    for typed in ("52,00円", "52,00", "1,,000円", "1.5円", "0.5円"):
+        m = human_mapping(sc.slot("補助金申請額"), typed)
+        assert m.filled_value == typed and not m.validation_passed, typed
+        assert any("not a yen amount" in e for e in m.errors), (typed, m.errors)
+    for typed, want in (("52000", "52,000円"), ("５万２千円", "52,000円"), ("1.5万円", "15,000円")):
+        m = human_mapping(sc.slot("補助金申請額"), typed)
+        assert m.filled_value == want and not m.errors, (typed, m.errors)
+
+
+def test_playtest_r1_a3_contradicting_lines_under_two_labels_or_with_two_weekdays_go_to_the_reviewer():
+    from form_guard.mapper import _same_fact
+
+    slot = FormSlot(slot_id="提出日", label="提出日", location_path="test", file_type="docx", current_text="",
+                    required_format="wareki_date", aliases=["申請日"])
+    m = map_fields([slot], "申請日：2026/11/2\n提出日：2026/11/9\n", DemoEngine()).mappings[0]
+    assert m.status == "needs_human_input" and not m.filled_value  # the 提出日 line used to be ignored
+    assert any("more than once" in e and "L1" in e and "L2" in e for e in m.errors), m.errors
+    date_slot = _text_slot("申請日", fmt="wareki_date")
+    wrong = "2026/11/2" + "（火）"  # 2026-11-02 is a Monday
+    assert not _same_fact(date_slot, "2026/11/2（月）", wrong)
+    assert _same_fact(date_slot, "2026/11/2（月）", "令和8年11月2日（月）") and _same_fact(date_slot, "2026/11/2（月）", "2026/11/2")
+    m = map_fields([date_slot], f"申請日：2026/11/2（月）\n申請日：{wrong}\n", DemoEngine()).mappings[0]
+    assert m.status == "needs_human_input" and any("more than once" in e for e in m.errors), m.errors
+    same = map_fields([date_slot], "申請日：2026/11/2（月）\n申請日：令和8年11月2日（月）\n", DemoEngine()).mappings[0]
+    assert same.status == "filled" and same.filled_value == "令和8年11月2日（月）"
+    # a generated short name (変更 for 変更予定日) neither supplies the value nor raises a conflict
+    planned = _text_slot("変更予定日", fmt="wareki_date")
+    m = map_fields([planned], "変更予定日：未定（理事会で決定）\n・変更：2026年11月2日（月）に理事会へ諮った\n", DemoEngine()).mappings[0]
+    assert m.status == "needs_human_input" and not m.filled_value and not m.suggested_value
+    name = FormSlot(slot_id="申請者氏名", label="申請者氏名", location_path="test", file_type="docx", current_text="",
+                    required_format="person_name")
+    m = map_fields([name], "申請者氏名：見本 太郎\n担当：\n・氏名：架空 花子\n", DemoEngine()).mappings[0]
+    assert m.status == "filled" and m.filled_value == "見本 太郎" and not m.errors
+
+
+def test_playtest_r1_a4_dates_before_showa_are_refused_cleanly_in_wareki_fields(api):
+    slot = _text_slot("提出日", fmt="wareki_date")
+    for v in ("1926/12/24", "1926年12月24日"):
+        issues = validate_value(slot, v)
+        assert [i.code for i in issues] == ["date_invalid"] and "before the supported eras" in issues[0].message, issues
+        m = human_mapping(slot, v)  # used to raise ValueError: date before supported eras
+        assert m.filled_value == v and m.errors and "昭和より前" in m.errors[0]
+    assert human_mapping(slot, "1926/12/25").filled_value == "昭和元年12月25日（土）" == to_wareki(date(1926, 12, 25))
+    m = map_fields([slot], "提出日：1926年12月24日に提出\n", DemoEngine()).mappings[0]
+    assert m.status == "needs_human_input" and not m.filled_value and any("before the supported eras" in e for e in m.errors)
+    run = api.post("/api/runs", json={"demo_id": "form2", "mode": "demo"}).json()
+    r = api.post(f"/api/runs/{run['run_id']}/overrides", json={"values": {"申請日": "1926/12/24"}})
+    assert r.status_code == 200  # was a 500
+    m2 = next(x for x in r.json()["mappings"] if x["slot_id"] == "申請日")
+    assert m2["status"] == "needs_human_input" and "昭和より前" in " ".join(m2["errors"])
+
+
+def test_playtest_r1_a5_every_date_path_adds_the_weekday_and_condensation_never_drops_one_silently(demo_runs):
+    wareki, western = _text_slot("申請日", fmt="wareki_date"), _text_slot("申請日", fmt="date")
+    for slot, typed, want in ((wareki, "令和8年11月4日", "令和8年11月4日（水）"), (wareki, "2026/11/4", "令和8年11月4日（水）"),
+                              (western, "2026/11/4", "2026年11月4日（水）"), (western, "2026年11月4日", "2026年11月4日（水）"),
+                              (western, "令和8年11月4日", "令和8年11月4日（水）"), (wareki, "令和8年11月4日（水）", "令和8年11月4日（水）")):
+        m = human_mapping(slot, typed)  # a valid date without its weekday used to be kept as typed
+        assert m.filled_value == want and not m.errors, (typed, m.filled_value, m.errors)
+        assert ("weekday" in m.normalizations) == ("（" not in typed), (typed, m.normalizations)
+    m = map_fields([western], "申請日：2026/11/4\n", DemoEngine()).mappings[0]
+    assert m.status == "filled" and m.filled_value == "2026年11月4日（水）" and "weekday" in m.normalizations
+    short = _text_slot("申請日", fmt="date", max_chars=11)  # the weekday is only added where it fits
+    for typed in ("2026年11月4日", "2026/11/4"):
+        m = human_mapping(short, typed)
+        assert m.filled_value == typed and not m.errors, (typed, m.errors)
+    c = condense_extractive("11月6日（金）までにフィルターを交換する。", 21)
+    assert c is not None and c.text == "11月6日までにフィルターを交換する。" and c.unsafe and c.held == ["（金）"]
+    c = condense_extractive("11月6日（金）までにフィルターを交換する。部品は3点を交換した。", 30)  # a safe deletion first
+    assert c is not None and c.text == "11月6日（金）までにフィルターを交換する。" and not c.unsafe
+    m3 = next(x for x in demo_runs("form3").mappings if x.slot_id == "指摘事項および是正措置")
+    assert m3.status == "filled" and "11月6日（金）までに" in m3.filled_value and "11月20日（金）までに" in m3.filled_value
+    assert "（金）" not in m3.condensed_removed and len(m3.filled_value) == 120  # both weekdays survive the condensation
+
+
+def test_playtest_r1_o4_bidirectional_control_characters_are_removed_at_intake(samples_dir, tmp_path):
+    from form_guard.textnorm import clean_text
+
+    for ch in ("‮", "‪", "‭", "⁦", "⁩", "؜"):
+        assert clean_text(f"JR-2026{ch}-047") == ("JR-2026-047", [
+            "1 invisible character(s) removed (zero-width space, BOM, soft hyphen …)"]), hex(ord(ch))
+    p1 = paths(samples_dir, "form1")
+    memo = read_memo(p1["memo"]).replace("ＪＲ－２０２６－０４７", "ＪＲ－２０２６‮－０４７")  # RIGHT-TO-LEFT OVERRIDE
+    r = run_pipeline(p1["form"], memo, tmp_path / "rlo", mode="demo")
+    assert next(x for x in r.mappings if x.slot_id == "研究課題番号").filled_value == "JR-2026-047"
+    assert "‮" not in r.memo_text and r.report.overall_status == "PASS"
+
+
+def test_playtest_r1_o5_o6_held_values_explain_themselves_in_each_language_and_check_texts_are_english(api, demo_runs,
+                                                                                                      samples_dir, tmp_path):
+    from form_guard.mapper import ROUTING_POLICY
+
+    run = api.post("/api/runs", json={"demo_id": "form2", "mode": "demo"}).json()
+    bad = api.post(f"/api/runs/{run['run_id']}/overrides", json={"values": {"申請日": "2026年11月4日" + "（木）"}}).json()
+    item = next(h for h in bad["report"]["hitl_checklist"] if h["slot_id"] == "申請日")
+    assert "曜日が暦と一致しません" in item["prompt_ja"] and "is a 水曜日, not" not in item["prompt_ja"]
+    assert "is a 水曜日, not （木）" in item["prompt_en"] and "曜日が暦と一致しません" not in item["prompt_en"]
+    assert "is a 水曜日, not （木） / 曜日が暦と一致しません" in item["prompt"]  # the recorded prompt keeps both halves
+    p2 = paths(samples_dir, "form2")  # an English half that itself lists values with " / " is split at the last one
+    memo = read_memo(p2["memo"]).replace("【その他】\n申請日：2026年11月2日（月）",
+                                         "【その他】\n申請日：2026年11月2日（月）\n申請日：2026年11月9日（月）")
+    r = run_pipeline(p2["form"], memo, tmp_path / "dup", mode="demo")
+    held = next(h for h in r.report.hitl_checklist if h.slot_id == "申請日")
+    assert "メモに同じ項目の異なる値があります" in held.prompt_ja and "a human must decide" not in held.prompt_ja
+    assert "more than once" in held.prompt_en and "メモに同じ項目" not in held.prompt_en
+    r1 = demo_runs("form1")  # a reason with no " / " (an English-only validator message) is shown in both languages
+    why = "変更 is not an allowed option (研究内容／研究経費)"
+    maps = [m.model_copy(update={"status": "needs_human_input", "filled_value": "", "suggested_value": "変更",
+                                 "errors": [why]}) if m.slot_id == "変更種別" else m for m in r1.mappings]
+    item = next(h for h in build_hitl_checklist(r1.scan, maps, r1.report) if h.slot_id == "変更種別")
+    assert f"({why})" in item.prompt_en and f"（{why}）" in item.prompt_ja
+    con02 = check(demo_runs("form1").report, "CON-02")
+    assert con02.description == "Formats (Japanese era dates, yen amounts, ID patterns) are valid"
+    js = (ROOT / "form_guard" / "static" / "app.js").read_text(encoding="utf-8")
+    assert '"Formats (Japanese era dates, yen amounts, ID patterns) are valid":' in js and '"Formats (和暦' not in js
+    for d in ("form1", "form2", "form3"):  # check descriptions and routing texts are English in the English UI
+        assert not [c.description for c in demo_runs(d).report.checks if _JAPANESE.search(c.description)], d
+    assert not [p["en"] for p in ROUTING_POLICY if _JAPANESE.search(p["en"] + p["why_en"])]
+
+
+FORM1_REASON_181 = ("共同研究先の試験設備が2026年12月から改修工事に入り、当初予定していた実機試験12回のうち6回が実施できなくなった。"
+                    "そこで不足分を数値シミュレーションで補うこととした。予算面では、試験装置の借用料が42万円減る一方、計算サーバ利用料"
+                    "として80万円が新たに必要になるため、差し引きで38万円の増額となる。増額分は共同研究先からの追加負担金で賄うことで合意済み。")
+
+
+def test_playtest_r1_o7_condensation_keeps_the_decision_that_answers_the_problem(demo_runs):
+    from form_guard.textnorm import protection
+
+    remedy = "そこで不足分を数値シミュレーションで補うこととした。"
+    assert protection(remedy) == 1 and protection("なお、詳細は後日報告することとした。") == 0
+    reason = ("共同研究先の試験設備が2026年12月から改修工事に入り、当初予定していた実機試験12回のうち6回が実施できなくなった。"
+              "計算サーバの利用は学内の共用計算機に限る。" + remedy + "なお、シミュレーションの妥当性は残る6回の実機試験結果と比較して"
+              "検証する。予算面では、試験装置の借用料が42万円減る一方、計算サーバ利用料として80万円が新たに必要になるため、差し引きで"
+              "38万円の増額となる。増額分は共同研究先からの追加負担金で賄うことで合意済み（直接経費総額に占める割合は約6％で、20％未満の"
+              "ため経費変更承認申請は不要）。")
+    c = condense_extractive(reason, 200)  # the remedy used to be the sentence deleted (the text jumped to the restriction)
+    assert c is not None and not c.unsafe and len(c.text) <= 200
+    assert remedy in c.text and "計算サーバの利用は学内の共用計算機に限る。" in c.text and "38万円の増額となる。" in c.text
+    held = condense_extractive("試験が実施できなくなった。そこで手順を変更することとした。", 13)
+    assert held is not None and held.unsafe and held.held == ["そこで手順を変更することとした。"]  # only for a human
+    r1 = demo_runs("form1")
+    m1 = next(x for x in r1.mappings if x.slot_id == "変更理由および予算影響")
+    assert m1.filled_value == FORM1_REASON_181 and len(m1.filled_value) == 181  # demo 1: the same 257 → 181 condensation
+    assert r1.report.overall_status == "PASS" and r1.report.passed_count == 21 and not r1.report.failed_count
+
+
+def test_playtest_t11_a_printed_advance_notice_rule_is_checked_across_the_two_dates(samples_dir, tmp_path, demo_runs, api):
+    from form_guard.constraints import advance_notice_rules
+
+    assert advance_notice_rules("1　本届出書は、変更予定日の30日前までに研究推進部研究協力課へ提出すること。") == [
+        {"target": "変更予定日", "days": 30, "action": "提出", "printed": "変更予定日の30日前までに研究推進部研究協力課へ提出"}]
+    assert advance_notice_rules("完了後30日以内に報告すること。") == []
+    from form_guard.mapper import advance_notice_warnings
+    from form_guard.models import FieldMapping
+
+    filled = FieldMapping(slot_id="提出日", status="filled", filled_value="令和8年12月1日（火）", validation_passed=True)
+
+    def warned(printed: str, memo: str) -> list[str]:
+        rules = advance_notice_rules(printed)
+        return advance_notice_warnings([_text_slot("提出日", fmt="wareki_date", advance_notice=rules)], [filled],
+                                       memo)[0].warnings
+
+    # the printed phrase is kept; the longest ending that is a memo label (or a field) names the other date
+    assert advance_notice_rules("本届出書は変更予定日の30日前までに提出すること。")[0]["target"] == "本届出書は変更予定日"
+    for printed in ("本届出書は変更予定日の30日前までに提出すること。", "必ず変更予定日の30日前までに提出する。"):
+        w = warned(printed, "・変更予定日（2026年12月15日（火））\n")
+        assert len(w) == 1 and "変更予定日 2026年12月15日（火） (memo L1) is only 14 day(s) after" in w[0], (printed, w)
+    assert warned("取りやめ日の7日前までに届け出ること。", "締め日：2026年12月3日（木）\n") == []  # 「め日」 is no label
+    for bad in ("30日前", [None], [{"target": "変更予定日", "days": "abc"}], [{"days": 30}]):  # a hand-written spec
+        assert advance_notice_warnings([_text_slot("提出日", fmt="wareki_date", advance_notice=bad)], [filled],
+                                       "変更予定日：2026年12月15日（火）\n")[0].warnings == [], bad
+    p = paths(samples_dir, "form1")
+    assert scan(p["form"]).slot("提出日").constraints["advance_notice"][0]["days"] == 30
+    m0 = next(x for x in demo_runs("form1").mappings if x.slot_id == "提出日")  # 2026-11-02 → 2026-12-15: 43 days
+    assert not [w for w in m0.warnings if w.startswith("advance notice")] and m0.status == "filled"
+    memo = read_memo(p["memo"]).replace("提出日：2026年11月2日（月）に", "提出日：2026年12月1日（火）に")
+    r = run_pipeline(p["form"], memo, tmp_path / "t11", mode="demo")
+    m = next(x for x in r.mappings if x.slot_id == "提出日")
+    warn = [w for w in m.warnings if w.startswith("advance notice")]
+    assert m.status == "filled" and m.filled_value == "令和8年12月1日（火）" and len(warn) == 1  # the memo's date is kept
+    assert "only 14 day(s) after" in warn[0] and "変更予定日の30日前までに提出" in warn[0] and "(memo L22)" in warn[0]
+    item = next(h for h in r.report.hitl_checklist if h.slot_id == "提出日")
+    assert "advance_notice" in item.flags and "まで14日しかありません" in item.prompt_ja and "14 day(s)" in item.prompt_en
+    assert "まで14日しかありません" not in item.prompt_en and r.report.overall_status == "PASS"  # the reviewer decides
+    run = api.post("/api/runs", json={"demo_id": "form1", "memo_text": memo, "mode": "demo"}).json()
+    fixed = api.post(f"/api/runs/{run['run_id']}/overrides", json={"values": {"提出日": "2026/11/2"}}).json()
+    mf = next(x for x in fixed["mappings"] if x["slot_id"] == "提出日")  # the reviewer's date is checked afresh
+    assert mf["status"] == "human_entered" and not [w for w in mf["warnings"] if w.startswith("advance notice")]
+
+
+def _era_template_docx(path: Path) -> None:
+    d = docx.Document()
+    d.add_paragraph("架空協会 会員情報変更届（テスト用の架空様式）")
+    t = d.add_table(rows=3, cols=2)
+    t.style = "Table Grid"
+    for r, (label, printed) in enumerate((("届出日", "令和　　年　　月　　日"), ("氏名", ""), ("生年月日", "　　年　　月　　日"))):
+        t.cell(r, 0).text = label
+        if printed:
+            t.cell(r, 1).text = printed
+    d.save(path)
+
+
+def test_playtest_t25_a_printed_era_date_template_cell_is_discovered_and_completed_in_place(tmp_path):
+    from form_guard.scanner import era_date_template
+
+    assert era_date_template("令和　　年　　月　　日") == (0, 11) and era_date_template(" 令和 年 月 日（　） ") == (1, 12)
+    for no in ("令和8年　月　日", "　　年　　月　　日", "令和年月日", "届出日"):
+        assert era_date_template(no) is None, no
+    form = tmp_path / "era.docx"
+    _era_template_docx(form)
+    d = discover_blank_cells(form)
+    c = next(x for x in d["candidates"] if x["slot_id"] == "届出日")  # was skipped as a non-empty cell
+    assert c["required_format"] == "wareki_date" and c["recommended"] and c["printed_template"] == "令和　　年　　月　　日"
+    assert [x["slot_id"] for x in d["candidates"]] == ["届出日", "氏名"]  # 「　　年　　月　　日」 names no era: not offered
+    spec = build_confirmed_slot_spec(d, recommended_ids(d), form)
+    r = run_pipeline(form, "届出日：2026年11月2日（月）\n氏名：見本 七郎\n", tmp_path / "filled", mode="demo", slot_spec=spec)
+    assert r.report.overall_status == "PASS" and not _failing(r.report)
+    t = docx.Document(str(r.filled_path)).tables[0]
+    assert t.cell(0, 1).text == "令和8年11月2日（月）" and t.cell(2, 1).text == "　　年　　月　　日"
+    assert [(p.kind, p.old_text) for p in r.write.patches if p.slot_id == "届出日"] == [("text", "令和　　年　　月　　日")]
+    assert infer_values_from_filled(r.scan, r.filled_path)["届出日"] == "令和8年11月2日（月）"
+    pending = run_pipeline(form, "氏名：見本 七郎\n", tmp_path / "pending", mode="demo", slot_spec=spec)
+    assert pending.report.overall_status == "NEEDS_HUMAN_INPUT" and not _failing(pending.report)
+    assert docx.Document(str(pending.filled_path)).tables[0].cell(0, 1).text == "令和　　年　　月　　日"
+    sc = scan(form, {"targets": [{"slot_id": "x", "table": 0, "row": 0, "col": 0}]})  # other printed text: still refused
+    assert not sc.slots and "not empty" in sc.warnings[0]
+    tampered = tmp_path / "tampered.docx"  # text next to the date changed as well: caught
+    rewrite_entry(r.filled_path, tampered, "word/document.xml",
+                  lambda b: b.replace("令和8年11月2日（月）".encode(), "令和8年11月2日（月）提出済".encode()))
+    assert "TEXT-02" in _failing(verify(r.scan, tampered, r.mappings, "届出日：2026年11月2日（月）\n氏名：見本 七郎\n"))
+    wb = openpyxl.Workbook()  # Excel: the cell becomes one inline string; another cell with the same printed text stays
+    ws = wb.active
+    ws["A1"], ws["A2"], ws["B2"], ws["A3"] = "架空協会 届出書（テスト用の架空様式）", "届出日", "令和　　年　　月　　日", "氏名"
+    ws["A4"], ws["B4"] = "変更日", "令和　　年　　月　　日"
+    ws.column_dimensions["B"].width = 34
+    xl = tmp_path / "era.xlsx"
+    wb.save(xl)
+    dx = discover_blank_cells(xl)
+    cells = {x["cell"]: x for x in dx["candidates"]}
+    assert cells["B2"]["printed_template"] == "令和　　年　　月　　日" and cells["B4"]["required_format"] == "wareki_date"
+    spec_x = build_confirmed_slot_spec(dx, [cells[ref]["candidate_id"] for ref in ("B2", "B3", "B4")], xl)
+    rx = run_pipeline(xl, "届出日：2026年11月2日（月）\n氏名：見本 七郎\n", tmp_path / "xl", mode="demo", slot_spec=spec_x)
+    ws2 = openpyxl.load_workbook(rx.filled_path).active
+    assert ws2["B2"].value == "令和8年11月2日（月）" and ws2["B3"].value == "見本 七郎" and ws2["B4"].value == "令和　　年　　月　　日"
+    assert rx.report.overall_status == "NEEDS_HUMAN_INPUT" and not _failing(rx.report)  # 変更日 awaits the reviewer
+    assert [p.kind for p in rx.write.patches if p.slot_id == "届出日"] == ["fill_template_cell"]

@@ -42,7 +42,7 @@ from typing import Any, Iterable, Optional, Union
 
 from lxml import etree
 
-from .constraints import DATE_CODES, validate_value
+from .constraints import ADVANCE_NOTICE_PREFIX, DATE_CODES, validate_value
 from .grounding import NUMBER_DATE_CODES, ground_value
 from .models import AuditCheckItem, EntryHash, FieldMapping, HITLItem, VerificationReport
 from .ooxml import (
@@ -60,7 +60,7 @@ from .ooxml import (
     iter_start_tags,
     xmlns_declarations,
 )
-from .scanner import ScanResult, find_markers, has_marker
+from .scanner import ScanResult, era_date_template, find_markers, has_marker
 from .textnorm import quantities, value_quantities
 from .ziputil import ZipSurgeryError, check_archive
 
@@ -80,19 +80,39 @@ def _check(check_id, category, description, passed, details="", severity="major"
 # ------------------------------------------------------------------- skeletons
 
 
-def slot_node_keys(idx: PartIndex) -> set[tuple[int, int]]:
-    """``(container index, position within the container)`` of every text node that holds marker characters.
+def template_spans(scan: ScanResult, part: str) -> dict[int, tuple[int, int, str]]:
+    """Word containers designated as a printed 「令和　　年　　月　　日」: container index -> (start, end, slot id) of the
+    skeleton in the blank form's text (those characters are slot text, like a marker's)."""
+    idx = scan.parts.get(part)
+    out: dict[int, tuple[int, int, str]] = {}
+    if idx is None or scan.file_type != "docx":
+        return out
+    for s in scan.slots:
+        for o in s.occurrences:
+            if o.part_name == part and o.marker_kind == "date_template" and 0 <= o.container_index < len(idx.containers):
+                span = era_date_template(idx.container_text(idx.containers[o.container_index]))
+                if span is not None:
+                    out[o.container_index] = (span[0], span[1], s.slot_id)
+    return out
+
+
+def slot_node_keys(idx: PartIndex, templates: Optional[dict[int, tuple[int, int, str]]] = None) -> set[tuple[int, int]]:
+    """``(container index, position within the container)`` of every text node that holds marker characters (or the
+    characters of a designated 「令和　　年　　月　　日」 skeleton, ``templates``).
 
     Computed on the *original* part; the writer never adds or removes text nodes inside a marker
     container, so the same keys address the corresponding nodes of the filled part.
     """
     keys: set[tuple[int, int]] = set()
+    templates = templates or {}
     for c in idx.containers:
-        hits = find_markers(idx.container_text(c))
+        hits = [(h.start, h.end) for h in find_markers(idx.container_text(c))]
+        if c.idx in templates:
+            hits.append(templates[c.idx][:2])
         if not hits:
             continue
         for k, (_ni, ns, ne) in enumerate(idx.node_layout(c)):
-            if any(ns < h.end and ne > h.start for h in hits):
+            if any(ns < he and ne > hs for hs, he in hits):
                 keys.add((c.idx, k))
     return keys
 
@@ -697,14 +717,16 @@ def verify(
     slot_by_container: dict[str, dict[int, str]] = {}
     for s in scan.slots:
         for o in s.occurrences:
-            if o.marker_kind != "empty_cell":
+            if o.marker_kind not in ("empty_cell", "date_template"):
                 continue
             if scan.file_type == "docx":
-                designated.setdefault(o.part_name, set()).add(o.container_index)
-                slot_by_container.setdefault(o.part_name, {})[o.container_index] = s.slot_id
-            elif o.cell_ref:
+                if o.marker_kind == "empty_cell":  # a Word 「令和　年　月　日」 is checked like a marker (template_spans)
+                    designated.setdefault(o.part_name, set()).add(o.container_index)
+                    slot_by_container.setdefault(o.part_name, {})[o.container_index] = s.slot_id
+            elif o.cell_ref:  # an Excel 「令和　年　月　日」 cell is rewritten like a designated empty cell
                 sheet_cells.setdefault(o.part_name, {})[o.cell_ref] = s.slot_id
-    slot_keys = {part: slot_node_keys(scan.parts[part]) for part in targets if part in scan.parts}
+    templates = {part: template_spans(scan, part) for part in targets}
+    slot_keys = {part: slot_node_keys(scan.parts[part], templates[part]) for part in targets if part in scan.parts}
     cell_struct: list[str] = []   # designated cells: structure (XML-03)
     cell_format: list[str] = []   # Word designated cells: formatting (LAYOUT-03)
     sheet_audits: dict[str, SheetCellAudit] = {}
@@ -770,7 +792,7 @@ def verify(
         _xlsx_layout_checks(orig_blob, filled_blob, checks, stats, scan, sheet_audits)
 
     # --------------------------------------------------------------- TEXT
-    _text_checks(scan, filled_parts, values, pending, designated, checks, stats, slot_keys, sheet_audits)
+    _text_checks(scan, filled_parts, values, pending, designated, checks, stats, slot_keys, sheet_audits, templates)
 
     # ------------------------------------------------------- GRD / CON / APP
     _content_checks(scan, mappings, values, memo_text, checks, stats)
@@ -790,6 +812,8 @@ def expected_sheet_values(scan: ScanResult, prepared: dict[str, str]) -> list[tu
                 continue
             if o.marker_kind == "empty_cell":
                 exp: Optional[str] = prepared.get(s.slot_id)
+            elif o.marker_kind == "date_template":  # the date, or the printed 「令和　年　月　日」 while it awaits input
+                exp = prepared.get(s.slot_id, o.marker)
             else:
                 idx = scan.parts.get(o.part_name)
                 if idx is None or not 0 <= o.container_index < len(idx.containers):
@@ -932,10 +956,12 @@ def _expected_text(text: str, values: dict[str, str]) -> str:
     return "".join(out)
 
 
-def _text_checks(scan, filled_parts, values, pending, designated, checks, stats, slot_keys=None, sheet_audits=None):
+def _text_checks(scan, filled_parts, values, pending, designated, checks, stats, slot_keys=None, sheet_audits=None,
+                 templates=None):
     from .writer import prepare_value
 
     slot_keys = slot_keys or {}
+    templates = templates or {}
     prepared = {k: prepare_value(v, scan.file_type) for k, v in values.items()}
     boiler_ok, slot_ok = True, True
     boiler_bad, slot_bad = [], []
@@ -958,6 +984,7 @@ def _text_checks(scan, filled_parts, values, pending, designated, checks, stats,
             continue
         dset = designated.get(part, set())
         keys = slot_keys.get(part, set())
+        tmpl = templates.get(part, {})
         slot_by_container = {o.container_index: s.slot_id for s in scan.slots for o in s.occurrences
                              if o.part_name == part and o.marker_kind == "empty_cell"}
         for co, cf in zip(oidx.containers, fidx.containers):
@@ -975,6 +1002,17 @@ def _text_checks(scan, filled_parts, values, pending, designated, checks, stats,
             no, nf = oidx.container_nodes(co), fidx.container_nodes(cf)
             fixed_o = [n.text for k, n in enumerate(no) if (co.idx, k) not in keys]
             fixed_f = [n.text for k, n in enumerate(nf) if (co.idx, k) not in keys]
+            if co.idx in tmpl:  # a printed 「令和　　年　　月　　日」: the skeleton becomes the date, the rest stays
+                ts, te, sid = tmpl[co.idx]
+                n_slot += 1
+                exp = to[:ts] + prepared[sid] + to[te:] if sid in prepared else to
+                if tf != exp:
+                    slot_ok = False
+                    slot_bad.append(f"{sid}: expected «{exp}» got «{tf}»")
+                if len(no) != len(nf) or fixed_o != fixed_f:
+                    boiler_ok = False
+                    boiler_bad.append(f"«{to[:40]}»: printed text next to the date template changed run by run")
+                continue
             if has_marker(to):
                 n_slot += 1
                 exp = _expected_text(to, prepared)
@@ -1062,7 +1100,7 @@ def _content_checks(scan, mappings, values, memo, checks, stats):
                          unsupported=unsupported, not_verified=unverified))
     checks.append(_check("CON-01", "constraints", "Character limits printed on the form are respected", not limits,
                          "all within limits" if not limits else "; ".join(limits), "major"))
-    checks.append(_check("CON-02", "constraints", "Formats (和暦 dates, yen amounts, ID patterns) are valid", not formats,
+    checks.append(_check("CON-02", "constraints", "Formats (Japanese era dates, yen amounts, ID patterns) are valid", not formats,
                          "all formats valid" if not formats else "; ".join(formats), "major"))
     checks.append(_check("CON-03", "constraints", "Options, caps and rounding rules are respected", not options,
                          "all options / caps / rounding valid" if not options else "; ".join(options), "major"))
@@ -1150,6 +1188,7 @@ _FLAG_TEXT = {
     "unsafe_condensation": "要約で条件が欠ける / condensing would drop a condition — review",
     "weekday": "曜日を付記 / weekday added",
     "recovered_unverified": "出所不明・根拠未検証 / recovered from the file — grounding not verified",
+    "advance_notice": "提出期限の注意事項を確認 / printed deadline not met by the dates — check them",
 }
 
 
@@ -1191,20 +1230,37 @@ def removed_text_notes(m: FieldMapping) -> tuple[str, str]:
             f" (deleted to meet the character limit: {_quoted(pieces)} — confirm no essential condition or measure was lost)")
 
 
+def advance_notice_notes(m: Optional[FieldMapping]) -> tuple[str, str, str]:
+    """(recorded prompt, ja, en) notes for a printed deadline that two dates do not meet (mapper.advance_notice_warnings)."""
+    notes = [w.removeprefix(ADVANCE_NOTICE_PREFIX).strip() for w in (m.warnings if m is not None else [])
+             if w.startswith(ADVANCE_NOTICE_PREFIX)]
+    pairs = [(en, ja) if sep else (w, w) for w in notes for en, sep, ja in [w.rpartition(" / ")]]
+    return ("".join(f"（⚠ {ja} / {en}）" for en, ja in pairs), "".join(f"（⚠ {ja}）" for _en, ja in pairs),
+            "".join(f" (⚠ {en})" for en, _ja in pairs))
+
+
 def build_hitl_checklist(scan: ScanResult, mappings: list[FieldMapping], report: VerificationReport) -> list[HITLItem]:
     items: list[HITLItem] = []
     by_id = {m.slot_id: m for m in mappings}
     for s in scan.slots:
         m = by_id.get(s.slot_id)
+        adv, adv_ja, adv_en = advance_notice_notes(m)
         if m is None or not m.is_written:
             if m is not None and m.suggested_value:
                 reason = m.errors[0] if m.errors else "validation failed"
+                # validator messages are "English / 日本語" (the Japanese half uses ／, an English one may list values
+                # with " / "): each language shows its own half, and the «value»: it is about stays in front of both
+                r_en, sep, r_ja = reason.rpartition(" / ")
+                head = re.match(r"«[^»]*»: ", reason)
+                if sep and head and not r_ja.startswith(head.group(0)):
+                    r_ja = head.group(0) + r_ja
                 prompt = (f"「{s.label}」は自動検証で確定できなかったため未記入です（{reason}）。候補を確認し、正しい値を"
                           f"入力してください / Could not be verified automatically — review the suggestion and enter "
                           f"the value yourself.")
-                ja = f"「{s.label}」は自動検証で確定できなかったため未記入です（{reason}）。候補を確認し、正しい値を入力してください"
-                en = (f"«{s.label}» was left empty: it could not be verified automatically ({reason}). Review the "
-                      f"suggestion and enter the value yourself.")
+                ja = (f"「{s.label}」は自動検証で確定できなかったため未記入です（{r_ja if sep else reason}）。候補を確認し、"
+                      f"正しい値を入力してください")
+                en = (f"«{s.label}» was left empty: it could not be verified automatically ({r_en if sep else reason}). "
+                      f"Review the suggestion and enter the value yourself.")
             else:
                 prompt = (f"「{s.label}」はメモに根拠が無いため未記入です。正しい値を入力してください / "
                           f"No evidence in the memo — please enter this value yourself.")
@@ -1214,10 +1270,12 @@ def build_hitl_checklist(scan: ScanResult, mappings: list[FieldMapping], report:
             flags = ["needs_input"] + (["has_suggestion"] if m is not None and m.suggested_value else [])
             if m is not None and "unsafe_condensation" in m.normalizations:
                 flags.append("unsafe_condensation")
+            if adv:
+                flags.append("advance_notice")
             items.append(HITLItem(
                 item_id=f"slot:{s.slot_id}", kind="pending_input", slot_id=s.slot_id, label=s.label,
-                prompt=prompt + (removed_text_note(m) if m is not None else ""), prompt_ja=ja + note_ja,
-                prompt_en=en + note_en,
+                prompt=prompt + (removed_text_note(m) if m is not None else "") + adv, prompt_ja=ja + note_ja + adv_ja,
+                prompt_en=en + note_en + adv_en,
                 value=(m.suggested_value if m else ""), importance=s.importance, flags=flags, required=True,
             ))
             continue
@@ -1228,6 +1286,8 @@ def build_hitl_checklist(scan: ScanResult, mappings: list[FieldMapping], report:
             flags.append("year_inferred")
         if m.confidence and m.confidence < 0.7:
             flags.append("low_conf")
+        if adv:
+            flags.append("advance_notice")
         lr = m.source_line_range
         where = f"L{lr[0]}" + (f"–L{lr[1]}" if lr and lr[1] != lr[0] else "") if lr else ""
         if m.status == "filled":
@@ -1244,9 +1304,9 @@ def build_hitl_checklist(scan: ScanResult, mappings: list[FieldMapping], report:
             prompt = f"「{s.label}」＝「{m.filled_value}」（担当者が入力）を確認 / Confirm the value you entered."
             ja = f"「{s.label}」＝「{m.filled_value}」（担当者が入力）を確認"
             en = f"Confirm «{s.label}» = «{m.filled_value}» (entered by the reviewer)."
-        prompt += removed_text_note(m)
+        prompt += removed_text_note(m) + adv
         note_ja, note_en = removed_text_notes(m)
-        ja, en = ja + note_ja, en + note_en
+        ja, en = ja + note_ja + adv_ja, en + note_en + adv_en
         items.append(HITLItem(
             item_id=f"slot:{s.slot_id}", kind="field", slot_id=s.slot_id, label=s.label, value=m.filled_value,
             source_quote=m.source_quote, source_line_range=m.source_line_range, importance=s.importance,
@@ -1286,13 +1346,14 @@ def infer_values_from_filled(scan: ScanResult, filled_path: Union[str, Path]) ->
         except (UnsafeXMLError, UnsupportedXMLError):
             continue
         if scan.file_type == "xlsx":
-            cells = {o.cell_ref: s.slot_id for s in scan.slots for o in s.occurrences
-                     if o.part_name == part and o.marker_kind == "empty_cell" and o.cell_ref}
-            for ref, sid in cells.items():  # designated worksheet cells: the inline string written into the cell
+            cells = {o.cell_ref: (s.slot_id, o.marker if o.marker_kind == "date_template" else "")
+                     for s in scan.slots for o in s.occurrences
+                     if o.part_name == part and o.marker_kind in ("empty_cell", "date_template") and o.cell_ref}
+            for ref, (sid, printed) in cells.items():  # designated worksheet cells: the inline string written into it
                 fc = fidx.cells.get(ref)
                 if fc is not None and fc.is_container is not None:
                     v = fidx.container_text(fidx.containers[fc.is_container])
-                    if v:
+                    if v and v != printed:  # a 「令和　年　月　日」 still printed as it was holds no value
                         values.setdefault(sid, v)
             if cells:  # match the marker containers with the designated cells put back as in the blank form
                 fidx = index_part(part, _revert_sheet_cells(oidx, fidx, set(cells)), oidx.profile)
@@ -1300,10 +1361,17 @@ def infer_values_from_filled(scan: ScanResult, filled_path: Union[str, Path]) ->
             continue
         empty_targets = {o.container_index: s.slot_id for s in scan.slots for o in s.occurrences
                          if o.part_name == part and o.marker_kind == "empty_cell" and scan.file_type == "docx"}
+        tmpl = template_spans(scan, part)
         for co, cf in zip(oidx.containers, fidx.containers):
             to, tf = oidx.container_text(co), fidx.container_text(cf)
             if co.idx in empty_targets and tf:
                 values.setdefault(empty_targets[co.idx], tf)
+                continue
+            if co.idx in tmpl:  # the text that took the place of the printed 「令和　　年　　月　　日」
+                ts, te, sid = tmpl[co.idx]
+                m = re.fullmatch(re.escape(to[:ts]) + "(.*?)" + re.escape(to[te:]), tf, re.S)
+                if m and m.group(1) and m.group(1) != to[ts:te]:
+                    values.setdefault(sid, m.group(1))
                 continue
             hits = find_markers(to)
             if not hits:

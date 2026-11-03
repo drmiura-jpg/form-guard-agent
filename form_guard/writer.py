@@ -42,7 +42,7 @@ from .ooxml import (
     sanitize_xml_text,
     split_cell_ref,
 )
-from .scanner import ScanResult, find_markers
+from .scanner import ScanResult, era_date_template, find_markers
 from .ziputil import read_raw_zip, rewrite_zip
 
 
@@ -77,32 +77,45 @@ _RPR_DROP = re.compile(rb"<(\w+:)?(ins|del|moveFrom|moveTo)\b[^>]*/>|<(\w+:)?rPr
 
 def patch_part(idx: PartIndex, values: dict[str, str], file_type: str,
                empty_cell_targets: dict[int, str] | None = None,
-               sheet_cell_targets: dict[str, str] | None = None) -> tuple[bytes, list[PatchRecord]]:
+               sheet_cell_targets: dict[str, str] | None = None,
+               template_targets: dict[int, str] | None = None,
+               sheet_template_cells: set[str] | frozenset[str] = frozenset()) -> tuple[bytes, list[PatchRecord]]:
     """Return (new_part_bytes, patch_records) for one indexed OOXML part.
 
     ``empty_cell_targets``: Word paragraph container index -> slot id; ``sheet_cell_targets``: worksheet cell
-    reference ("C5") -> slot id.
+    reference ("C5") -> slot id. ``template_targets``: Word paragraph container index -> slot id of a cell printed as
+    「令和　　年　　月　　日」 — the skeleton's characters are replaced like a marker; ``sheet_template_cells``: the
+    worksheet cells of ``sheet_cell_targets`` that hold such a skeleton (rewritten as one inline string).
     """
     data = idx.data
+    templates = template_targets or {}
     node_edits: dict[int, list[tuple[int, int, str, str]]] = {}
     for c in idx.containers:
         text = idx.container_text(c)
-        if "{{" not in text and "記入欄" not in text:
+        hits: list[tuple[int, int, str, str]] = []
+        if "{{" in text or "記入欄" in text:
+            hits = [(h.start, h.end, h.slot_id, h.text) for h in find_markers(text)]
+        if c.idx in templates:
+            span = era_date_template(text)
+            if span is None:
+                raise UnsupportedXMLError(f"{idx.part_name}: the printed date template of {templates[c.idx]!r} is gone")
+            hits.append((span[0], span[1], templates[c.idx], text[span[0] : span[1]]))
+        if not hits:
             continue
         layout = idx.node_layout(c)
-        for hit in find_markers(text):
-            if hit.slot_id not in values:
+        for start, end, slot_id, marker in hits:
+            if slot_id not in values:
                 continue
-            value = values[hit.slot_id]
-            involved = [(ni, ns, ne) for ni, ns, ne in layout if ns < hit.end and ne > hit.start]
+            value = values[slot_id]
+            involved = [(ni, ns, ne) for ni, ns, ne in layout if ns < end and ne > start]
             if not involved:
-                raise UnsupportedXMLError(f"marker {hit.text} not backed by text nodes")
+                raise UnsupportedXMLError(f"marker {marker} not backed by text nodes")
             for k, (ni, ns, ne) in enumerate(involved):
-                ls, le = max(hit.start, ns) - ns, min(hit.end, ne) - ns
+                ls, le = max(start, ns) - ns, min(end, ne) - ns
                 rep = value if k == 0 else ""
                 if ls == le and not rep:
                     continue
-                node_edits.setdefault(ni, []).append((ls, le, rep, hit.slot_id))
+                node_edits.setdefault(ni, []).append((ls, le, rep, slot_id))
 
     patches: list[_BytePatch] = []
     for ni, edits in node_edits.items():
@@ -133,7 +146,7 @@ def patch_part(idx: PartIndex, values: dict[str, str], file_type: str,
             continue
         patches.append(_insert_run_patch(idx, idx.containers[cidx], slot_id, values[slot_id]))
     if sheet_cell_targets:
-        patches += _sheet_cell_patches(idx, sheet_cell_targets, values)
+        patches += _sheet_cell_patches(idx, sheet_cell_targets, values, sheet_template_cells)
 
     patches.sort(key=lambda p: p.start)
     for a, b in zip(patches, patches[1:]):
@@ -197,7 +210,8 @@ def _fill_existing_cell(data: bytes, cell: SheetCell, value: str) -> bytes:
     return body + b">" + _inline_string(_prefix(cell.qname), value) + b"</" + cell.qname.encode() + b">"
 
 
-def _sheet_cell_patches(idx: PartIndex, targets: dict[str, str], values: dict[str, str]) -> list[_BytePatch]:
+def _sheet_cell_patches(idx: PartIndex, targets: dict[str, str], values: dict[str, str],
+                        templates: set[str] | frozenset[str] = frozenset()) -> list[_BytePatch]:
     if idx.profile != "sheet":
         raise UnsupportedXMLError(f"{idx.part_name}: cell coordinates need a worksheet part")
     if idx.implicit_refs:
@@ -230,10 +244,12 @@ def _sheet_cell_patches(idx: PartIndex, targets: dict[str, str], values: dict[st
             if cell is None:
                 missing.append((col, ref, slot_id, value))
                 continue
-            if cell.children:
+            template = ref in templates and cell.children in (["v"], ["is"]) and cell.attrs.get("t") in ("s", "inlineStr")
+            if cell.children and not template:
                 raise UnsupportedXMLError(f"{idx.part_name} {ref}: cell is not empty — refusing to overwrite it")
-            out.append(patch(cell.span[0], cell.span[1], _fill_existing_cell(data, cell, value), "fill_cell",
-                             [(slot_id, value)]))
+            # a printed 「令和　　年　　月　　日」 cell becomes the inline-string date; its shared string stays in the table
+            out.append(patch(cell.span[0], cell.span[1], _fill_existing_cell(data, cell, value),
+                             "fill_template_cell" if template else "fill_cell", [(slot_id, value)]))
         if not missing:
             continue
         row = idx.rows.get(rownum)
@@ -282,12 +298,17 @@ def fill_form(scan: ScanResult, values: dict[str, str], out_path: Union[str, Pat
     for part in scan.target_parts:
         idx = scan.parts[part]
         designated = [(o, s.slot_id) for s in scan.slots for o in s.occurrences
-                      if o.part_name == part and o.marker_kind == "empty_cell"]
+                      if o.part_name == part and o.marker_kind in ("empty_cell", "date_template")]
+        templates = {o.container_index: sid for o, sid in designated if o.marker_kind == "date_template"}
         if scan.file_type == "docx":
-            empty_targets, cell_targets = {o.container_index: sid for o, sid in designated}, None
+            empty_targets = {o.container_index: sid for o, sid in designated if o.marker_kind == "empty_cell"}
+            cell_targets, sheet_templates = None, set()
         else:
-            empty_targets, cell_targets = None, {o.cell_ref: sid for o, sid in designated if o.cell_ref}
-        new_bytes, recs = patch_part(idx, prepared, scan.file_type, empty_targets, cell_targets)
+            empty_targets, templates = None, {}
+            cell_targets = {o.cell_ref: sid for o, sid in designated if o.cell_ref}
+            sheet_templates = {o.cell_ref for o, _ in designated if o.cell_ref and o.marker_kind == "date_template"}
+        new_bytes, recs = patch_part(idx, prepared, scan.file_type, empty_targets, cell_targets, templates,
+                                     sheet_templates)
         if recs:
             etree.fromstring(new_bytes, etree.XMLParser(resolve_entities=False, no_network=True))
             replacements[part] = new_bytes
