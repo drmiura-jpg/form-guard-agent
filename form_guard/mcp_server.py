@@ -46,6 +46,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Iterable, Optional
 
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    __package__ = "form_guard"
+
 from . import __version__
 
 PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")

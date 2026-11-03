@@ -5082,5 +5082,15 @@ def test_p4_r1_audit_fixes_zero_amounts_negated_quotes_checkbox_locks_and_expect
     with pytest.raises(ValueError, match="SHA-256"):
         discover_blank_cells(p4, mode="demo", expected_sha256="0" * 64)
 
+    # /test L2 & L3 hole-plug: direct script execution of cli.py and mcp_server.py (--help & invalid flag)
+    for script_rel in ("form_guard/cli.py", "form_guard/mcp_server.py"):
+        p_help = subprocess.run([sys.executable, "-X", "utf8", str(ROOT / script_rel), "--help"],
+                                capture_output=True, text=True, encoding="utf-8", timeout=20)
+        assert p_help.returncode == 0 and "usage:" in p_help.stdout.lower()
+        p_bad = subprocess.run([sys.executable, "-X", "utf8", str(ROOT / script_rel), "--__nonexistent_flag_testplay__"],
+                               capture_output=True, text=True, encoding="utf-8", timeout=20)
+        assert p_bad.returncode != 0 and "Traceback (most recent call last):" not in (p_bad.stdout + p_bad.stderr)
+
+
 
 

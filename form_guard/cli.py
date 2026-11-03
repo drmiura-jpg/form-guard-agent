@@ -23,6 +23,10 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    __package__ = "form_guard"
+
 from . import DEFAULT_MODEL, __version__
 
 MODEL_TIER_CHOICES = ["auto", "opus", "sonnet", "haiku"]
