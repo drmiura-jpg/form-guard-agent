@@ -28,7 +28,7 @@ cells (applicant vs office-only) and a ``discovery_id``. ``POST /api/runs/from-d
 byte-identical to the one discovery looked at. The discovery stays on the server; the
 client only names candidate ids.
 
-``GET /api/demos`` lists all five fictional demos (``unmarked: true`` for form4 / form5).
+``GET /api/demos`` lists all six fictional demos (``unmarked: true`` for form4 / form5 / form6).
 ``POST /api/run-demo`` runs one: a marked demo fills its designated fields; an unmarked demo
 runs blank-cell discovery and fills the recommended applicant cells as an auto-preview — that
 draft can never be approved; the reviewer confirms the cells (``confirmed_targets``) to get a
@@ -137,7 +137,7 @@ class ImportRequest(BaseModel):
 
 
 class RunDemoRequest(BaseModel):
-    """POST /api/run-demo: any of the five demos. For form4 / form5 without ``confirmed_targets`` the server runs
+    """POST /api/run-demo: any of the six demos. For form4 / form5 / form6 without ``confirmed_targets`` the server runs
     discovery and fills the recommended applicant cells as an auto-preview that can never be approved."""
 
     model_config = ConfigDict(extra="forbid")
@@ -598,7 +598,7 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
     @app.post("/api/discover")
     def discover(file: Optional[UploadFile] = File(None), mode: str = Form("auto"), model_tier: Optional[str] = Form(None),
                  demo_id: Optional[str] = Form(None)):
-        """Stages 1-3 of blank-cell discovery for an unmarked form (an upload, or demo_id form4 / form5); nothing is
+        """Stages 1-3 of blank-cell discovery for an unmarked form (an upload, or demo_id form4 / form5 / form6); nothing is
         filled until a reviewer confirms."""
         tier = _check_tier(model_tier)
         if file is None or not file.filename:
@@ -640,7 +640,7 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
 
     @app.post("/api/run-demo")
     def run_any_demo(req: RunDemoRequest):
-        """One click for any of the five demos. Marked (form1–3): fill the designated fields. Unmarked (form4 / form5):
+        """One click for any of the six demos. Marked (form1–3): fill the designated fields. Unmarked (form4 / form5 / form6):
         discovery, then either the reviewer's ``confirmed_targets`` or — without them — an auto-preview of the
         recommended applicant cells that can never be approved."""
         tier = _check_tier(req.model_tier)

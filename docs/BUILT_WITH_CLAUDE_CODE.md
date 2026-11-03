@@ -32,6 +32,13 @@ A typical Claude Code session with these assets:
   Throughout, the `PreToolUse` hook keeps the blank templates and the repository's hygiene intact.
 - **4. Human sign-off:** A named human reviewer signs off in the web app (`python -m form_guard.cli --serve`). MCP provides no
   approval tool; final approval is performed by the reviewer in the web app (which verifies the checklist, `revision` and `filled_sha256`).
+- **5. Surfacing unknowns instead of guessing (`needs_human_input` + role separation):** In real-world form preparation,
+  the hardest failures come from implicit assumptions a user forgets to write in the memo (*unknown knowns*) and rule
+  edge cases they did not notice (*unknown unknowns*, such as a 30-day prior-notice rule or a checkbox option that
+  requires an entry date). Rather than letting a single prompt guess missing facts (for example, fabricating a 13-digit
+  corporate number), Form-Guard separates blind extraction (`memo-extractor`), rule-aware mapping (`field-mapper`),
+  deterministic + adversarial auditing (`structure-auditor`, `form-auditor`), and human confirmation: any ungrounded or
+  rule-blocked item is surfaced as `needs_human_input` so the human supplies the domain fact before approval.
 
 ## 2. Multi-model routing inside the application
 
@@ -220,6 +227,8 @@ Web 画面の「Claude Code 連携 · Architecture」タブ（`GET /api/claude-s
 対象と `scripts/hook_guard.py` に実装された検査項目、読み取り禁止の権限、MCP サーバーの登録とツール）、連携の流れを、この実行の欄ごとのモデル割り当て・ルーティング方針・
 第3節の計測値と並べて表示します。
 
+また、実務の書類作成で最も差し戻しが起きやすいのは、作成者が「当たり前すぎてメモに書き忘れた前提（未知の既知）」や「自分でも気づいていなかった規定上の盲点（未知の未知：30日前届出規定や、選択時に着手日記入が必須になるチェックボックスなど）」を、従来の生成AIが推測で勝手に埋めてしまう（例：13桁法人番号を架空の数字で作ってしまう）場面です。Form-Guard Agent は、欄を見る前の原文抽出（`memo-extractor`）、印刷ルールに沿った対応付け（`field-mapper`）、決定論＋敵対的監査（`structure-auditor`・`form-auditor`）、そして人間による最終確認へと役割を分け、根拠が足りない欄や規定に抵触する欄を推測せず `needs_human_input` として人間に聞き返す設計をとっています。
+
 ### 2. アプリ内のモデルの使い分け
 
 ライブモードで `--model-tier auto`（既定）のとき、作業ごとにモデルを選びます。
@@ -257,7 +266,7 @@ Haiku・Sonnet の下書きが根拠確認や印刷されたルールで却下�
 計測値です。`python docs/measure_workflow.py` で再現できます（表は英語版と同じ）。
 
 Word/Excel の 5 つの様式（form1〜form5、固定PDFのデモ6はこの表の対象外）で、Form-Guard は 41 の指定欄に 40 件（848 文字）を記入し、XML タグ 2,119 個・定型文 171 か所・結合セル 124・
-罫線定義 650 を 1 様式あたり 0.4 秒未満（約 0.1〜0.25 秒、時間は PC の負荷で変わりますが数えた列は変わりません）で照合しました。
+罫線定義 650 を 1 様式あたり 0.4 秒未満（表の計測では 120〜246 ms・Web 計測タイル実測では 119〜379 ms、時間は PC の負荷で変わりますが数えた列は変わりません）で照合しました。
 人に残るのは、各値を原文と並べて確認する計 51 項目の最終確認と、メモに無い事実（様式 2 の法人番号）の入力だけです。
 Form-Guard はその欄を推測で埋めません。同じ数値は Web 画面の Claude Code タブでもその場で計測して表示します。
 

@@ -44,7 +44,7 @@ left-hand columns are counted from the files, **not** a timed study of a person)
 | form4 `form4_unmarked_blank.docx` | 7 (locate 11 empty cells, decide office vs applicant) | 113 | 503 XML tags · 38 printed text blocks · 24 merged cells/ranges · 10 border definitions · 18 package parts | 120 ms | 21/21 (PASS) | 9 checklist items |
 | form5 `form5_unmarked_blank.xlsx` | 5 (locate 6 empty cells, decide office vs applicant) | 52 | 282 XML tags · 30 printed text blocks · 34 merged cells/ranges · 269 border definitions · 9 package parts | 154 ms | 21/21 (PASS) | 7 checklist items |
 
-- Across the 5 built-in Word/Excel forms (form1–form5; the fixed-PDF demo 6 is not in this table, 41 designated fields in total), Form-Guard filled 40 fields (848 characters written), leaving 1 unstated field for human input, and verified 2,119 XML tags, 171 printed text blocks, 124 merged cells/ranges and 650 border definitions in under 0.4 s per form (about 0.1–0.25 s in the table above; wall-clock varies with PC load).
+- Across the 5 built-in Word/Excel forms (form1–form5; the fixed-PDF demo 6 is not in this table, 41 designated fields in total), Form-Guard filled 40 fields (848 characters written), leaving 1 unstated field for human input, and verified 2,119 XML tags, 171 printed text blocks, 124 merged cells/ranges and 650 border definitions in under 0.4 s per form (120–246 ms in the table above; 119–379 ms in the web suite measurement; wall-clock varies with PC load).
 - What is left for the person is the 51-item source-linked sign-off checklist and 1 unstated fact — `法人番号` in form2 — which stays empty for the human instead of being hallucinated.
 
 **Post-hackathon continued use & deployment roadmap**
@@ -554,7 +554,7 @@ License: MIT (see [LICENSE](LICENSE)).
 **計測による定量的な裏付け**（`python docs/measure_workflow.py`、オフラインエンジン、架空のサンプル様式。様式ごとの表は
 英語版を参照。手作業の列はファイルから数えた作業量で、人の作業時間を計ったものではありません）：Word/Excel の 5 つの付属様式（form1〜form5、固定PDFのデモ6はこの表の対象外）で、
 Form-Guard は 41 の指定欄に 40 件（848 文字）を記入し、XML タグ 2,119 個・定型文 171 か所・結合セル／範囲 124・罫線定義 650 を
-1 様式あたり 0.4 秒未満（表では約 0.1〜0.25 秒・PC の負荷により変動）で照合しました。人に残るのは、各値を原文と並べて確認する計 51 項目の最終確認と、メモに無い事実
+1 様式あたり 0.4 秒未満（英語版の表では 120〜246 ms・Web 計測タイル実測では 119〜379 ms、PC の負荷により変動）で照合しました。人に残るのは、各値を原文と並べて確認する計 51 項目の最終確認と、メモに無い事実
 1 件（様式2の法人番号）の入力だけです。Form-Guard はその欄を推測で埋めません。
 
 **ハッカソン後の継続利用場面**
