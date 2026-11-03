@@ -9,12 +9,14 @@ Built for **Built with Claude: Japan 2026** (development started Monday, 2026-11
 
 ### ⚡ 30-Second Judge Quick Reference / 審査員向け 30秒早見表（4つの審査基準と確認リンク）
 
+※下の `#tour=1`〜`#tour=5`・`/portal` は、`python -m form_guard.cli --serve` でローカルサーバー（`http://127.0.0.1:8000`）を起動した状態で1クリックで開けます。
+
 | 審査基準 / Judging Criterion | 配点 | 何を確認できるか / What Form-Guard Proves | Web UI ガイドツアー & 実証リンク |
 |---|---|---|---|
-| **① 潜在的インパクト**<br>Potential Impact | **30%** | 行政・大学・施設の指定様式（`.docx` / `.xlsx` / 固定 `.pdf`）で、罫線1本・結合セル1つの崩れによる差し戻しを防ぎ、非エンジニアでも明日から安全に使える | `/` 上部「なぜ Form-Guard か？」バナー · [ハッカソン後の継続利用場面 ↓](#why-this-matters--who-keeps-using-it-after-the-hackathon) |
-| **② デモの完成度**<br>Demo & Presentation | **25%** | 作り直し版（7項目不合格）との視覚比較、マーカーなし白紙からの4段階空欄自動発見、原文引用ハイライトと推測拒否（法人番号は人の入力待ち） | `/#tour=1`（視覚比較） · `/#tour=2`（空欄自動発見） · `/#tour=3`（原文根拠・推測拒否） · [3分動画台本](docs/DEMO_VIDEO_SCRIPT_JA.md) |
-| **③ Claude の創造的活用**<br>Creative Use of Claude | **25%** | 欄ごとの3段モデル振り分け（Haiku 4.5 / Sonnet 5 / Opus 5.5）＋404フォールバック連鎖、2段フック（`PreToolUse` / `PostToolUse`）、編集ツール無しの4サブエージェント、Skills 6種、依存ゼロの5ツール MCP、公募ポータル `/portal` 連携 | `/#tour=4`（「Claude Code 連携 · Architecture」タブ） · [BUILT_WITH_CLAUDE_CODE.md](docs/BUILT_WITH_CLAUDE_CODE.md) |
-| **④ 実装の深さと実行力**<br>Depth & Execution | **20%** | 7区分21項目＋`VIS-01`（指定欄以外のずれ `0 px`）の決定論的検査、版（`revision`）と `SHA-256` に結び付いた人間承認ロック、実機 Word/Excel 16.0 検証、272件の自動テスト（APIキー不要で再現可） | `/#tour=5`（21項目構造証明＆人間承認ロック） · `pytest -v`（272 passed） |
+| **① インパクト（潜在的インパクト）**<br>Potential Impact | **30%** | 行政・大学・施設の指定様式（`.docx` / `.xlsx` / 固定 `.pdf`）で、罫線1本・結合セル1つの崩れによる差し戻しを防ぎ、非エンジニアでもWeb画面で各値の原文根拠を確かめてから承認できる（導入はPython 3.10以上・APIキー無しでも全工程が動く） | [トップ画面 `/` 上部バナー](http://127.0.0.1:8000/) · [ハッカソン後の継続利用場面 ↓](#why-this-matters--who-keeps-using-it-after-the-hackathon) |
+| **② デモ（デモの完成度）**<br>Demo & Presentation | **25%** | 作り直し版（失敗再現データ・7項目不合格）との視覚比較、マーカーなし白紙からの4段階空欄自動発見、原文引用ハイライトと推測拒否（法人番号は人の入力待ち） | [`/#tour=1`（視覚比較）](http://127.0.0.1:8000/#tour=1) · [`/#tour=2`（空欄自動発見）](http://127.0.0.1:8000/#tour=2) · [`/#tour=3`（原文根拠・推測拒否）](http://127.0.0.1:8000/#tour=3) · [3分動画台本](docs/DEMO_VIDEO_SCRIPT_JA.md) |
+| **③ Claudeの活用（Claude Code中心の開発・使い分け）**<br>Creative Use of Claude | **25%** | 欄ごとの3段モデル振り分け（Haiku 4.5 / Sonnet 5 / Opus 5.5）＋404フォールバック連鎖、2段フック（`PreToolUse` / `PostToolUse`）、`Edit`/`Write`ツール無しの4サブエージェント（うち3種はフック付き`Bash`を使用）、Skills 6種、依存ゼロの5ツール MCP、公募ポータル [`/portal`](http://127.0.0.1:8000/portal) 連携 | [`/#tour=4`（「Claude Code 連携 · Architecture」タブ）](http://127.0.0.1:8000/#tour=4) · [BUILT_WITH_CLAUDE_CODE.md](docs/BUILT_WITH_CLAUDE_CODE.md) |
+| **④ 深さと実行力（実装の深さと実行力）**<br>Depth & Execution | **20%** | 7区分21項目＋`VIS-01`（指定欄以外のずれ `0 px`）の決定論的検査、版（`revision`）と `SHA-256` に結び付いた人間承認ロック、実機 Word/Excel 16.0 検証、272件の自動テスト（APIキー不要で再現可） | [`/#tour=5`（21項目構造証明＆人間承認ロック）](http://127.0.0.1:8000/#tour=5) · [試行錯誤の記録](docs/BUILT_WITH_CLAUDE_CODE.md#5-iterating-with-claude-code) · [実機検証記録](#verified-on-real-machines-2026-11-03火) · [自動テスト (`tests/test_form_guard.py`)](tests/test_form_guard.py) |
 
 ---
 
@@ -42,7 +44,7 @@ left-hand columns are counted from the files, **not** a timed study of a person)
 | form4 `form4_unmarked_blank.docx` | 7 (locate 11 empty cells, decide office vs applicant) | 113 | 503 XML tags · 38 printed text blocks · 24 merged cells/ranges · 10 border definitions · 18 package parts | 120 ms | 21/21 (PASS) | 9 checklist items |
 | form5 `form5_unmarked_blank.xlsx` | 5 (locate 6 empty cells, decide office vs applicant) | 52 | 282 XML tags · 30 printed text blocks · 34 merged cells/ranges · 269 border definitions · 9 package parts | 154 ms | 21/21 (PASS) | 7 checklist items |
 
-- Across the 5 built-in Word/Excel forms (form1–form5; the fixed-PDF demo 6 is not in this table) Form-Guard filled 41 designated fields (40 values, 848 characters written) and verified 2,119 XML tags, 171 printed text blocks, 124 merged cells/ranges and 650 border definitions in about 0.1–0.25 s per form.
+- Across the 5 built-in Word/Excel forms (form1–form5; the fixed-PDF demo 6 is not in this table, 41 designated fields in total), Form-Guard filled 40 fields (848 characters written), leaving 1 unstated field for human input, and verified 2,119 XML tags, 171 printed text blocks, 124 merged cells/ranges and 650 border definitions in about 0.1–0.25 s per form.
 - What is left for the person is the 51-item source-linked sign-off checklist and 1 unstated fact — `法人番号` in form2 — which stays empty for the human instead of being hallucinated.
 
 **Post-hackathon continued use & deployment roadmap**
@@ -56,8 +58,8 @@ left-hand columns are counted from the files, **not** a timed study of a person)
   (`python -m venv .venv`, then `pip install -r requirements.txt`) and launch Claude Code from the repository root —
   or point `.mcp.json` and `.claude/settings.json` at that installed environment and at `scripts/hook_guard.py`
   (copying only `.mcp.json` and `.claude/` into a document folder is not enough: they run this repository's code).
-  The assistant then fills forms through Form-Guard's tools, gets **unapproved drafts** back, and cannot approve a
-  form itself — sign-off stays with a named person in the web app. Other MCP clients (e.g. Claude Desktop) can
+  The assistant then fills forms through Form-Guard's tools, gets **unapproved drafts** back, and MCP intentionally omits an
+  approval tool — final sign-off is performed by a reviewer in the web app (which verifies the reviewer name, checked items, `revision` and `filled_sha256`). Other MCP clients (e.g. Claude Desktop) can
   register the same server command, `python -m form_guard.mcp_server`.
 
 ## What Form-Guard does
@@ -95,8 +97,8 @@ python -m venv .venv
 .venv\Scripts\activate            # Windows cmd  (PowerShell: .venv\Scripts\Activate.ps1 · macOS/Linux: source .venv/bin/activate)
 pip install -r requirements.txt
 
-python -m form_guard.cli --all-demos     # runs the 3 fictional demos -> output/index.html
-python -m form_guard.cli --serve         # web UI on http://127.0.0.1:8000 (grant portal: /portal)
+python -m form_guard.cli --all-demos     # runs the 3 marked fictional demos -> output/index.html
+python -m form_guard.cli --serve         # web UI on http://127.0.0.1:8000 (all 6 demos + grant portal: /portal)
 pytest -v                                # 272 tests
 ```
 
@@ -207,7 +209,7 @@ project-level setup ships in this repository. Each feature and model was chosen 
 | Teach Claude Code this project's workflows | **Skills** (6) | exact commands and guardrails load only when a task matches | `.claude/skills/*/SKILL.md` | offline: valid front matter; every CLI flag a skill names exists |
 | Fetch a form from a web portal and hand the result to a person | **Claude in Chrome** + the `portal-form-fill` skill | one sentence → portal page (or `GET /api/portal/forms`) → MCP discover / fill / verify → the `review_url` sign-off page opened in Chrome | `.claude/skills/portal-form-fill/SKILL.md`, `form_guard/portal.py` | offline: portal HTML / JSON / downloads with SHA-256, the MCP → web hand-off of a PDF draft |
 | Separate proposing from checking | **Subagents** (4), none with `Edit` / `Write` | the model that proposes values must not be the one that signs off | `.claude/agents/*.md` | offline: tools and models asserted |
-| Make unsafe actions impossible, not just discouraged | **Two-stage hooks** (`PreToolUse` before the write, `PostToolUse` after it) | a prompt can be ignored, a hook cannot | `.claude/settings.json`, `scripts/hook_guard.py` | offline: blocks before the write (exit 2 + deny), post-write checks, a cp932 console |
+| Block configured unsafe actions before writing | **Two-stage hooks** (`PreToolUse` before the write, `PostToolUse` after it) | enforces template & secret guards on configured tools when active (requires Python on `PATH`) | `.claude/settings.json`, `scripts/hook_guard.py` | offline: blocks before the write (exit 2 + deny), post-write checks, a cp932 console |
 | Use Form-Guard from any Claude client | **MCP server** (5 tools, stdio, zero dependencies) | Claude Code / Claude Desktop scan, discover, fill and verify as tools and get the human checklist back | `.mcp.json`, `form_guard/mcp_server.py` | offline: JSON-RPC over real stdio, Japanese payloads on a cp932 console, stray prints isolated at the file-descriptor level |
 
 **Offline vs live.**
@@ -222,7 +224,7 @@ project-level setup ships in this repository. Each feature and model was chosen 
 | 指定欄以外が変わっていないことを証明 | 決定論的な検証器（21項目＋VIS-01、LLM トークン 0） | 再現性が必要な判定をモデルに任せない | 改ざん・パストラバーサル・XXE のテスト |
 | 作業手順と「提案役／確認役」の分離 | スキル 6 種、サブエージェント 4 種（どれも `Edit`/`Write` を持たない） | 値を提案したモデル自身に合格を出させない | フロントマターとツール・モデルをテストで確認 |
 | Web の公募ポータルから様式を取得し、結果を人に渡す | Claude in Chrome ＋スキル `portal-form-fill` | 一言の依頼 → ポータル（または `GET /api/portal/forms`）→ MCP で発見・記入・検査 → `review_url` の承認画面を Chrome で開く | ポータルの HTML・JSON・SHA-256 付きダウンロード、PDF 下書きの MCP → Web 引き継ぎをテストで確認 |
-| 危険な操作を「不可能」にする | 2 段フック：PreToolUse（書き込み前に阻止）／PostToolUse（書き込み後に検査） | プロンプトは無視され得るが、フックは無視できない | 書き込み前の阻止（終了コード 2＋deny）、書き込み後の検査、cp932 環境で確認 |
+| 設定した危険な操作を実行前に拒否する | 2 段フック：PreToolUse（書き込み前に阻止）／PostToolUse（書き込み後に検査） | 設定された対象操作（白紙様式の改変や秘密情報の書込み）をフックが検査・拒否（Python環境と設定の有効化が前提） | 書き込み前の阻止（終了コード 2＋deny）、書き込み後の検査、cp932 環境で確認 |
 | どの Claude クライアントからでも使う | MCP サーバー（5 ツール・stdio・依存ゼロ） | Claude Code・Claude Desktop からツールとして呼べる | 実 stdio で日本語を含む JSON-RPC を確認 |
 
 すべての行は API キー無しの pytest で検証されています（Claude 部分は偽クライアントと、実 SDK＋モック通信）。ライブ実行で
@@ -327,7 +329,7 @@ python -m form_guard.cli --verify samples/blank_forms/form6_study_group_grant.pd
 
 - `GET /portal` is **架空学術振興ポータル — 公募・研究会指定様式ダウンロード窓口** (Fictional Academic Grant & Study Group Form
   Portal): six fictional calls, each with its blank form, the rules printed on it (read from the form by scan /
-  discovery, never typed in by hand), the ⊘ office-only boxes, the SHA-256, **⬇ 白紙様式をダウンロード (.pdf / .docx /
+  discovery, never typed in by hand), the office-only boxes (shown as `事務局専用欄（記入不可）`), the SHA-256, **⬇ 白紙様式をダウンロード (.pdf / .docx /
   .xlsx)** (`GET /api/portal/forms/{id}/download`, header `X-Form-Guard-SHA256`) and **🚀 Form-Guard で自動空欄発見・外科的差込を開く**
   (`/#pdf=form6`, `/#unmarked=form4`, `/#demo=form1`).
 - The page is server-rendered without scripts and every card carries
@@ -337,8 +339,8 @@ python -m form_guard.cli --verify samples/blank_forms/form6_study_group_grant.pd
   「公募ポータルから研究会のPDF様式をダウンロードしてメモの内容で埋めて確認画面を開いて」 — runs the whole loop: Claude in Chrome
   (or `GET /api/portal/forms`) finds the form, the blank is downloaded into `output/` and its SHA-256 compared,
   `form_guard_discover_blank_cells` proposes the boxes and the user confirms them, `form_guard_fill` writes the unapproved
-  draft, `form_guard_verify` re-runs the 21 checks + VIS-01, and the draft's `review_url` opens in Chrome — where a named
-  person reviews and approves. Claude never approves.
+  draft, `form_guard_verify` re-runs the 21 checks + VIS-01, and the draft's `review_url` opens in Chrome — where the reviewer
+  inspects and approves (MCP has no approval tool; final approval is performed in the web UI).
 
 ## The demos (100% fictional, non-medical)
 
@@ -485,13 +487,13 @@ Details: [docs/BUILT_WITH_CLAUDE_CODE.md](docs/BUILT_WITH_CLAUDE_CODE.md) (secti
 
 ```
 form_guard/
-- scanner.py      slot discovery, 4-stage blank-cell discovery (+ printed-rule inference in constraints.py)
+  scanner.py      slot discovery, 4-stage blank-cell discovery (+ printed-rule inference in constraints.py)
   mapper.py       Claude (multi-model routing) / offline engines + self-correction loop (grounding.py, textnorm.py)
   writer.py       surgical byte-range injection (ooxml.py indexer, ziputil.py raw ZIP copy)
   verifier.py     ZIP / XML / layout / text / grounding / constraint checks + HITL checklist
   visual_diff.py  deterministic SVG (and optional PNG) previews, layout-drift measurement
   pipeline.py     orchestration; report.py standalone HTML; cli.py; server.py (FastAPI)
-  mcp_server.py   MCP server (stdio JSON-RPC 2.0): list_demos / scan / discover / fill / verify
+  mcp_server.py   MCP server (stdio JSON-RPC 2.0): list_demos | scan | discover | fill | verify
   pdf_core.py     standard-library PDF parser, PDF gate, deterministic builder, content-stream interpreter
   pdf_support.py  fixed PDF forms: ruled-box discovery, incremental-update overlay, 21 checks, previews + pixel diff
   portal.py       the fictional grant portal (GET /portal, GET /api/portal/forms, downloads with SHA-256)
@@ -558,8 +560,7 @@ Form-Guard は 41 の指定欄に 40 件（848 文字）を記入し、XML タ�
   （`python -m venv .venv` のあと `pip install -r requirements.txt`）、リポジトリ直下から Claude Code を起動します（別の
   フォルダで使う場合は `.mcp.json` と `.claude/settings.json` をその環境と `scripts/hook_guard.py` に向けます。`.mcp.json` と
   `.claude/` を書類フォルダに置くだけでは、このリポジトリのコードが無いので動きません）。AIアシスタントは Form-Guard の
-  ツール経由で様式に記入し、返ってくるのは**未承認の下書き**だけで、自分では承認できません（承認は Web 画面で名前のある人が
-  行います。Claude Desktop など他の MCP クライアントにも、同じ `python -m form_guard.mcp_server` を登録できます）。
+  ツール経由で様式に記入し、返ってくるのは**未承認の下書き**だけです（MCP には承認ツールを設けず、最終承認は Web 画面で確認者名・チェック項目・`revision`・`filled_sha256` を確認して人が行います。Claude Desktop など他の MCP クライアントにも、同じ `python -m form_guard.mcp_server` を登録できます）。
 
 ### 何をするツールか
 
@@ -584,8 +585,8 @@ Form-Guard Agent は次の流れで、**指定欄だけ**を書き換えます�
 python -m venv .venv
 .venv\Scripts\activate            # Windows cmd（PowerShell は .venv\Scripts\Activate.ps1、macOS/Linux は source .venv/bin/activate）
 pip install -r requirements.txt
-python -m form_guard.cli --all-demos     # 架空デモ3件を実行 → output/index.html
-python -m form_guard.cli --serve         # Web画面 http://127.0.0.1:8000
+python -m form_guard.cli --all-demos     # マーカーあり架空デモ3件を実行 → output/index.html
+python -m form_guard.cli --serve         # Web画面 http://127.0.0.1:8000（全6デモ＋公募ポータル /portal）
 pytest -v
 ```
 
@@ -649,9 +650,9 @@ python -m form_guard.cli --form samples/blank_forms/form6_study_group_grant.pdf 
 
 ### 公募ポータル＋Claude in Chrome＋Claude Code（一言で）
 
-- `GET /portal` は **架空学術振興ポータル — 公募・研究会指定様式ダウンロード窓口**（架空）です。6 件の公募ごとに白紙様式、様式から読み取った記入ルール、⊘ 事務局専用欄、SHA-256、**⬇ 白紙様式をダウンロード (.pdf / .docx / .xlsx)**（`GET /api/portal/forms/{id}/download`、ヘッダー `X-Form-Guard-SHA256`）と **🚀 Form-Guard で自動空欄発見・外科的差込を開く**（`/#pdf=form6` など）を表示します。
+- `GET /portal` は **架空学術振興ポータル — 公募・研究会指定様式ダウンロード窓口**（架空）です。6 件の公募ごとに白紙様式、様式から読み取った記入ルール、事務局専用欄（記入不可）の一覧、SHA-256、**⬇ 白紙様式をダウンロード (.pdf / .docx / .xlsx)**（`GET /api/portal/forms/{id}/download`、ヘッダー `X-Form-Guard-SHA256`）と **🚀 Form-Guard で自動空欄発見・外科的差込を開く**（`/#pdf=form6` など）を表示します。
 - スクリプトを使わないサーバー描画で、各カードに `data-form-id`・`data-sha256` などを付けているので Claude in Chrome が確実に読み取れます（`GET /api/portal/forms` は同じ一覧の JSON）。Web 画面上部の「🌐 公募様式ポータル (/portal)」からも開けます。
-- スキル `portal-form-fill` により、Claude Code に「公募ポータルから研究会のPDF様式をダウンロードしてメモの内容で埋めて確認画面を開いて」と一言頼むと、ポータルで様式を探し（Claude in Chrome または `/api/portal/forms`）、`output/` にダウンロードして SHA-256 を照合、`form_guard_discover_blank_cells` で枠を発見して人が確定、`form_guard_fill` で未承認の下書きを作り、`form_guard_verify` で再検査し、`review_url` の承認画面を Chrome で開きます。承認するのは名前のある確認者で、Claude は承認できません。
+- スキル `portal-form-fill` により、Claude Code に「公募ポータルから研究会のPDF様式をダウンロードしてメモの内容で埋めて確認画面を開いて」と一言頼むと、ポータルで様式を探し（Claude in Chrome または `/api/portal/forms`）、`output/` にダウンロードして SHA-256 を照合、`form_guard_discover_blank_cells` で枠を発見して人が確定、`form_guard_fill` で未承認の下書きを作り、`form_guard_verify` で再検査し、`review_url` の承認画面を Chrome で開きます（MCP には承認ツールを設けず、最終承認は Web 画面で人が行います）。
 
 ### Claude Code との連携
 
