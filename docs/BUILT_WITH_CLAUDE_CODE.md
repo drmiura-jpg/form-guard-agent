@@ -81,7 +81,7 @@ the validator sent back — and a server-side fallback to another model is recor
 API key still sees the routing design while the UI, the report and the CLI never present a plan as a call. The web UI
 shows a model badge and the reason on every field (Fields & sources, with the API-returned thinking summary of the
 call that handled the field when there is one) and the whole run in the Claude Code tab; the top-bar **Model tier**
-selector (`Auto: Haiku / Sonnet / Opus`, `Opus 5.5 only`, `Sonnet 5 only`, `Haiku 4.5 only`) is sent with every run.
+selector (`Auto: Haiku 4.5 / Sonnet 5 / Opus 5.5`, `Opus 5.5 only`, `Sonnet 5 only`, `Haiku 4.5 only`) is sent with every run.
 A live run that fails part-way in `auto` mode falls back to the offline engine and keeps the calls that were made:
 `usage.live_attempt_failed`, the call list and the token counts stay in the audit log, and the UI and the report say
 that live API calls happened before the fallback instead of "no model was called".
@@ -271,7 +271,7 @@ API が返した思考の要約（「API-returned thinking summary」と明記�
 計画を `offline (claude-haiku-4-5-20251001 in live auto)`（ルーティングには `planned_in_live_auto: True`）として記録するので、API キーの
 無い審査員にも設計が見え、計画を「呼び出した」と表示することはありません。Web 画面では「記入値と根拠」で欄ごとにモデルの
 バッジと理由（その欄を処理した呼び出しの思考の要約があれば併記）を、Claude Code タブで実行全体の割り当てを表示し、右上の
-「モデル」選択（自動：Haiku / Sonnet / Opus、Opus 5.5 のみ、Sonnet 5 のみ、Haiku 4.5 のみ）は毎回の実行に送られます。
+「モデル」選択（自動：Haiku 4.5 / Sonnet 5 / Opus 5.5、Opus 5.5 のみ、Sonnet 5 のみ、Haiku 4.5 のみ）は毎回の実行に送られます。
 `auto` モードでライブ実行が途中で失敗した場合はオフラインエンジンで続けますが、それまでの呼び出しは残します
 （`usage.live_attempt_failed`、呼び出し一覧とトークン数を監査ログに記録し、画面とレポートでも「モデルは呼び出していない」とは
 表示せず、ライブの API 呼び出しの後に切り替えたことを示します）。

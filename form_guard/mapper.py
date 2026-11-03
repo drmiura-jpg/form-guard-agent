@@ -53,10 +53,12 @@ from .textnorm import (
     RESTRICTIVE_WORDS,
     check_wareki,
     clean_person_name,
+    clean_text,
     condense_extractive,
     find_amounts,
     find_dates,
     format_yen,
+    normalize_for_match,
     split_sentences,
     strip_trailing_note,
     to_halfwidth_id,
@@ -89,12 +91,15 @@ class Draft:
     # Issues a human must resolve even though the value itself validates (e.g. a condensation that
     # deleted a condition). A new value starts with no hold, so it is evaluated afresh.
     hold: list[ValidationIssue] = field(default_factory=list)
+    # Issues about the field's evidence rather than one value (the memo states two different values for it): they
+    # stay with every repaired value of this field.
+    persistent: list[ValidationIssue] = field(default_factory=list)
 
     def with_value(self, value: str, quotes: Optional[list[str]] = None, **kw) -> "Draft":
         return Draft(self.slot_id, kw.get("status", self.status), value,
                      list(self.quotes if quotes is None else quotes), kw.get("confidence", self.confidence),
                      kw.get("reasoning", self.reasoning), self.claimed_lines, kw.get("alternatives", self.alternatives),
-                     self.anchor)
+                     self.anchor, persistent=list(self.persistent))
 
 
 class LiveEngineError(RuntimeError):
@@ -181,6 +186,27 @@ def slot_aliases(slot: FormSlot, all_slots: list[FormSlot]) -> list[str]:
             seen.add(a)
             res.append(a)
     return res
+
+
+def _same_fact(slot: FormSlot, a: str, b: str) -> bool:
+    """Do two memo values state the same fact for this field? (2026/11/2 = 令和8年11月2日; 483万6千円 = 4,836,000円)"""
+    fmt = slot.required_format or "text"
+    if fmt in ("wareki_date", "date", "wareki_period"):
+        da, db = find_dates(a), find_dates(b)
+        if da and db:
+            return len(da) == len(db) and all((x.month, x.day) == (y.month, y.day) and
+                                              (x.year is None or y.year is None or x.year == y.year)
+                                              for x, y in zip(da, db))
+    if fmt == "yen":
+        aa, ab = find_amounts(a), find_amounts(b)
+        if aa and ab:
+            return aa[0].value == ab[0].value
+    if fmt in ("digits", "pattern"):
+        ha, hb = to_halfwidth_id(a), to_halfwidth_id(b)
+        return (re.sub(r"\D", "", ha) == re.sub(r"\D", "", hb)) if fmt == "digits" else ha == hb
+    if fmt == "person_name":
+        return normalize_for_match(clean_person_name(a)) == normalize_for_match(clean_person_name(b))
+    return normalize_for_match(a) == normalize_for_match(b)
 
 
 def _subsequence_cover(alias: str, key: str) -> float:
@@ -297,15 +323,41 @@ class DemoEngine:
 
     # -- format-aware refinement ---------------------------------------------
     def _extract(self, slot: FormSlot, all_slots: list[FormSlot], memo: str) -> Draft:
-        for rs, re_, how, conf in self._regions(slot, all_slots, memo):
+        regions = self._regions(slot, all_slots, memo)
+        for i, (rs, re_, how, conf) in enumerate(regions):
             d = self._refine(slot, memo, rs, re_)
             if d is not None:
                 d.anchor = rs
                 d.confidence = round(conf * d.confidence, 2)
                 ln = offset_to_line(line_starts(memo), rs)
                 d.reasoning = f"Matched {how} at L{ln}; {d.reasoning}"
+                conflict = self._conflict(slot, memo, regions, i, d)
+                if conflict is not None:  # never pick one of two contradicting statements: the reviewer decides
+                    d.persistent.append(conflict)
+                    d.reasoning += "; the memo states a different value for this field on another line"
                 return d
         return Draft(slot.slot_id, status="not_found", reasoning="No line, section or sentence in the memo states this field.")
+
+    def _conflict(self, slot: FormSlot, memo: str, regions: list[tuple[int, int, str, float]], chosen: int,
+                  draft: Draft) -> Optional[ValidationIssue]:
+        """Another 「label：value」 line for the same field with a different fact (申請日 2026年11月2日 vs 11月9日)."""
+        if (slot.required_format or "text") == "text" or not regions[chosen][2].endswith("」 line"):
+            return None
+        starts = line_starts(memo)
+        seen = [(offset_to_line(starts, regions[chosen][0]), draft.value)]
+        for rs, re_, how, _conf in regions[chosen + 1:]:
+            if not how.endswith("」 line"):
+                continue
+            other = self._refine(slot, memo, rs, re_)
+            if other is not None and other.value and not _same_fact(slot, draft.value, other.value):
+                seen.append((offset_to_line(starts, rs), other.value))
+        if len(seen) < 2:
+            return None
+        en = " / ".join(f"L{ln} «{v}»" for ln, v in seen)
+        ja = "／".join(f"L{ln}「{v}」" for ln, v in seen)
+        return ValidationIssue(code="conflicting_values",
+                               message=f"the memo states this field more than once with different values ({en}) — a "
+                                       f"human must decide / メモに同じ項目の異なる値があります（{ja}）。人が判断してください")
 
     def _refine(self, slot: FormSlot, memo: str, rs: int, re_: int) -> Optional[Draft]:
         region = memo[rs:re_]
@@ -1168,7 +1220,7 @@ class _State:
 def _evaluate(slot: FormSlot, draft: Draft, memo: str):
     issues = validate_value(slot, draft.value)
     g = ground_value(draft.value, draft.quotes, memo, slot, near=draft.anchor)
-    return issues + g.issues + list(draft.hold), g
+    return issues + g.issues + list(draft.hold) + list(draft.persistent), g
 
 
 @dataclass
@@ -1276,18 +1328,65 @@ def _to_mapping(st: _State, engine_name: str, routed_model: str = "", route_reas
     )
 
 
+_DATE_GLUE = re.compile(r"[\s～〜~\-－‐ーから至まで]*")
+
+
+def normalize_reviewer_value(slot: FormSlot, value: str) -> tuple[str, list[str]]:
+    """Fact-preserving clean-up of a value typed by the reviewer, into the format printed on the form.
+
+    The same deterministic conversions the AI path applies, never a guess: invisible characters removed,
+    ``１２３４-５６７８-９０１２３`` → ``1234567890123`` (digits), ``ＪＲ－２０２６－０４７`` → ``JR-2026-047`` (ID),
+    ``52000`` / ``５万２千円`` → ``52,000円`` (yen; ``約…`` is left alone), ``2026/11/4`` → ``令和8年11月4日（水）`` (和暦).
+    A value that is ambiguous or impossible (bad digit grouping, 2月30日, a weekday that contradicts the calendar)
+    is returned unchanged, so validation tells the reviewer what is wrong. Returns (value, normalization flags).
+    """
+    v = clean_text(value.strip())[0]
+    fmt = slot.required_format or "text"
+    if not v or not [i for i in validate_value(slot, v) if i.severity == "error"]:
+        return v, []
+    if fmt in ("digits", "pattern"):
+        h = to_halfwidth_id(v)
+        if fmt == "digits":
+            h = h.replace("-", "")  # 1234-5678-90123; letters are kept so validation can name them
+        return (h, ["halfwidth"]) if h != v else (v, [])
+    if fmt == "yen":
+        t = to_halfwidth_id(v).removesuffix("円")
+        if re.fullmatch(r"[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+", t):
+            return format_yen(int(t.replace(",", ""))), ["yen"]
+        amts = find_amounts(to_halfwidth_id(v))
+        if len(amts) == 1 and not amts[0].approx and amts[0].text == to_halfwidth_id(v):
+            return format_yen(amts[0].value), ["yen"]
+        return v, []
+    if fmt in ("wareki_date", "wareki_period", "date"):
+        ds = find_dates(v)
+        need = 2 if fmt == "wareki_period" else (len(ds) if fmt == "date" and len(ds) in (1, 2) else 1)
+        rest = v
+        for d in sorted(ds, key=lambda d: -d.start):
+            rest = rest[: d.start] + rest[d.end :]
+        if len(ds) != need or not _DATE_GLUE.fullmatch(rest) or any(d.year is None or d.problem() for d in ds):
+            return v, []
+        render = to_western if fmt == "date" else to_wareki
+        out = "～".join(render(d.as_date) for d in ds)  # type: ignore[arg-type]
+        return (out, ["wareki"] if fmt != "date" else ["weekday"]) if out != v else (v, [])
+    return v, []
+
+
 def human_mapping(slot: FormSlot, value: str) -> FieldMapping:
-    """A value typed by the reviewer: validated against the form's constraints, grounded by human attestation."""
-    issues = validate_value(slot, value)
+    """A value typed by the reviewer: normalised into the printed format (``normalize_reviewer_value``), validated
+    against the form's constraints, grounded by human attestation."""
+    typed = value.strip()
+    v, flags = normalize_reviewer_value(slot, typed)
+    issues = validate_value(slot, v)
     errors = [i.message for i in issues if i.severity == "error"]
+    note = [f"reviewer value normalised «{typed}» → «{v}» / 入力値を様式の書式に整えました"] if v != typed else []
     return FieldMapping(
-        slot_id=slot.slot_id, filled_value=value.strip(), status="human_entered", char_count=len(value.strip()),
+        slot_id=slot.slot_id, filled_value=v, status="human_entered", char_count=len(v),
         validation_passed=not errors, errors=errors, confidence=1.0, engine="human",
         routed_model=HUMAN_ROUTE[0], route_reason=HUMAN_ROUTE[1],
-        reasoning="Entered by the human reviewer.", warnings=[i.message for i in issues if i.severity == "warning"],
-        normalizations=["human"],
-        attempts=[CorrectionAttempt(attempt=1, action="entered by the reviewer", value=value.strip(), issues=issues,
-                                    passed=not errors)],
+        reasoning="Entered by the human reviewer.", warnings=note + [i.message for i in issues if i.severity == "warning"],
+        normalizations=["human", *flags],
+        attempts=[CorrectionAttempt(attempt=1, action="entered by the reviewer" + (f" (typed «{typed}»)" if note else ""),
+                                    value=v, issues=issues, passed=not errors)],
     )
 
 

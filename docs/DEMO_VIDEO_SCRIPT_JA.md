@@ -23,7 +23,7 @@ Form-Guard Agent（Built with Claude: Japan 2026 提出作品）のデモ動画�
 |---|---|
 | サーバー | 収録の直前に `python -m form_guard.cli --serve` で起動し直す（「Claude Code 連携」タブの計測値は、起動後に初めてタブを開いたときにこの PC で測る） |
 | ブラウザ | 新しいプロファイル（拡張機能・ブックマーク・通知なし）、ウィンドウ 1440×900、表示倍率 100%、ライトテーマ |
-| 言語・エンジン | 日本語（`/#lang=ja`）、エンジン「自動 / Auto」、モデル「自動：Haiku / Sonnet / Opus」。API キーが無くてもオフラインエンジンで全工程を再現でき、各欄には「Offline Rule」と、ライブ auto で担当するモデルの計画（Haiku 4.5 / Sonnet 5 / Opus 5.5）が表示される |
+| 言語・エンジン | 日本語（`/#lang=ja`）、エンジン「自動 / Auto」、モデル「自動：Haiku 4.5 / Sonnet 5 / Opus 5.5」。API キーが無くてもオフラインエンジンで全工程を再現でき、各欄には「Offline Rule」と、ライブ auto で担当するモデルの計画（Haiku 4.5 / Sonnet 5 / Opus 5.5）が表示される |
 | 映さないもの | 個人名・メールアドレス・個人のユーザーフォルダのパス・環境変数の一覧・`.env`・API キー。ターミナルを映すときは、プロンプトにユーザー名やフォルダ名が出ない設定にする |
 | Step 4 の任意カット | Claude Code（`.mcp.json` 登録済み）で `form_guard_fill`（form1・`mode: demo`）を実行し、結果の `review_url`（`http://127.0.0.1:8000/?run_id=…`）を控えておく |
 

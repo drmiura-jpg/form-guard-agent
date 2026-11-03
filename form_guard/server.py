@@ -285,6 +285,13 @@ def _confirmed_ids(discovery: dict[str, Any], targets: Union[list[str], str]) ->
     return [str(i) for i in targets]
 
 
+def _require_memo(memo: Optional[str]) -> str:
+    """Every run needs a source memo: a blank one would only produce a draft with every field awaiting input."""
+    if not (memo or "").strip():
+        raise HTTPException(400, "memo_text is required — paste the source memo")
+    return memo or ""
+
+
 def _hostname(host: str) -> str:
     host = host.strip().lower()
     if host.startswith("["):  # [::1]:8000
@@ -536,7 +543,7 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
         except KeyError as exc:
             raise HTTPException(404, "unknown demo") from exc
         p = demo_paths(d, samples())
-        memo = req.memo_text if req.memo_text is not None else read_memo(p["memo"])
+        memo = _require_memo(req.memo_text if req.memo_text is not None else read_memo(p["memo"]))
         run_id, st = _run(p["form"], memo, req.mode, naive=p["naive"], spec=None, demo_id=d["id"], display=p["form"].name,
                           model_tier=req.model_tier)
         return _payload(run_id, st)
@@ -590,9 +597,7 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
     def run_from_discovery(req: FromDiscoveryRequest):
         """Stage 4: fill only the confirmed cells of a stored discovery (the blank form is re-checked by SHA-256)."""
         entry = discoveries.get(req.discovery_id)
-        memo = req.memo_text if req.memo_text is not None else entry.get("memo_text")
-        if not (memo or "").strip():
-            raise HTTPException(400, "memo_text is required — paste the source memo")
+        memo = _require_memo(req.memo_text if req.memo_text is not None else entry.get("memo_text"))
         ids = _confirmed_ids(entry["discovery"], req.confirmed_targets)
         try:  # refuses a changed form, 0 confirmed cells, unknown ids and office-only cells
             spec = build_confirmed_slot_spec(entry["discovery"], ids, entry["path"])
@@ -616,7 +621,7 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
             if req.discovery_id or req.confirmed_targets is not None:
                 raise HTTPException(400, "a marked demo has designated fields — discovery_id / confirmed_targets do not apply")
             p = demo_paths(d, samples())
-            memo = req.memo_text if req.memo_text is not None else read_memo(p["memo"])
+            memo = _require_memo(req.memo_text if req.memo_text is not None else read_memo(p["memo"]))
             run_id, st = _run(p["form"], memo, req.mode, naive=p["naive"], spec=None, demo_id=d["id"],
                               display=p["form"].name, model_tier=tier)
             return {"demo_id": d["id"], "unmarked": False, "auto_preview": False, "run": _payload(run_id, st)}
@@ -626,6 +631,7 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
             raise HTTPException(404, "unknown demo") from exc
         p = unmarked_paths(u, samples())
         sample_memo = read_memo(p["memo"])
+        memo = _require_memo(req.memo_text if req.memo_text is not None else sample_memo)
         if req.discovery_id:  # the stored discovery — never anything the client sends — defines the cells
             entry = discoveries.get(req.discovery_id)
             if entry.get("demo_id") != u["id"]:
@@ -640,7 +646,6 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
             spec = build_confirmed_slot_spec(report, ids, p["form"])
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
-        memo = req.memo_text if req.memo_text is not None else sample_memo
         run_id, st = _run(p["form"], memo, req.mode, naive=None, spec=spec, demo_id=u["id"], display=p["form"].name,
                           model_tier=tier, auto_preview=preview)
         discovery = {**report, "discovery_id": token, "demo_id": u["id"], "title": u["title"], "title_en": u["title_en"],
@@ -670,6 +675,7 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
         tier = _check_tier(model_tier)
         if len(memo_text) > MAX_MEMO_CHARS:
             raise HTTPException(413, "memo too long")
+        _require_memo(memo_text)
         form_path = _stage_upload(file)
         spec = None
         if slot_spec is not None and slot_spec.filename:

@@ -32,7 +32,7 @@
     <label class="mode-pick" data-tip="ライブモードで使う Claude モデル（オフライン実行では auto の割り当て計画を表示）|Claude model(s) used in live mode (offline runs show the live auto plan)">
       <span data-bi="モデル|Model tier"></span>
       <select id="tierSelect">
-        <option value="auto" data-t="自動：Haiku / Sonnet / Opus|Auto: Haiku / Sonnet / Opus">Auto: Haiku / Sonnet / Opus</option>
+        <option value="auto" data-t="自動：Haiku 4.5 / Sonnet 5 / Opus 5.5|Auto: Haiku 4.5 / Sonnet 5 / Opus 5.5">Auto: Haiku 4.5 / Sonnet 5 / Opus 5.5</option>
         <option value="opus" data-t="Opus 5.5 のみ|Opus 5.5 only">Opus 5.5 only</option>
         <option value="sonnet" data-t="Sonnet 5 のみ|Sonnet 5 only">Sonnet 5 only</option>
         <option value="haiku" data-t="Haiku 4.5 のみ|Haiku 4.5 only">Haiku 4.5 only</option>
@@ -275,11 +275,11 @@
         <div id="auditGroups" class="audit-groups"></div>
         <div class="card">
           <div class="card-h"><span data-bi="ZIP 内パーツ（SHA-256）|ZIP entries (per-part SHA-256)"></span></div>
-          <table class="mono-table"><thead><tr><th>Entry</th><th>Role</th><th>SHA-256 (original)</th><th>Result</th></tr></thead><tbody id="entryRows"></tbody></table>
+          <table class="mono-table"><thead><tr><th><span data-bi="パーツ|Entry"></span></th><th><span data-bi="役割|Role"></span></th><th><span data-bi="SHA-256（原本）|SHA-256 (original)"></span></th><th><span data-bi="結果|Result"></span></th></tr></thead><tbody id="entryRows"></tbody></table>
         </div>
         <div class="card">
           <div class="card-h"><span data-bi="外科的パッチ一覧（実際に書き換えたバイト範囲）|Surgical patch manifest (the byte ranges actually rewritten)"></span></div>
-          <table class="mono-table"><thead><tr><th>Part</th><th>Field</th><th class="num">Bytes</th><th>Change</th></tr></thead><tbody id="patchRows"></tbody></table>
+          <table class="mono-table"><thead><tr><th><span data-bi="パーツ|Part"></span></th><th><span data-bi="欄|Field"></span></th><th class="num"><span data-bi="バイト範囲|Bytes"></span></th><th><span data-bi="変更内容|Change"></span></th></tr></thead><tbody id="patchRows"></tbody></table>
         </div>
       </div>
 

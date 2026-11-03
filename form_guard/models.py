@@ -139,7 +139,9 @@ class HITLItem(BaseModel):
 
     item_id: str
     kind: Literal["field", "pending_input", "global"]
-    prompt: str
+    prompt: str  # 日本語 / English, as recorded in the audit log and the report
+    prompt_ja: str = ""  # the same prompt in one language (the web UI shows the selected one)
+    prompt_en: str = ""
     slot_id: Optional[str] = None
     label: str = ""
     value: str = ""

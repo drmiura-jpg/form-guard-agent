@@ -1164,17 +1164,31 @@ def _quoted(pieces: list[str]) -> str:
     return "".join(f"「{p}」" + (f"×{n}" if n > 1 else "") for p, n in out)
 
 
-def removed_text_note(m: FieldMapping) -> str:
-    """HITL disclosure of every piece deleted to meet a character limit (full text, never truncated)."""
+def _removed_pieces(m: FieldMapping) -> list[str]:
     pieces = list(m.condensed_removed)
     if not pieces:
         for w in m.warnings:
             if w.startswith("condensed — removed: "):
                 pieces += [x for x in w.removeprefix("condensed — removed: ").split(" ／ ") if x]
+    return pieces
+
+
+def removed_text_note(m: FieldMapping) -> str:
+    """HITL disclosure of every piece deleted to meet a character limit (full text, never truncated)."""
+    pieces = _removed_pieces(m)
     if not pieces:
         return ""
     return (f"（字数制限のため削除した文：{_quoted(pieces)}— 必要な条件や措置が欠けていないか確認 / "
             f"Condensed for char limit; confirm no essential condition was lost）")
+
+
+def removed_text_notes(m: FieldMapping) -> tuple[str, str]:
+    """``removed_text_note`` in Japanese and in English (the web UI shows the selected language)."""
+    pieces = _removed_pieces(m)
+    if not pieces:
+        return "", ""
+    return (f"（字数制限のため削除した文：{_quoted(pieces)}— 必要な条件や措置が欠けていないか確認）",
+            f" (deleted to meet the character limit: {_quoted(pieces)} — confirm no essential condition or measure was lost)")
 
 
 def build_hitl_checklist(scan: ScanResult, mappings: list[FieldMapping], report: VerificationReport) -> list[HITLItem]:
@@ -1188,15 +1202,22 @@ def build_hitl_checklist(scan: ScanResult, mappings: list[FieldMapping], report:
                 prompt = (f"「{s.label}」は自動検証で確定できなかったため未記入です（{reason}）。候補を確認し、正しい値を"
                           f"入力してください / Could not be verified automatically — review the suggestion and enter "
                           f"the value yourself.")
+                ja = f"「{s.label}」は自動検証で確定できなかったため未記入です（{reason}）。候補を確認し、正しい値を入力してください"
+                en = (f"«{s.label}» was left empty: it could not be verified automatically ({reason}). Review the "
+                      f"suggestion and enter the value yourself.")
             else:
                 prompt = (f"「{s.label}」はメモに根拠が無いため未記入です。正しい値を入力してください / "
                           f"No evidence in the memo — please enter this value yourself.")
+                ja = f"「{s.label}」はメモに根拠が無いため未記入です。正しい値を入力してください"
+                en = f"«{s.label}» was left empty: the memo gives no evidence for it. Enter the value yourself."
+            note_ja, note_en = removed_text_notes(m) if m is not None else ("", "")
             flags = ["needs_input"] + (["has_suggestion"] if m is not None and m.suggested_value else [])
             if m is not None and "unsafe_condensation" in m.normalizations:
                 flags.append("unsafe_condensation")
             items.append(HITLItem(
                 item_id=f"slot:{s.slot_id}", kind="pending_input", slot_id=s.slot_id, label=s.label,
-                prompt=prompt + (removed_text_note(m) if m is not None else ""),
+                prompt=prompt + (removed_text_note(m) if m is not None else ""), prompt_ja=ja + note_ja,
+                prompt_en=en + note_en,
                 value=(m.suggested_value if m else ""), importance=s.importance, flags=flags, required=True,
             ))
             continue
@@ -1212,26 +1233,38 @@ def build_hitl_checklist(scan: ScanResult, mappings: list[FieldMapping], report:
         if m.status == "filled":
             prompt = (f"「{s.label}」＝「{m.filled_value}」が原文{(' ' + where) if where else ''}の記載と一致することを確認 / "
                       f"Confirm this value against the quoted source.")
+            ja = f"「{s.label}」＝「{m.filled_value}」が原文{(' ' + where) if where else ''}の記載と一致することを確認"
+            en = f"Confirm «{s.label}» = «{m.filled_value}» against the quoted source{(' ' + where) if where else ''}."
         elif m.status == "recovered":
             prompt = (f"「{s.label}」＝「{m.filled_value}」（ファイルから読み取った値。根拠は未検証）を確認 / "
                       f"Value read back from the file — its source was not verified.")
+            ja = f"「{s.label}」＝「{m.filled_value}」（ファイルから読み取った値。根拠は未検証）を確認"
+            en = f"Confirm «{s.label}» = «{m.filled_value}» — read back from the file; its source was not verified."
         else:
             prompt = f"「{s.label}」＝「{m.filled_value}」（担当者が入力）を確認 / Confirm the value you entered."
+            ja = f"「{s.label}」＝「{m.filled_value}」（担当者が入力）を確認"
+            en = f"Confirm «{s.label}» = «{m.filled_value}» (entered by the reviewer)."
         prompt += removed_text_note(m)
+        note_ja, note_en = removed_text_notes(m)
+        ja, en = ja + note_ja, en + note_en
         items.append(HITLItem(
             item_id=f"slot:{s.slot_id}", kind="field", slot_id=s.slot_id, label=s.label, value=m.filled_value,
             source_quote=m.source_quote, source_line_range=m.source_line_range, importance=s.importance,
-            flags=flags, prompt=prompt, required=True,
+            flags=flags, prompt=prompt, prompt_ja=ja, prompt_en=en, required=True,
         ))
     items.append(HITLItem(
         item_id="global:visual", kind="global", required=True,
         prompt="比較表示で、指定欄以外（罫線・結合セル・注意事項・誓約文）に変更が無いことを目視確認した / "
                "I reviewed the visual diff: nothing outside the designated fields changed.",
+        prompt_ja="比較表示で、指定欄以外（罫線・結合セル・注意事項・誓約文）に変更が無いことを目視確認した",
+        prompt_en="I reviewed the visual diff: nothing outside the designated fields changed.",
     ))
     items.append(HITLItem(
         item_id="global:responsibility", kind="global", required=True,
         prompt="記入内容の事実確認と提出の最終判断は自分（人間）が行う。AIの記入は下書きである / "
                "I am responsible for the final content and submission; AI output is only a draft.",
+        prompt_ja="記入内容の事実確認と提出の最終判断は自分（人間）が行う。AIの記入は下書きである",
+        prompt_en="I am responsible for the final content and submission; AI output is only a draft.",
     ))
     return items
 

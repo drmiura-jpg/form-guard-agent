@@ -77,8 +77,8 @@ const FLAG = {
 const flagText = (f) => (FLAG[f] ? L(...FLAG[f]) : f);
 const ATTENTION = new Set(["year_inferred", "low_conf", "needs_input", "re_extracted", "condensed", "unsafe_condensation", "re_anchored"]);
 const FORMAT = {
-  text: ["文章", "text"], person_name: ["氏名", "person name"], wareki_date: ["和暦日付", "和暦 date"],
-  wareki_period: ["和暦期間", "和暦 period"], date: ["日付", "date"], yen: ["金額（円）", "yen amount"],
+  text: ["文章", "text"], person_name: ["氏名", "person name"], wareki_date: ["和暦日付", "Japanese era date"],
+  wareki_period: ["和暦期間", "Japanese era period"], date: ["日付", "date"], yen: ["金額（円）", "yen amount"],
   digits: ["数字", "digits"], pattern: ["書式（ID）", "ID pattern"], choice: ["選択肢", "choice"],
 };
 const fmtLabel = (f) => { const x = FORMAT[f || "text"]; return x ? L(x[0], x[1]) : String(f); };
@@ -116,6 +116,115 @@ const ROUTE_JA = [
   [/no model: .*/g, () => "モデルなし：記入済みファイルから読み戻した値を検証"],
 ];
 const routeReasonText = (r) => (S.lang !== "ja" || !r ? r || "" : ROUTE_JA.reduce((s, [re, fn]) => s.replace(re, fn), r));
+
+// The verifier's check descriptions and details are fixed English phrases (also in the audit log and the report).
+// In Japanese mode the UI shows a translation; the English original stays in the tooltip.
+const CHECK_JA = {
+  "Archive opens and every entry passes its CRC-32 check": "アーカイブが開け、全エントリが CRC-32 検査に合格",
+  "Same ZIP entries in the same order": "ZIP のエントリ構成と順序が同一",
+  "ZipInfo metadata identical (timestamps, flags, method, attributes, extra)": "ZIP エントリのメタデータが同一（日時・フラグ・圧縮方式・属性・拡張領域）",
+  "Every non-target entry is byte-for-byte identical (raw compressed stream + SHA-256 content)": "記入対象外のエントリはすべてバイト単位で同一（圧縮データ＋内容の SHA-256）",
+  "Non-target parts byte-identical": "記入対象外のパーツがバイト単位で同一",
+  "Only parts that contain designated slots were modified": "変更したのは指定欄を含むパーツだけ",
+  "Modified XML parts are well-formed (no DTD, no entity tricks)": "変更した XML パーツが整形式（DTD・実体参照の細工なし）",
+  "Namespace declarations preserved exactly": "名前空間宣言をそのまま保持",
+  "Markup skeleton byte-identical outside slot text (every tag, attribute, property)": "指定欄の文字以外の XML 骨格がバイト単位で同一（全タグ・属性・書式）",
+  "Table topology identical (tables, rows, cells, gridSpan, vMerge, tblGrid)": "表の構造が同一（表・行・セル・横結合・縦結合・列定義）",
+  "Table topology identical": "表の構造が同一",
+  "Sheet topology identical (sheets, merged ranges)": "シートの構造が同一（シート・結合範囲）",
+  "Merged ranges identical": "結合範囲が同一",
+  "Borders, shading and cell properties identical (tblBorders, tcBorders, shd, tcW)": "罫線・網掛け・セル書式が同一（表とセルの罫線・網掛け・セル幅）",
+  "Borders and shading identical": "罫線・網掛けが同一",
+  "Borders, fills, fonts and number formats identical for every cell": "全セルの罫線・塗りつぶし・フォント・表示形式が同一",
+  "Borders and cell styles identical": "罫線・セルのスタイルが同一",
+  "Paragraph and run formatting identical (pPr / rPr)": "段落・文字の書式が同一（pPr / rPr）",
+  "Column widths and row heights identical": "列幅・行の高さが同一",
+  "Page setup identical (size, margins, header/footer references)": "ページ設定が同一（用紙サイズ・余白・ヘッダー／フッター）",
+  "Page setup identical": "ページ設定が同一",
+  "Formulas, drop-down validations and print setup identical": "計算式・ドロップダウンの入力規則・印刷設定が同一",
+  "Formulas and drop-down validations identical": "計算式・ドロップダウンの入力規則が同一",
+  "All boilerplate text unchanged (notes, legal clauses, labels)": "定型文がすべて無変更（注意事項・誓約文・項目名）",
+  "All boilerplate text unchanged": "定型文がすべて無変更",
+  "Each slot contains exactly its approved value (text around markers intact)": "各欄に承認対象の値だけが入っている（マーカー前後の文字は無変更）",
+  "No unreplaced markers except fields awaiting human input": "人の入力待ちの欄以外にマーカーが残っていない",
+  "Every AI-filled value is backed by verbatim quotes found in the memo": "AI が記入した値はすべて、メモにそのまま存在する引用で裏付けられている",
+  "Numbers and dates in values appear in the quoted evidence": "値に含まれる数値・日付が引用の中にある",
+  "No numbers that are absent from both the memo and the blank form": "メモにも白紙様式にも無い数値が入っていない",
+  "Character limits printed on the form are respected": "様式に印刷された字数制限を守っている",
+  "Formats (和暦 dates, yen amounts, ID patterns) are valid": "書式（和暦の日付・円金額・番号の形式）が正しい",
+  "Form constraints respected (best-effort label matching)": "様式の記入ルールを守っている（項目名から推定して照合）",
+  "Options, caps and rounding rules are respected": "選択肢・上限額・端数処理のルールを守っている",
+  "File opens in an independent OOXML library": "別の OOXML ライブラリでファイルを開ける",
+  "Rendered layout outside the designated fields is unchanged and every value fits its cell": "指定欄以外の描画レイアウトが無変更で、すべての値が欄に収まっている",
+};
+const VIS_JA = [
+  [/^(\d+) value\(s\) overflow their cell \((.*)\)$/, (m) => `${m[1]} 個の値がセルからはみ出し（${m[2]}）`],
+  [/^(\d+) boxes moved \(max ([\d.]+)px\)$/, (m) => `${m[1]} 個の枠が移動（最大 ${m[2]}px）`],
+  [/^pages (\d+)→(\d+)$/, (m) => `ページ数 ${m[1]}→${m[2]}`],
+];
+const visJa = (s) => s.split(" · ").map((p) => { for (const [re, fn] of VIS_JA) { const m = re.exec(p); if (m) return fn(m); } return p; }).join("・");
+const DETAIL_JA = [
+  [/^all CRCs valid$/, () => "全エントリの CRC が正常"],
+  [/^(\d+) entries, identical order$/, (m) => `${m[1]} エントリ・順序も同一`],
+  [/^identical for all entries$/, () => "全エントリで同一"],
+  [/^(\d+) entries copied verbatim incl\. (.+)$/, (m) => `${m[1]} エントリをそのまま複製（${m[2]} など）`],
+  [/^changed: (.+)$/, (m) => `変更あり: ${m[1]}`],
+  [/^modified: (.+)$/, (m) => `変更したパーツ: ${m[1]}`],
+  [/^(\d+) part\(s\) parsed$/, (m) => `${m[1]} パーツを解析`],
+  [/^identical prefixes and URIs$/, () => "接頭辞と URI が同一"],
+  [/^(\d+) tags and (\d+) text nodes compared \(xml:space and text of every non-slot node included\); only slot characters differ(?:; (\d+) designated empty cell\(s\) hold plain text only)?$/,
+    (m) => `${m[1]} タグ・${m[2]} テキストノードを比較（指定欄以外の xml:space と文字も対象）— 違いは指定欄の文字だけ${m[3] ? `；座標指定の空欄 ${m[3]} 個は書式なしの文字だけ` : ""}`],
+  [/^(\d+) tables, (\d+) rows, (\d+) cells, (\d+) merged cells — identical$/, (m) => `表 ${m[1]}・行 ${m[2]}・セル ${m[3]}・結合セル ${m[4]} — 同一`],
+  [/^cells (\d+)→(\d+), merged cells (\d+)→(\d+)$/, (m) => `セル ${m[1]}→${m[2]}、結合セル ${m[3]}→${m[4]}`],
+  [/^(\d+) border definitions and (\d+) shading fills — identical$/, (m) => `罫線定義 ${m[1]}・網掛け ${m[2]} — 同一`],
+  [/^border definitions (\d+)→(\d+), shading (\d+)→(\d+)$/, (m) => `罫線定義 ${m[1]}→${m[2]}、網掛け ${m[3]}→${m[4]}`],
+  [/^(\d+) cell border edges and all cell styles — identical(?:; style id \(s\) of (\d+) designated cell\(s\) kept)?$/,
+    (m) => `セル罫線 ${m[1]} 辺と全セルのスタイル — 同一${m[2] ? `；記入した ${m[2]} セルのスタイル番号も維持` : ""}`],
+  [/^border edges (\d+)→(\d+)$/, (m) => `セル罫線 ${m[1]}→${m[2]} 辺`],
+  [/^(\d+) sheet\(s\), (\d+) merged ranges — identical$/, (m) => `シート ${m[1]}・結合範囲 ${m[2]} — 同一`],
+  [/^merged ranges (\d+)→(\d+)$/, (m) => `結合範囲 ${m[1]}→${m[2]}`],
+  [/^(\d+) paragraphs checked(?:; (\d+) designated empty cell\(s\) formatted exactly like the blank cell \(pPr, paragraph-mark rPr\))?$/,
+    (m) => `段落 ${m[1]} 個を確認${m[2] ? `；座標指定の空欄 ${m[2]} 個は白紙のセルと同じ書式` : ""}`],
+  [/^identical$/, () => "同一"],
+  [/^page (\(.*\)) twips — identical$/, (m) => `用紙 ${m[1]} twips — 同一`],
+  [/^page (\(.*\)) → (\(.*\)) twips$/, (m) => `用紙 ${m[1]} → ${m[2]} twips`],
+  [/^(\d+) formulas, (\d+) data validations, print area — identical$/, (m) => `計算式 ${m[1]}・入力規則 ${m[2]}・印刷範囲 — 同一`],
+  [/^formulas (\d+)→(\d+), data validations (\d+)→(\d+)$/, (m) => `計算式 ${m[1]}→${m[2]}、入力規則 ${m[3]}→${m[4]}`],
+  [/^(\d+) non-slot text blocks identical$/, (m) => `指定欄以外の文字ブロック ${m[1]} 個 — 同一`],
+  [/^(\d+) printed text blocks altered or missing$/, (m) => `印刷された文字ブロック ${m[1]} 個が変更・欠落`],
+  [/^all present$/, () => "すべて残っている"],
+  [/^(\d+) slot text blocks match the approved values$/, (m) => `指定欄 ${m[1]} 個の文字が承認対象の値と一致`],
+  [/^no markers left$/, () => "マーカーの残りなし"],
+  [/^pending human input: (.+)$/, (m) => `人の入力待ち: ${m[1]}`],
+  [/^(\d+) values grounded(?:; (\d+) human-entered \(attested by reviewer\))?(?:; (\d+) recovered without provenance \(not verified\))?$/,
+    (m) => `${m[1]} 件の値に原文の根拠あり${m[2] ? `；確認者の入力 ${m[2]} 件` : ""}${m[3] ? `；出所不明 ${m[3]} 件（未検証）` : ""}`],
+  [/^all numbers\/dates supported$/, () => "数値・日付はすべて引用で裏付け"],
+  [/^all within limits$/, () => "すべて字数制限内"],
+  [/^all formats valid$/, () => "書式はすべて正しい"],
+  [/^all options \/ caps \/ rounding valid$/, () => "選択肢・上限・端数処理はすべて正しい"],
+  [/^python-docx opened it: (\d+) paragraphs, (\d+) tables$/, (m) => `python-docx で開けた: 段落 ${m[1]}・表 ${m[2]}`],
+  [/^openpyxl opened it: sheets (\[.*?\])(?:; (\d+) slot cell\(s\) read back as the approved text)?$/,
+    (m) => `openpyxl で開けた: シート ${m[1]}${m[2] ? `；指定セル ${m[2]} 個を読み戻して承認対象の値と一致` : ""}`],
+  [/^untraceable numbers: (.+)$/, (m) => `出所の無い数値: ${m[1]}`],
+  [/^none(?: found)?$/, () => "なし"],
+  [/^(\d+) violations$/, (m) => `違反 ${m[1]} 件`],
+  [/^(.*?) — caused by .* \/ (.+)$/, (m) => `${visJa(m[1])} — ${m[2]}`],  // the Japanese half follows the last " / "
+  [/^(.*) — a value is probably too long for its field$/, (m) => `${visJa(m[1])} — 欄に収まらない値がある可能性`],
+];
+const checkText = (c) => (S.lang === "ja" && CHECK_JA[c.description]) || c.description;
+function detailText(d) {
+  if (S.lang !== "ja" || !d) return d || "";
+  for (const [re, fn] of DETAIL_JA) { const m = re.exec(d); if (m) return fn(m); }
+  return d;
+}
+const ENGINE_JA = [
+  [/^Offline demo engine \(deterministic rules, no API key\)/, () => "オフラインエンジン（決定論的ルール・API キー不要）"],
+  [/^deterministic rules \(offline\)$/, () => "決定論的ルール（オフライン）"],
+  [/ — live call failed, used offline engine$/, () => "（ライブ呼び出しに失敗したためオフラインエンジンを使用）"],
+];
+const engineText = (l) => (S.lang !== "ja" || !l ? l || "" : ENGINE_JA.reduce((s, [re, fn]) => s.replace(re, fn), l));
+const STATUS_TEXT = { PASS: ["合格", "PASS"], NEEDS_HUMAN_INPUT: ["人の入力待ち", "NEEDS_HUMAN_INPUT"], FAIL: ["不合格", "FAIL"] };
+const statusText = (s) => (STATUS_TEXT[s] ? L(...STATUS_TEXT[s]) : s);
 
 // Python counts characters as Unicode code points; JS .length counts UTF-16 units (𠮷 or 🧪 = 2).
 // Every offset / length that comes from the server is therefore applied to Array.from(text).
@@ -416,10 +525,10 @@ function renderTourBar() {
 
 function demoButton(d, onclick, unmarked) {
   return h("button", { class: `demo${unmarked ? " demo-unmarked" : ""}${S.activeDemo === d.id ? " active" : ""}`, type: "button", onclick },
-    h("div", { class: "demo-top" }, d.label ? h("span", { class: "demo-no" }, d.label) : null,
+    h("div", { class: "demo-top" }, d.label ? h("span", { class: "demo-no" }, L(d.label, `Demo ${d.number}`)) : null,
       h("span", { class: "ftype" }, `.${d.file_type}`), h("span", { class: "demo-title" }, d.title),
       unmarked ? h("span", { class: "badge-auto", title: L("マーカーの無い白紙様式。空欄を自動検出し、人が確定した欄だけに記入します",
-        "No markers: blank cells are discovered, and only the cells you confirm are filled") }, "空欄自動検出") : null),
+        "No markers: blank cells are discovered, and only the cells you confirm are filled") }, L("空欄自動検出", "auto-detect")) : null),
     h("div", { class: "demo-org" }, `${d.org} · ${d.title_en}`),
     unmarked ? h("div", { class: "demo-cta" }, "🔍 ", B("空欄を自動発見 → 人が確定 → 記入", "discover → you confirm → fill")) : null,
     h("div", { class: "chips" }, (d.highlights || []).map((x) => h("span", { class: "chip" }, x))));
@@ -559,13 +668,13 @@ function renderDiscovery() {
   const applicant = cands.length - office;
   const rec = cands.filter((c) => c.recommended && !c.office_only).length;
   $("#discTitle").textContent = d.title || d.form_title || d.form;
-  $("#discSub").textContent = [d.title_en, d.org, d.form, `${L("第2段階", "stage 2")}: ${d.engine.label}`].filter(Boolean).join(" · ");
+  $("#discSub").textContent = [d.title_en, d.org, d.form, `${L("第2段階", "stage 2")}: ${engineText(d.engine.label)}`].filter(Boolean).join(" · ");
   const found = (st[1] || {}).found ?? cands.length + d.rejected.length;
   fill($("#discStages"),
     stageCard("1", "ヒューリスティック抽出", "Heuristic extraction", L(`${found} 個の空欄`, `${found} empty cells`),
       L("印字ラベルの右・列見出しの下の空欄", "next to a printed label / under a column header")),
     stageCard("2", "意味分類・ルール推定", "Classification & rule inference",
-      L(`申請者 ${applicant}・事務局 ${office}`, `${applicant} applicant · ${office} office-only`), d.engine.label),
+      L(`申請者 ${applicant}・事務局 ${office}`, `${applicant} applicant · ${office} office-only`), engineText(d.engine.label)),
     stageCard("3", "決定論的安全検査", "Deterministic safety check",
       L(`合格 ${(st[3] || {}).passed ?? cands.length}・除外 ${d.rejected.length}`, `${(st[3] || {}).passed ?? cands.length} passed · ${d.rejected.length} rejected`),
       L("計算式・結合セルの続き・既存の内容は除外", "formulas, merged continuations and filled cells are rejected")),
@@ -720,7 +829,7 @@ function renderHeader() {
   fill(st, si.node);
   $("#runTitle").textContent = r.form.title;
   const eng = r.engine || {};
-  $("#runSub").textContent = `${r.form.title_en ? r.form.title_en + " · " : ""}${r.display_name} → ${r.filled.name} · ${L("エンジン", "engine")}: ${eng.label || "?"}`
+  $("#runSub").textContent = `${r.form.title_en ? r.form.title_en + " · " : ""}${r.display_name} → ${r.filled.name} · ${L("エンジン", "engine")}: ${engineText(eng.label) || "?"}`
     + (eng.fallback_reason ? ` (fallback: ${eng.fallback_reason})` : "")
     + (r.confirmed_candidates && r.confirmed_candidates.length ? ` · ${L("確定した空欄", "confirmed cells")}: ${r.confirmed_candidates.join(", ")}` : "")
     + (r.imported_from ? ` · ${L("MCP の下書き（再検査済み・未承認）", "MCP draft (re-verified, unapproved)")}: ${r.imported_from}` : "")
@@ -828,7 +937,8 @@ function renderVerdicts() {
     const fails = r.naive_report.checks.filter((c) => !c.passed);
     nv.hidden = false;
     fill(nv, h("h3", {}, B(`✗ 作り直しで壊れたもの（${fails.length}）`, `✗ What a from-scratch regeneration broke (${fails.length})`)),
-      h("ul", {}, fails.map((c) => h("li", {}, h("span", { class: "bad-i" }, "✗ "), h("b", {}, c.description), ` — ${c.details}`))));
+      h("ul", {}, fails.map((c) => h("li", { title: `${c.check_id}: ${c.description} — ${c.details}` }, h("span", { class: "bad-i" }, "✗ "),
+        h("b", {}, checkText(c)), ` — ${detailText(c.details)}`))));
   } else {
     nv.hidden = false;
     fill(nv, h("h3", {}, B("この様式には作り直し版の比較はありません", "No naive comparison for this form")),
@@ -838,8 +948,8 @@ function renderVerdicts() {
   const keep = ["ZIP-04", "XML-03", "LAYOUT-01", "LAYOUT-02", "TEXT-01", "GRD-01", "GRD-02", "CON-03"];
   const checks = r.report.checks.filter((c) => keep.includes(c.check_id) || !c.passed);
   fill($("#fgVerdict"), h("h3", {}, B("✓ Form-Guard がこのファイルで証明したこと", "✓ What Form-Guard proved for this file")),
-    h("ul", {}, checks.map((c) => h("li", {}, h("span", { class: c.passed ? "ok-i" : "bad-i" }, c.passed ? "✓ " : "✗ "),
-      h("b", {}, c.description), ` — ${c.details}`))));
+    h("ul", {}, checks.map((c) => h("li", { title: `${c.check_id}: ${c.description} — ${c.details}` },
+      h("span", { class: c.passed ? "ok-i" : "bad-i" }, c.passed ? "✓ " : "✗ "), h("b", {}, checkText(c)), ` — ${detailText(c.details)}`))));
 }
 
 function bindSliderDrag() {
@@ -884,7 +994,9 @@ function routeInfo(m) {
 }
 
 function modelChip(id, plan, alias) {
-  return h("span", { class: `mb mb-${modelFamily(alias ? `claude-${alias}-` : id)}${plan ? " mb-plan" : ""}`, title: id }, alias ? `${alias[0].toUpperCase()}${alias.slice(1)}` : modelName(id));
+  const full = Boolean(alias) && /^claude-/.test(alias);  // a subagent's front matter may name an alias or a model id
+  const text = alias && !full ? `${alias[0].toUpperCase()}${alias.slice(1)}` : modelName(alias || id);
+  return h("span", { class: `mb mb-${modelFamily(alias && !full ? `claude-${alias}-` : alias || id)}${plan ? " mb-plan" : ""}`, title: id }, text);
 }
 
 function modelBadge(m) {
@@ -950,7 +1062,7 @@ function renderFields() {
   const maps = mapsById();
   $("#fieldRows").replaceChildren(...r.slots.map((s) => {
     const m = maps[s.slot_id];
-    const val = m.filled_value || (m.suggested_value ? `${L("候補", "suggestion")}: ${m.suggested_value}` : L("（未記入 — 入力待ち）", "（未記入 — awaiting input）"));
+    const val = m.filled_value || (m.suggested_value ? `${L("候補", "suggestion")}: ${m.suggested_value}` : L("（未記入 — 入力待ち）", "(empty — awaiting input)"));
     const n = cpLength(m.filled_value);
     const over = s.max_chars && n > s.max_chars;
     return h("tr", { dataset: { slot: s.slot_id }, onclick: () => selectSlot(s.slot_id, true) },
@@ -1072,14 +1184,15 @@ function renderAudit() {
     const ok = items.filter((c) => c.passed).length;
     return h("div", { class: "ag" },
       h("h3", {}, B(ja, en), h("span", { class: ok === items.length ? "ok-i" : "bad-i" }, `${ok === items.length ? "✓" : "✗"} ${ok}/${items.length}`)),
-      ...items.map((c) => h("div", { class: "ck" }, h("span", { class: c.passed ? "ok-i" : "bad-i" }, c.passed ? "✓" : "✗"),
-        h("span", {}, h("b", {}, `${c.check_id} `), c.description), h("span", { class: "d" }, c.details))));
+      ...items.map((c) => h("div", { class: "ck", title: `${c.description} — ${c.details}` }, h("span", { class: c.passed ? "ok-i" : "bad-i" }, c.passed ? "✓" : "✗"),
+        h("span", {}, h("b", {}, `${c.check_id} `), checkText(c)), h("span", { class: "d" }, detailText(c.details)))));
   }));
   $("#entryRows").replaceChildren(...r.report.entry_hashes.map((e) => {
     let res = h("span", { class: "res-bad" }, L("✗ 変更あり", "✗ changed"));
     if (e.role === "target") res = h("span", { class: "res-target" }, e.identical ? L("対象 · 変更なし", "target · unchanged") : L("対象 · 欄の文字のみ", "target · slot text only"));
     else if (e.identical && e.raw_identical) res = h("span", { class: "res-ok" }, L("✓ バイト単位で同一", "✓ byte-identical"));
-    return h("tr", {}, h("td", {}, e.name), h("td", {}, e.role), h("td", {}, `${e.original_sha256.slice(0, 20)}…`), h("td", {}, res));
+    const role = { target: ["記入対象", "target"], untouched: ["対象外", "untouched"] }[e.role];
+    return h("tr", {}, h("td", {}, e.name), h("td", {}, role ? L(...role) : e.role), h("td", {}, `${e.original_sha256.slice(0, 20)}…`), h("td", {}, res));
   }));
   $("#patchRows").replaceChildren(...r.patches.map((p) => h("tr", {}, h("td", {}, p.part_name), h("td", {}, p.slot_id),
     h("td", { class: "num" }, `${p.byte_start}–${p.byte_end}`),
@@ -1127,7 +1240,7 @@ function renderHitl() {
     return h("li", { class: `${it.kind === "global" ? "global" : ""}${blocked ? " blocked" : ""}` }, cb,
       h("div", {},
         it.slot_id ? h("div", {}, h("b", {}, it.label), " ＝ ", h("span", { class: "f-value" }, it.value || L("（未記入）", "（empty）"))) : null,
-        h("div", { class: "q" }, it.prompt),
+        h("div", { class: "q" }, L(it.prompt_ja || it.prompt, it.prompt_en || it.prompt)),
         it.source_quote ? h("div", { class: "quote" }, `「${it.source_quote}」`) : null,
         flags.length ? h("div", { class: "chips" }, flags) : null,
         m && it.slot_id ? h("a", { href: "#", onclick: (e) => { e.preventDefault(); selectSlot(it.slot_id, true); showTab("fields"); } }, L("根拠を見る →", "show source →")) : null,
@@ -1153,8 +1266,16 @@ async function submitValues(values, okMessage) {
     setRun(run, false);
     const still = run.report.pending_slots;
     toast(still.length ? L(`まだ入力待ち: ${still.join(", ")}`, `Still awaiting: ${still.join(", ")}`)
-      : (okMessage || L("全欄を記入し再検査しました。チェックリストを確認してください。", "All fields filled — re-verified. Review the checklist.")));
+      : run.report.overall_status === "FAIL"  // e.g. a longer value no longer fits its cell (VIS-01)
+        ? L("保存しましたが、再検査で不合格です。", "Saved, but re-verification failed.") + failedChecksText(run)
+        : (okMessage || L("全欄を記入し再検査しました。チェックリストを確認してください。", "All fields filled — re-verified. Review the checklist.")));
   } catch (e) { toast(L(`再検査に失敗: ${e.message}`, `Re-verify failed: ${e.message}`)); } finally { busy(false); }
+}
+
+// " VIS-01: …" — which deterministic checks failed and why, for the locked-download message and the toast.
+function failedChecksText(r) {
+  const failed = r.report.checks.filter((c) => !c.passed);
+  return failed.length ? ` ${failed.map((c) => `${c.check_id}: ${detailText(c.details)}`).join(" · ")}` : "";
 }
 
 function updateApprove() {
@@ -1175,7 +1296,7 @@ function updateApprove() {
     msg.className = "msg err";
     msg.textContent = r.report.pending_slots.length
       ? L(`ダウンロードはロック中: ${r.report.pending_slots.length} 欄がまだ入力待ちです。`, `Download locked: ${r.report.pending_slots.length} field(s) still need your input.`)
-      : L("ダウンロードはロック中: 検査に合格していません。", "Download locked: verification did not pass.");
+      : L("ダウンロードはロック中: 検査に合格していません。", "Download locked: verification did not pass.") + failedChecksText(r);
   } else if (!allChecked) {
     msg.className = "msg";
     msg.textContent = L(`${required.filter((i) => S.checked.has(i)).length}/${required.length} 項目を確認済み`,
@@ -1409,7 +1530,7 @@ function suiteSections(s, run) {
           h("td", { class: "num" }, r.candidates ? `${r.fields} / ${r.candidates}` : String(r.fields)), h("td", { class: "num" }, String(r.chars)),
           h("td", { class: "num" }, r.tags.toLocaleString()), h("td", { class: "num" }, String(r.text_blocks)), h("td", { class: "num" }, String(r.merges)),
           h("td", { class: "num" }, String(r.borders)), h("td", { class: "num" }, `${r.ms} ms`),
-          h("td", {}, `${r.passed}/${r.total} `, h("span", { class: `st ${r.status === "PASS" ? "st-filled" : "st-pending"}` }, r.status)),
+          h("td", {}, `${r.passed}/${r.total} `, h("span", { class: `st ${r.status === "PASS" ? "st-filled" : "st-pending"}`, title: r.status }, statusText(r.status))),
           h("td", { class: "num" }, String(r.hitl) + (r.pending ? ` + ${r.pending}` : ""))))))),
       h("p", { class: "f-ctx" }, L("オフラインエンジンでこの PC 上で計測（ネットワークなし）。手作業の列はファイルから数えた作業量で、人の作業時間を計ったものではありません。マーカーなし様式の「欄」は 確定した欄 / 空欄候補 です。",
         "Measured on this machine with the offline engine (no network). The manual columns are counted from the files, not a timed study of a person. For unmarked forms “Fields” is confirmed cells / candidate cells."))));

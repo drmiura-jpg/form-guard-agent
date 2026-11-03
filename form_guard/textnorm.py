@@ -26,6 +26,11 @@ WEEKDAYS_JA = "月火水木金土日"
 
 _D = "[0-9０-９]"
 _WAREKI_RE = re.compile(rf"(令和|平成|昭和)\s*(元|{_D}{{1,2}})\s*年\s*({_D}{{1,2}})\s*月\s*({_D}{{1,2}})\s*日")
+# Abbreviated era dates as written in administrative notes: R8.12.15, H31/4/30, Ｒ８．１２．１５, 令和8.12.15
+_ERA_LETTERS = {"R": "令和", "H": "平成", "S": "昭和"}
+_WAREKI_ABBR_RE = re.compile(
+    rf"(?<![A-Za-zＡ-Ｚａ-ｚ0-9０-９])([RHSＲＨＳ]|令和|平成|昭和)\s*(元|{_D}{{1,2}})\s*([./／．])\s*({_D}{{1,2}})\s*\3\s*({_D}{{1,2}})"
+    rf"(?![0-9０-９]|\s*[./／．]\s*[0-9０-９])")
 _WESTERN_KANJI_RE = re.compile(rf"({_D}{{4}})\s*年\s*({_D}{{1,2}})\s*月\s*({_D}{{1,2}})\s*日")
 _WESTERN_SEP_RE = re.compile(rf"(?<![0-9０-９])({_D}{{4}})\s*[/／\-－.．]\s*({_D}{{1,2}})\s*[/／\-－.．]\s*({_D}{{1,2}})(?![0-9０-９])")
 _MD_KANJI_RE = re.compile(rf"(?<![年0-9０-９])({_D}{{1,2}})\s*月\s*({_D}{{1,2}})\s*日")
@@ -109,7 +114,7 @@ def era_to_year(era: str, y: str) -> int:
 
 
 def find_dates(text: str) -> list[DateMatch]:
-    """Find date expressions (和暦, 2026年11月2日, 2026/11/2, 11月2日, 11/2（月）)."""
+    """Find date expressions (和暦, R8.12.15, 2026年11月2日, 2026/11/2, 11月2日, 11/2（月）)."""
     found: list[DateMatch] = []
     taken: list[tuple[int, int]] = []
 
@@ -133,6 +138,10 @@ def find_dates(text: str) -> list[DateMatch]:
     for m in _WAREKI_RE.finditer(text):
         n = _era_number(m.group(2))  # the year is kept even if the era year is impossible; problem() reports it
         add(m, ERA_BOUNDS[m.group(1)][0].year + n - 1, _n(m.group(3)), _n(m.group(4)), "wareki", m.group(1), n)
+    for m in _WAREKI_ABBR_RE.finditer(text):
+        era = _ERA_LETTERS.get(unicodedata.normalize("NFKC", m.group(1)), m.group(1))
+        n = _era_number(m.group(2))
+        add(m, ERA_BOUNDS[era][0].year + n - 1, _n(m.group(4)), _n(m.group(5)), "wareki", era, n)
     for m in _WESTERN_KANJI_RE.finditer(text):
         add(m, _n(m.group(1)), _n(m.group(2)), _n(m.group(3)), "western")
     for m in _WESTERN_SEP_RE.finditer(text):
@@ -370,6 +379,37 @@ def to_halfwidth_id(s: str) -> str:
     return re.sub(r"\s+", "", s)
 
 
+# Invisible characters pasted from web pages, PDFs and chat tools (zero-width space, word joiner, BOM, direction
+# marks, soft hyphen). They would end up invisible inside a filled form and split IDs and numbers apart.
+_INVISIBLE = dict.fromkeys(map(ord, "​⁠﻿‎‏­"))
+# A kana followed by a combining (semi-)voiced sound mark — NFD text, e.g. from macOS: フ + U+309A instead of プ.
+_KANA_COMBINING_RE = re.compile("[ぁ-ゖゝゞァ-ヺヽヾ][゙゚]")
+
+
+def clean_text(text: str) -> tuple[str, list[str]]:
+    """Remove invisible characters and compose kana + combining sound marks (NFD → NFC for those pairs only).
+
+    Nothing visible changes: CJK compatibility ideographs and other NFC / NFKC mappings are deliberately left alone
+    (a person's 異体字 must stay as written). Returns the text and a note per kind of change made.
+    """
+    notes: list[str] = []
+    out = text.translate(_INVISIBLE)
+    if len(out) != len(text):
+        notes.append(f"{len(text) - len(out)} invisible character(s) removed (zero-width space, BOM, soft hyphen …)")
+    n = 0
+
+    def compose(m: re.Match) -> str:
+        nonlocal n
+        c = unicodedata.normalize("NFC", m.group(0))
+        n += c != m.group(0)
+        return c
+
+    composed = _KANA_COMBINING_RE.sub(compose, out)
+    if n:
+        notes.append(f"{n} kana + combining sound mark pair(s) composed (NFD → NFC, e.g. フ+゜ → プ)")
+    return composed, notes
+
+
 def normalize_for_match(s: str) -> str:
     s = unicodedata.normalize("NFKC", s)
     return re.sub(r"\s+", "", s)
@@ -414,8 +454,10 @@ _ACTION_WORDS = re.compile(
     r"交換|依頼|実施|提出|確認|是正|修理|変更|追加|削減|増額|減額|合意|中止|延期|予定|必要|補う|賄う|導入|申請|対応|改修"
 )
 _PROVISIONAL_WORDS = re.compile(r"短縮|補う|完了まで|増額|追加負担金")
-# Conditions / restrictions: deleting text that contains one of these can change what the value permits.
-RESTRICTIVE_WORDS = re.compile(r"ただし|但し|場合に限り|限り|禁止|除く|除き|不可|条件|なければ")
+# Conditions / restrictions: deleting text that contains one of these can change what the value permits
+# (「…に限る」「…に限定」「…以外は」「…は対象外」「…できない」「…してはならない」「…しないこと」 included).
+RESTRICTIVE_WORDS = re.compile(r"ただし|但し|場合に限り|限り|限る|限ら|限定|禁止|除く|除き|不可|条件|なければ|以外|対象外|"
+                               r"できない|できません|してはならない|してはいけない|しないこと")
 # Interim measures / scope limits: kept ahead of anything else, but deletable as a last resort.
 _SAFETY_WORDS = re.compile(r"完了まで|短縮|のみ")
 _PAREN_RE = re.compile(r"[（(][^（）()]*[）)]")
@@ -510,8 +552,8 @@ def condense_extractive(text: str, max_chars: int, joiner: str = "") -> Optional
       3. weekday notes after dates (「11月6日（金）」→「11月6日」), redundant once the date is given;
       4. other sentences without conditions or interim measures (redundancy penalised);
       5. last resort: interim measures (完了まで, 短縮, のみ), then conditions / restrictions
-         (ただし, 場合に限り, 禁止, 除く, 不可, 条件 …) — deleting the latter marks the result
-         ``unsafe`` so it is only offered as a suggestion, never written automatically.
+         (ただし, 場合に限り, に限る, 禁止, 除く, 不可, 以外, 対象外, できない, 条件 …) — deleting the latter
+         marks the result ``unsafe`` so it is only offered as a suggestion, never written automatically.
 
     Anything deleted that fits back afterwards is restored. ``removed`` lists every deleted piece
     in reading order. Returns None if the text cannot fit without rewriting.

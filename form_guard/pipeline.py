@@ -23,10 +23,12 @@ from .mapper import (
     human_mapping,
     make_engine,
     map_fields,
+    normalize_reviewer_value,
     resolve_mode,
 )
 from .models import FieldMapping, PatchRecord, VerificationReport
 from .scanner import ScanResult, find_markers, scan
+from .textnorm import clean_text
 from .verifier import compare_naive, verify
 from .visual_diff import (
     Layout,
@@ -61,6 +63,7 @@ class PipelineResult:
     naive_path: Optional[Path] = None
     builtin_demo: bool = False  # an unmodified built-in demo: sample form + sample memo, no reviewer edits
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    memo_notes: list[str] = field(default_factory=list)  # invisible characters removed / NFD kana composed at intake
 
     @property
     def verified_sha256(self) -> str:
@@ -82,7 +85,8 @@ class PipelineResult:
             "filled": {"name": self.filled_path.name,
                        "sha256": self.report.stats.get("filled_sha256") or _sha_file(self.filled_path)},
             "engine": self.engine,
-            "memo": {"text": self.memo_text, "lines": len(memo_lines), "sha256": hashlib.sha256(self.memo_text.encode()).hexdigest()},
+            "memo": {"text": self.memo_text, "lines": len(memo_lines), "sha256": hashlib.sha256(self.memo_text.encode()).hexdigest(),
+                     **({"normalized": list(self.memo_notes)} if self.memo_notes else {})},
             "slots": [s.model_dump() for s in self.scan.slots],
             "mappings": [m.model_dump() for m in self.mappings],
             "patches": [p.model_dump() for p in self.write.patches],
@@ -189,8 +193,8 @@ def reconstruct_mappings(scan_r: ScanResult, values: dict[str, str], memo: str,
         if rec is not None and rec.is_written and prepare_value(rec.filled_value, ft) == v:
             out.append(rec)
             continue
-        if sid in attested and prepare_value(attested[sid], ft) == v:
-            out.append(human_mapping(slot, attested[sid]))
+        if sid in attested and prepare_value(normalize_reviewer_value(slot, attested[sid])[0], ft) == v:
+            out.append(human_mapping(slot, attested[sid]))  # the file holds the normalised value (1234567890123)
             continue
         if not memo.strip():
             out.append(FieldMapping(slot_id=sid, filled_value=v, status="recovered", char_count=len(v), engine="verify",
@@ -272,7 +276,7 @@ def verify_filled_copy(original: Union[str, Path], filled: Union[str, Path], mem
         memo = memo_text
     else:
         memo = (audit.get("memo") or {}).get("text", "") if audit else ""
-    memo = memo.replace("\r\n", "\n").replace("\r", "\n")
+    memo = clean_text(memo.replace("\r\n", "\n").replace("\r", "\n"))[0]
     recorded = [FieldMapping.model_validate(m) for m in audit.get("mappings", [])] if audit else []
     maps = reconstruct_mappings(sc, values, memo, recorded, attested or {})
     rep = verify(sc, filled, maps, memo)
@@ -363,10 +367,13 @@ def build_previews(result_scan: ScanResult, filled_path: Path, values: dict[str,
     ov_blank: list[Overlay] = []
     ov_filled: list[Overlay] = []
     slot_boxes: set[str] = set()
+    box_slot: dict[str, str] = {}  # box id -> slot id, to name the field behind a VIS-01 failure
     for sid, box, para, orig, new, state in _occurrence_ranges(result_scan, values):
         slot_boxes.add(box)
+        box_slot.setdefault(box, sid)
         if para:
             slot_boxes.add(para)
+            box_slot.setdefault(para, sid)
         lab = labels.get(sid, sid)
         if ft == "docx" and para:
             if orig is not None:
@@ -388,6 +395,11 @@ def build_previews(result_scan: ScanResult, filled_path: Path, values: dict[str,
             elif box.startswith("t") or ".r" in box:
                 ovs.append(Overlay(b.page, b.x + 1.5, b.y + 1.5, b.w - 3, b.h - 3, "fg-slot-cell", lab, sid, box))
     visual = compare_layouts(blank_layout, filled_layout, slot_boxes)
+    visual["grown_slots"] = _grown_slots(blank_layout, filled_layout, box_slot, labels)
+    for d in visual.get("drift_outside_slots") or []:
+        if d.get("box") in box_slot:  # a value overflowing its own cell: name the field
+            d["slot_id"] = box_slot[d["box"]]
+            d["label"] = labels.get(d["slot_id"], d["slot_id"])
     n_filled = sum(1 for v in values.values() if v)
     previews = {
         "blank": svg_document(blank_layout, ov_blank, "Blank original form", "Blank original — designated fields in blue / 空欄の原本（青＝記入欄）", "info"),
@@ -414,6 +426,21 @@ def build_previews(result_scan: ScanResult, filled_path: Path, values: dict[str,
                     pngs[name] = p.name
         visual["png"] = pngs
     return previews, visual
+
+
+def _grown_slots(blank: Layout, filled: Layout, box_slot: dict[str, str], labels: dict[str, str],
+                 tolerance: float = 0.6) -> list[dict[str, Any]]:
+    """Slots whose own box is taller in the filled copy: the value wraps onto more lines than the blank cell held,
+    so the row grows and everything below it moves (the usual cause of VIS-01 drift in a Word form)."""
+    grown: dict[str, dict[str, Any]] = {}
+    for bid, sid in box_slot.items():
+        b, f = blank.boxes.get(bid), filled.boxes.get(bid)
+        if b is None or f is None or f.h - b.h <= tolerance:
+            continue
+        px = round(f.h - b.h, 1)
+        if sid not in grown or px > grown[sid]["grew_px"]:
+            grown[sid] = {"slot_id": sid, "label": labels.get(sid, sid), "box": bid, "grew_px": px}
+    return sorted(grown.values(), key=lambda g: -g["grew_px"])
 
 
 def naive_overlays(scan_r: ScanResult, blank: Layout, naive: Layout,
@@ -504,7 +531,8 @@ def run_pipeline(
     t = time.perf_counter()
     form_path = Path(form_path)
     out_dir = Path(out_dir)
-    memo_text = memo_text.replace("\r\n", "\n").replace("\r", "\n")
+    # invisible characters and NFD kana would be copied into the form verbatim: clean the memo once, at intake
+    memo_text, memo_notes = clean_text(memo_text.replace("\r\n", "\n").replace("\r", "\n"))
     scan_r = scan(form_path, slot_spec)
     office = [] if allow_office_only else office_only_targets(form_path, scan_r.spec)
     if office:
@@ -548,7 +576,7 @@ def run_pipeline(
         run_id=run_id or new_run_id(), form_path=form_path, filled_path=filled_path, memo_text=memo_text,
         scan=scan_r, mappings=mappings, write=write, report=report, naive_report=naive_report, previews=previews,
         visual=visual, engine=engine_info, timings=timings, demo_id=demo_id, out_dir=out_dir, naive_path=naive_p,
-        builtin_demo=is_builtin_demo(demo_id, form_path, memo_text, mappings),
+        builtin_demo=is_builtin_demo(demo_id, form_path, memo_text, mappings), memo_notes=memo_notes,
     )
     if write_outputs:
         write_run_outputs(result)
@@ -569,10 +597,19 @@ def _drift_check(visual: dict[str, Any]):
         parts.append(f"{n_moved} boxes moved (max {visual.get('max_shift_px')}px)")
     if visual.get("pages_blank") != visual.get("pages_filled"):
         parts.append(f"pages {visual.get('pages_blank')}→{visual.get('pages_filled')}")
+    # name the field(s) behind the drift: a value that overflows its cell, or one whose cell grew (wrapped text)
+    culprits = list(dict.fromkeys([str(d["label"]) for d in drift if "overflow" in d.get("issue", "") and d.get("label")]
+                                  + [str(g["label"]) for g in visual.get("grown_slots") or []]))
+    if culprits:
+        named = "、".join(f"「{c}」" for c in culprits)
+        why = (f" — caused by {named}: the value needs more room than its cell in the blank form; shorten it, or "
+               f"write this field by hand in Word or Excel / {named}の値が欄に収まりません（値を短くするか、手作業で記入）")
+    else:
+        why = " — a value is probably too long for its field"
     return AuditCheckItem(check_id="VIS-01", category="visual", passed=False, severity="major",
                           description="Rendered layout outside the designated fields is unchanged and every value fits its cell",
-                          details=" · ".join(parts) + " — a value is probably too long for its field",
-                          evidence={"drift": drift})
+                          details=" · ".join(parts) + why,
+                          evidence={"drift": drift, "fields": culprits})
 
 
 def write_run_outputs(result: PipelineResult) -> dict[str, Path]:

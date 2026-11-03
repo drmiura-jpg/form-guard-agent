@@ -2454,7 +2454,7 @@ def test_p3_3_claude_suite_endpoint_reads_the_repository_assets(api, tmp_path):
 def test_p3_4_web_ui_ships_the_inspector_tier_selector_claude_tab_walkthrough_and_language_toggle(api):
     html, js, css = (api.get(u).text for u in ("/", "/static/app.js", "/static/styles.css"))
     for needle in ('<html lang="ja"', 'data-lang="ja"', 'id="langToggle"', 'data-lang="en"', 'id="tierSelect"',
-                   '<option value="auto" data-t="自動：Haiku / Sonnet / Opus|Auto: Haiku / Sonnet / Opus">',
+                   '<option value="auto" data-t="自動：Haiku 4.5 / Sonnet 5 / Opus 5.5|Auto: Haiku 4.5 / Sonnet 5 / Opus 5.5">',
                    ">Opus 5.5 only<", ">Sonnet 5 only<", ">Haiku 4.5 only<",
                    'data-tab="claude"', 'data-bi="Claude Code 連携|Claude Code · Architecture"', 'id="tab-claude"',
                    'id="unmarkedList"', "マーカーなし白紙様式・空欄自動発見|Unmarked blank forms", 'id="discoverBtn"',
@@ -4371,3 +4371,218 @@ def test_r1_audit2_a15_o8_docs_say_how_to_install_the_claude_code_setup_and_what
         assert "置くだけでは" in text and "リポジトリ直下から" in text
     assert "can drop `.mcp.json` and `.claude/` into their document folder" not in readme
     assert "the others use `Bash` solely for read-only verification commands" not in doc
+
+
+# ------------------------------------------- Playtest 2026-11-03（火）: 60 trials (offline), regressions for its findings
+
+DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+def _form1_with_reason(samples_dir, reason: str) -> str:
+    memo = read_memo(paths(samples_dir, "form1")["memo"])
+    head, rest = memo.split("■ 変更理由と予算への影響（届出書は200字以内）\n", 1)
+    return head + "■ 変更理由と予算への影響（届出書は200字以内）\n" + reason + "\n" + rest.split("\n", 1)[1]
+
+
+def test_playtest_abbreviated_era_dates_like_r8_12_15_are_read_and_written_as_wareki():
+    got = {s: [(d.year, d.month, d.day, d.weekday, d.era) for d in find_dates(s)]
+           for s in ("R8.12.15（火）", "R8/12/15", "Ｒ８．１２．１５（火）", "H31.4.30（火）", "令和8.12.15", "S64.1.7")}
+    assert got == {"R8.12.15（火）": [(2026, 12, 15, "火", "令和")], "R8/12/15": [(2026, 12, 15, None, "令和")],
+                   "Ｒ８．１２．１５（火）": [(2026, 12, 15, "火", "令和")], "H31.4.30（火）": [(2019, 4, 30, "火", "平成")],
+                   "令和8.12.15": [(2026, 12, 15, None, "令和")], "S64.1.7": [(1989, 1, 7, None, "昭和")]}
+    assert [d.problem()[0] for d in find_dates("R1.4.30")] == ["date_invalid"]  # 令和 began on 2019-05-01
+    for not_a_date in ("見積書No.Q-2026-118", "AR8.12.15", "R8.12.15.3", "R8.12/15", "補助率1/3", "AC-2E"):
+        assert not find_dates(not_a_date), not_a_date
+    slot = _text_slot("提出日", fmt="wareki_date")
+    for src in ("R8.12.15（火）", "R8/12/15"):
+        m = map_fields([slot], f"提出日：{src}に提出\n", DemoEngine()).mappings[0]
+        assert m.status == "filled" and m.filled_value == "令和8年12月15日（火）", (src, m.errors)
+
+
+def test_playtest_condensation_never_silently_drops_a_restriction_such_as_ni_kagiru(samples_dir, tmp_path):
+    from form_guard.textnorm import RESTRICTIVE_WORDS
+
+    for s in ("学内の共用計算機に限る。", "対象は市内の事業者に限ります。", "利用は平日に限定する。", "土日以外は使用しない。",
+              "研究目的外の利用は対象外とする。", "夜間は入館できない。", "データは学外に持ち出してはならない。", "試料を廃棄しないこと。"):
+        assert RESTRICTIVE_WORDS.search(s), s
+    for s in ("6回が実施できなくなった。", "清掃のみで異常なし。"):  # a fact or a status remark is not a restriction
+        assert not RESTRICTIVE_WORDS.search(s), s
+    c = condense_extractive("第1文で日付は2026年12月1日。計算サーバは学内の共用計算機に限る。", 20)
+    assert c is not None and c.unsafe and c.removed == ["計算サーバは学内の共用計算機に限る。"]  # only as a suggestion
+    reason = ("共同研究先の試験設備が2026年12月から改修工事に入り、当初予定していた実機試験12回のうち6回が実施できなくなった。"
+              "計算サーバの利用は学内の共用計算機に限る。"
+              "そこで不足分を数値シミュレーションで補うこととした。なお、シミュレーションの妥当性は残る6回の実機試験結果と比較して検証する。"
+              "予算面では、試験装置の借用料が42万円減る一方、計算サーバ利用料として80万円が新たに必要になるため、差し引きで38万円の増額となる。"
+              "増額分は共同研究先からの追加負担金で賄うことで合意済み（直接経費総額に占める割合は約6％で、20％未満のため経費変更承認申請は不要）。")
+    r = run_pipeline(paths(samples_dir, "form1")["form"], _form1_with_reason(samples_dir, reason), tmp_path / "t12", mode="demo")
+    m = next(x for x in r.mappings if x.slot_id == "変更理由および予算影響")
+    # before the fix 「…に限る。」 was the first sentence deleted, without any warning, and the value was written
+    assert m.status == "filled" and "計算サーバの利用は学内の共用計算機に限る。" in m.filled_value and len(m.filled_value) <= 200
+    assert r.report.overall_status == "PASS"
+
+
+def test_playtest_memo_intake_removes_invisible_characters_and_composes_nfd_kana(samples_dir, tmp_path, demo_runs):
+    from form_guard.pipeline import verify_filled_copy
+    from form_guard.textnorm import clean_text
+
+    assert clean_text("株式会社サンプル​精工") == ("株式会社サンプル精工", [
+        "1 invisible character(s) removed (zero-width space, BOM, soft hyphen …)",
+        "1 kana + combining sound mark pair(s) composed (NFD → NFC, e.g. フ+゜ → プ)"])
+    assert clean_text("神神 ﾌﾟ ア゙") == ("神神 ﾌﾟ ア゙", [])  # 異体字, half-width kana: never changed
+    p2 = paths(samples_dir, "form2")
+    memo2 = read_memo(p2["memo"]).replace("申請事業者名：株式会社サンプル精工", "申請事業者名：株式会社サンプル精工")
+    r2 = run_pipeline(p2["form"], memo2, tmp_path / "nfd", mode="demo")
+    assert next(x for x in r2.mappings if x.slot_id == "申請事業者名").filled_value == "株式会社サンプル精工"
+    assert "゚" not in r2.memo_text and r2.to_dict()["memo"]["normalized"] == [
+        "1 kana + combining sound mark pair(s) composed (NFD → NFC, e.g. フ+゜ → プ)"]
+    assert not _failing(verify_filled_copy(p2["form"], r2.filled_path, memo2).report)  # the raw memo verifies as well
+    p1 = paths(samples_dir, "form1")
+    memo1 = read_memo(p1["memo"]).replace("ＪＲ－２０２６－０４７", "ＪＲ－２０２６​－０４７")
+    r1 = run_pipeline(p1["form"], memo1, tmp_path / "zwsp", mode="demo")
+    assert next(x for x in r1.mappings if x.slot_id == "研究課題番号").filled_value == "JR-2026-047"  # was: needs input
+    assert r1.report.overall_status == "PASS" and "​" not in r1.memo_text
+    assert "normalized" not in demo_runs("form1").to_dict()["memo"] and demo_runs("form1").builtin_demo
+
+
+def test_playtest_two_different_values_for_one_field_in_the_memo_go_to_the_reviewer():
+    date_slot, yen_slot = _text_slot("申請日", fmt="wareki_date"), _text_slot("導入予定金額", fmt="yen")
+    memo = "申請日：2026年11月2日（月）\n導入予定金額：483万6千円\n（訂正）\n申請日：2026年11月9日（月）\n導入予定金額：500万円\n"
+    maps = {m.slot_id: m for m in map_fields([date_slot, yen_slot], memo, DemoEngine()).mappings}
+    for sid, first, second in (("申請日", "L1", "L4"), ("導入予定金額", "L2", "L5")):
+        m = maps[sid]  # before the fix the first statement was written silently
+        assert m.status == "needs_human_input" and not m.filled_value and m.suggested_value
+        assert any("more than once" in e and first in e and second in e for e in m.errors), m.errors
+    same = "申請日：2026/11/2（月）\n申請日：令和8年11月2日（月）\n導入予定金額：483万6千円\n導入予定金額：4,836,000円\n"
+    maps = {m.slot_id: m for m in map_fields([date_slot, yen_slot], same, DemoEngine()).mappings}
+    assert maps["申請日"].filled_value == "令和8年11月2日（月）" and maps["導入予定金額"].filled_value == "4,836,000円"
+
+
+def test_playtest_reviewer_values_are_normalised_into_the_printed_format(samples_dir, api):
+    sc = scan(paths(samples_dir, "form2")["form"])
+    cases = {
+        ("法人番号", "１２３４５６７８９０１２３"): ("1234567890123", ""), ("法人番号", "1234-5678-90123"): ("1234567890123", ""),
+        ("法人番号", "123456789012"): ("123456789012", "13 digits required, 12 given / 13桁の数字が必要です（入力は12桁）"),
+        ("補助金申請額", "52000"): ("52,000円", ""), ("補助金申請額", "５万２千円"): ("52,000円", ""),
+        ("補助金申請額", "52,00"): ("52,00", "not a yen amount"), ("補助金申請額", "約5万円"): ("約5万円", "not a yen amount"),
+        ("補助金申請額", "1200000"): ("1,200,000円", "exceeds the printed cap"),
+        ("申請日", "2026/11/4"): ("令和8年11月4日（水）", ""), ("申請日", "2026年11月4日" + "（木）"): ("2026年11月4日" + "（木）", "曜日"),
+        ("事業実施期間", "2026/12/1～2027/2/26"): ("令和8年12月1日（火）～令和9年2月26日（金）", ""),
+    }
+    for (sid, typed), (value, error) in cases.items():
+        m = human_mapping(sc.slot(sid), typed)
+        assert m.filled_value == value and (error in " ".join(m.errors) if error else not m.errors), (typed, m.errors)
+        assert any("normalised" in w for w in m.warnings) == (value != typed)
+    run = api.post("/api/runs", json={"demo_id": "form2", "mode": "demo"}).json()
+    ok = api.post(f"/api/runs/{run['run_id']}/overrides", json={"values": {"法人番号": "１２３４５６７８９０１２３"}}).json()
+    m = next(x for x in ok["mappings"] if x["slot_id"] == "法人番号")
+    assert ok["report"]["overall_status"] == "PASS" and m["filled_value"] == "1234567890123" and "halfwidth" in m["normalizations"]
+
+
+def test_playtest_negative_coordinates_in_a_slot_spec_never_wrap_around(samples_dir):
+    form4 = unmarked_paths(next(u for u in UNMARKED_FORMS if u["id"] == "form4"), samples_dir)["form"]
+    for tgt in ({"table": 0, "row": -1, "col": 2}, {"table": -1, "row": 1, "col": 2}, {"table": 0, "row": 1, "col": -1},
+                {"table": 0, "row": True, "col": 2}, {"table": 0, "row": 1.0, "col": 2}, {"table": "0", "row": "x", "col": 2}):
+        spec = {"targets": [{"slot_id": "x", **tgt}]}
+        sc = scan(form4, spec)  # row -1 used to address the last row (受付・審査欄) of the table
+        assert not sc.slots and "not found" in sc.warnings[0], tgt
+        assert office_only_targets(form4, spec) == [], tgt
+    assert [s.slot_id for s in scan(form4, {"targets": [{"slot_id": "x", "table": "0", "row": "1", "col": "2"}]}).slots] == ["x"]
+    assert office_only_targets(form4, {"targets": [{"slot_id": "x", "table": 0, "row": 14, "col": 2}]})  # still guarded
+
+
+def test_playtest_every_run_endpoint_refuses_a_blank_memo(api, samples_dir):
+    blank = "  \n\t"
+    d = api.post("/api/discover/demo", json={"demo_id": "form4", "mode": "demo"}).json()
+    with paths(samples_dir, "form1")["form"].open("rb") as fh:
+        up = api.post("/api/runs/upload", files={"file": ("form1.docx", fh, DOCX_MIME)}, data={"memo_text": blank, "mode": "demo"})
+    answers = [api.post("/api/runs", json={"demo_id": "form1", "memo_text": blank, "mode": "demo"}),
+               api.post("/api/run-demo", json={"demo_id": "form2", "memo_text": blank, "mode": "demo"}),
+               api.post("/api/run-demo", json={"demo_id": "form5", "memo_text": "", "mode": "demo"}),
+               api.post("/api/runs/from-discovery", json={"discovery_id": d["discovery_id"], "confirmed_targets": "recommended",
+                                                          "memo_text": blank, "mode": "demo"}), up]
+    assert [r.status_code for r in answers] == [400] * 5  # /api/runs, /api/run-demo and the upload used to answer 200
+    assert all("memo_text is required" in r.json()["detail"] for r in answers)
+    assert api.post("/api/runs", json={"demo_id": "form1", "mode": "demo"}).status_code == 200  # the sample memo
+
+
+def test_playtest_vis01_names_the_field_whose_value_no_longer_fits(api, samples_dir, tmp_path):
+    run = api.post("/api/runs", json={"demo_id": "form2", "mode": "demo"}).json()
+    rid = run["run_id"]
+    bad = api.post(f"/api/runs/{rid}/overrides", json={"values": {
+        "法人番号": "1234567890123", "所在地": "架空市中央区架空町一丁目2番3号 架空ビル5階"}}).json()
+    vis = next(c for c in bad["report"]["checks"] if c["check_id"] == "VIS-01")
+    assert bad["report"]["overall_status"] == "FAIL" and not bad["can_approve"]
+    assert "caused by 「所在地」" in vis["details"] and "「所在地」の値が欄に収まりません" in vis["details"]
+    assert vis["evidence"]["fields"] == ["所在地"] and bad["visual"]["grown_slots"][0]["slot_id"] == "所在地"
+    ok = api.post(f"/api/runs/{rid}/overrides", json={"values": {"所在地": "架空市中央区架空町1-2-3"}}).json()
+    assert ok["report"]["overall_status"] == "PASS" and ok["visual"]["grown_slots"] == []
+    p3 = paths(samples_dir, "form3")  # Excel cells never grow: a value wider than its cell overflows — named as well
+    memo3 = read_memo(p3["memo"]).replace("点検対象施設：架空市立サンプル技術交流センター（本館）",
+                                          "点検対象施設：" + "架空市立サンプル技術交流センター本館" * 3)
+    v3 = check(run_pipeline(p3["form"], memo3, tmp_path / "wide", mode="demo").report, "VIS-01")
+    assert not v3.passed and "caused by 「点検対象施設」" in v3.details
+
+
+def test_playtest_edits_work_on_discovery_runs_and_on_imported_unmarked_mcp_drafts(samples_dir, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from form_guard.mcp_server import FormGuardMCP
+    from form_guard.server import create_app
+
+    root = _mcp_root(tmp_path, samples_dir)
+    app = create_app(run_root=tmp_path / "web_runs", samples_dir=samples_dir, project_root=root,
+                     import_roots=[root / "output" / "mcp_runs", root / "output"])
+    api = TestClient(app)
+    d = api.post("/api/discover/demo", json={"demo_id": "form4", "mode": "demo"}).json()
+    run = api.post("/api/runs/from-discovery", json={"discovery_id": d["discovery_id"], "confirmed_targets": "recommended",
+                                                     "mode": "demo"}).json()
+    value = "架空学術機関 材料工学研究室（第2研究棟）"
+    edited = api.post(f"/api/runs/{run['run_id']}/overrides", json={"values": {"所属機関": value}}).json()
+    assert edited["report"]["overall_status"] == "PASS" and edited["revision"] == 1  # the run's slot spec is kept
+    assert edited["confirmed_candidates"] == run["confirmed_candidates"] and len(edited["slots"]) == 7
+    st = app.state.store.runs[run["run_id"]]
+    assert infer_values_from_filled(st.result.scan, st.result.filled_path)["所属機関"] == value
+    srv = FormGuardMCP(root=root)
+    form4 = "samples/blank_forms/form4_unmarked_blank.docx"
+    disc = srv.call_tool("form_guard_discover_blank_cells", {"form_path": form4})["structuredContent"]
+    f = srv.call_tool("form_guard_fill", {"form_path": form4, "memo_path": "samples/memos/memo4_equipment_use.txt",
+                                          "discovery": disc, "confirmed_ids": recommended_ids(disc)})["structuredContent"]
+    imported = api.get(f"/api/runs/{f['run_id']}").json()  # imported with the confirmed cells recorded in web_handoff.json
+    e = api.post(f"/api/runs/{f['run_id']}/overrides", json={"values": {"所属機関": "架空学術機関 材料工学研究室 第3実験室"}}).json()
+    assert e["report"]["overall_status"] == "PASS" and [s["slot_id"] for s in e["slots"]] == [s["slot_id"] for s in imported["slots"]]
+    appr = api.post(f"/api/runs/{f['run_id']}/approve", json={"reviewer": "架空 花子", "checked": _required(e), **_seen(e)})
+    assert appr.status_code == 200 and api.get(appr.json()["download_url"]).status_code == 200
+
+
+def test_playtest_hitl_prompts_come_in_each_language_and_the_recorded_prompt_is_unchanged(demo_runs):
+    items = {it.item_id: it for d in ("form1", "form2") for it in demo_runs(d).report.hitl_checklist}
+    assert all(it.prompt_ja and it.prompt_en and " / " in it.prompt for it in items.values())
+    reason = items["slot:変更理由および予算影響"]
+    assert "字数制限のため削除した文" in reason.prompt_ja and "Condensed for char limit" not in reason.prompt_ja
+    assert "deleted to meet the character limit" in reason.prompt_en and "字数制限" not in reason.prompt_en
+    assert items["slot:法人番号"].prompt_en == "«法人番号» was left empty: the memo gives no evidence for it. Enter the value yourself."
+    assert items["slot:提出日"].prompt_en == "Confirm «提出日» = «令和8年11月2日（月）» against the quoted source L10."
+    assert items["global:visual"].prompt_ja == "比較表示で、指定欄以外（罫線・結合セル・注意事項・誓約文）に変更が無いことを目視確認した"
+    assert items["slot:提出日"].prompt.startswith(items["slot:提出日"].prompt_ja + " / Confirm this value")  # audit log text
+
+
+def test_playtest_web_ui_language_and_layout_fixes(api, demo_runs):
+    from form_guard.pipeline import _drift_check
+
+    html, js, css = (api.get(u).text for u in ("/", "/static/app.js", "/static/styles.css"))
+    for needle in ('data-bi="SHA-256（原本）|SHA-256 (original)"', 'data-bi="結果|Result"', 'data-bi="変更内容|Change"',
+                   'data-bi="バイト範囲|Bytes"'):
+        assert needle in html, needle
+    for needle in ("L(d.label, `Demo ${d.number}`)", 'L("空欄自動検出", "auto-detect")', '"(empty — awaiting input)"',
+                   '"Japanese era date"', "L(it.prompt_ja || it.prompt, it.prompt_en || it.prompt)", "failedChecksText(run)",
+                   "modelName(alias || id)", "engineText(d.engine.label)", "statusText(r.status)"):
+        assert needle in js, needle
+    assert "（未記入 — awaiting input）" not in js and '"和暦 date"' not in js
+    # every check description the verifier emits (21 checks, naive comparison, VIS-01) has a Japanese translation
+    descs = {c.description for d in ("form1", "form2", "form3") for rep in (demo_runs(d).report, demo_runs(d).naive_report)
+             for c in rep.checks}
+    descs.add(_drift_check({"drift_outside_slots": [], "overflow_count": 0, "drift_count": 1}).description)
+    assert len(descs) >= 30 and not [x for x in descs if json.dumps(x, ensure_ascii=False) + ":" not in js]
+    assert ".run-links .pill, .run-links .pill .pri, .run-links .pill .sub { white-space: normal; }" in css  # 1280 px
+    assert "@media (max-width: 1366px) { .top-actions .sub { display: none; } }" in css
+    assert ".preview-side .btn { white-space: normal;" in css and "background: var(--surface); max-width: 300px; }" in css

@@ -292,6 +292,29 @@ _UNSAFE_PARAGRAPH_TOKENS = (b"fldSimple", b"fldChar", b"instrText", b":sdt", b"h
                             b":object")
 
 
+def docx_target_coords(tgt: dict) -> Optional[tuple[int, int, int]]:
+    """(table, row, col) of a .docx coordinate target as non-negative integers, or None.
+
+    A slot spec may come from anyone: a negative index would silently address the last table / row / cell in Python
+    (``tables[-1]``), so negative, boolean, fractional and non-numeric coordinates are refused, never wrapped around.
+    """
+    out: list[int] = []
+    for key in ("table", "row", "col"):
+        v = tgt.get(key)
+        if isinstance(v, bool):
+            return None
+        if isinstance(v, int):
+            n = v
+        elif isinstance(v, str) and v.strip().isdigit():
+            n = int(v.strip())
+        else:
+            return None
+        if n < 0:
+            return None
+        out.append(n)
+    return out[0], out[1], out[2]
+
+
 def _add_coordinate_target(idx: Optional[PartIndex], tgt: dict, accs: dict, warnings: list[str]) -> None:
     slot_id = str(tgt.get("slot_id", "")).strip()
     if "cell" in tgt and "table" not in tgt:
@@ -301,10 +324,11 @@ def _add_coordinate_target(idx: Optional[PartIndex], tgt: dict, accs: dict, warn
     if idx is None or not slot_id:
         warnings.append(f"coordinate target {tgt!r}: part not found")
         return
+    coords = docx_target_coords(tgt)
     try:
-        table = idx.tables[int(tgt["table"])]
-        cell = _cell_at(table, int(tgt["row"]), int(tgt["col"]))
-    except (KeyError, IndexError, ValueError, TypeError):
+        table = idx.tables[coords[0]] if coords else None
+        cell = _cell_at(table, coords[1], coords[2]) if table is not None and coords else None
+    except IndexError:
         cell = None
     if cell is None or not cell.containers:
         warnings.append(f"coordinate target {slot_id!r}: cell (table={tgt.get('table')}, row={tgt.get('row')}, "
@@ -1241,10 +1265,13 @@ def office_only_targets(form_path: Union[str, Path], spec: Union[dict, str, Path
                      {str(t.get("part") or "word/document.xml") for t in targets} if p in names}
         for tgt in targets:
             idx = parts.get(str(tgt.get("part") or "word/document.xml"))
+            coords = docx_target_coords(tgt)
+            if idx is None or coords is None:
+                continue  # scan() reports a cell it cannot find (or a negative coordinate) and never fills it
             try:
-                table = idx.tables[int(tgt["table"])]  # type: ignore[union-attr]
-                cell = _cell_at(table, int(tgt["row"]), int(tgt["col"]))
-            except (AttributeError, KeyError, IndexError, TypeError, ValueError):
+                table = idx.tables[coords[0]]
+                cell = _cell_at(table, coords[1], coords[2])
+            except IndexError:
                 continue  # scan() reports a cell it cannot find and never fills it
             if cell is None:
                 continue

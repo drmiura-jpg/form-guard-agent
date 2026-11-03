@@ -199,7 +199,13 @@ def validate_value(slot: FormSlot, value: str) -> list[ValidationIssue]:
                 issues.append(_issue("max_value", f"{n:,}円 exceeds the printed cap {int(c['max_value']):,}円 / 上限超過"))
     elif fmt in ("pattern", "digits"):
         pat = c.get("pattern")
-        if pat and not re.fullmatch(pat, v):
+        if pat and not re.fullmatch(pat, v) and fmt == "digits" and c.get("digits"):
+            # say how many digits were given: 「123456789012」 is one digit short of a 法人番号, not just "invalid"
+            n = len(re.sub(r"\D", "", unicodedata.normalize("NFKC", v)))
+            other = "" if re.fullmatch(r"[0-9]*", v) else " (half-width digits only, no letters or symbols)"
+            issues.append(_issue("format", f"{c['digits']} digits required, {n} given{other} / "
+                                           f"{c['digits']}桁の数字が必要です（入力は{n}桁）"))
+        elif pat and not re.fullmatch(pat, v):
             hint = c.get("example") or (f"{c.get('digits')} digits" if c.get("digits") else pat)
             issues.append(_issue("format", f"does not match the required pattern ({hint}) / 書式不一致"))
     elif fmt == "choice":

@@ -94,7 +94,7 @@ pip install -r requirements.txt
 
 python -m form_guard.cli --all-demos     # runs the 3 fictional demos -> output/index.html
 python -m form_guard.cli --serve         # web UI on http://127.0.0.1:8000
-pytest -v                                # 225 tests
+pytest -v                                # 236 tests
 ```
 
 Requires Python 3.10+. Without `ANTHROPIC_API_KEY` everything runs on the deterministic **offline demo engine**, so the
@@ -165,7 +165,7 @@ How Claude is used at runtime (`form_guard/mapper.py`):
   `offline (claude-haiku-4-5-20251001 in live auto)` — and their routing groups are marked `planned_in_live_auto`, so a plan is
   never mistaken for a call. The web UI shows the routing per field (Fields & sources, with any API-returned thinking
   summary) and per run (tab **Claude Code 連携 · Architecture**); the top-bar **Model tier** selector
-  (`Auto: Haiku / Sonnet / Opus`, `Opus 5.5 only`, `Sonnet 5 only`, `Haiku 4.5 only`) is sent with every run.
+  (`Auto: Haiku 4.5 / Sonnet 5 / Opus 5.5`, `Opus 5.5 only`, `Sonnet 5 only`, `Haiku 4.5 only`) is sent with every run.
 * **Structured outputs** (`output_config.format` = JSON schema): one entry per field with `value`,
   `source_quotes` (verbatim, single-line), line numbers, confidence and a short reason — or `not_found`.
 * **Adaptive thinking** (`display: "summarized"`) with an explicit **effort** level, streamed with
@@ -524,7 +524,7 @@ Web 画面は日本語が既定です（右上で EN に切替）。上部の「
 各欄の `routed_model` / `route_reason` には実際に応答したモデル（自己修正後は `claude-sonnet-5 → claude-opus-5-5 (revision)`）を
 記録し、オフライン実行では `offline (claude-haiku-4-5-20251001 in live auto)` のように「ライブ auto 時の計画」であることを明示します
 （API を呼んだとは表示しません。ライブ実行が途中で失敗してオフラインに切り替えた場合は、それまでの API 呼び出しとトークン数を
-表示します）。Web 画面の「記入値と根拠」で欄ごとに、右上の「モデル」選択（自動：Haiku / Sonnet / Opus、
+表示します）。Web 画面の「記入値と根拠」で欄ごとに、右上の「モデル」選択（自動：Haiku 4.5 / Sonnet 5 / Opus 5.5、
 Opus 5.5 のみ・Sonnet 5 のみ・Haiku 4.5 のみ）で実行ごとに切り替えられます。Haiku 4.5 は旧世代のモデルなので、adaptive thinking と
 effort は送りません。
 
