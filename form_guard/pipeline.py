@@ -134,7 +134,8 @@ def _map(scan_r: ScanResult, memo: str, mode: str, model: Optional[str], client:
         if partial.get("requests", 0) > 0 or partial.get("calls"):
             # the values come from the offline engine, but the API was called and billed: never report 0 calls
             for key, empty in (("requests", 0), ("input_tokens", 0), ("output_tokens", 0),
-                               ("cache_read_input_tokens", 0), ("models", []), ("calls", []), ("model_fallbacks", [])):
+                               ("cache_creation_input_tokens", 0), ("cache_read_input_tokens", 0),
+                               ("models", []), ("calls", []), ("model_fallbacks", [])):
                 run.usage[key] = partial.get(key, empty)
             run.usage["live_attempt_failed"] = True
     info["usage"] = run.usage

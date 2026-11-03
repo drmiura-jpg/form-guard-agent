@@ -786,7 +786,8 @@ class ClaudeEngine:
         self._proposed_by: dict[str, str] = {}  # slot_id -> tier model that drafted it (for escalation records)
         self._resolved: dict[str, str] = {}     # requested model -> fallback id that answered after a 404
         self.usage: dict[str, Any] = {"requests": 0, "input_tokens": 0, "output_tokens": 0,
-                                      "cache_read_input_tokens": 0, "models": [], "calls": [], "routing": [],
+                                      "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+                                      "models": [], "calls": [], "routing": [],
                                       "thinking_summaries": [], "redacted_thinking_blocks": 0,
                                       "model_fallbacks": [], "escalations": []}
 
@@ -894,7 +895,7 @@ class ClaudeEngine:
                 "reason": "404 not_found_error — model id not available to this API organisation"})
         self.usage["requests"] += 1
         u = getattr(msg, "usage", None)
-        for k in ("input_tokens", "output_tokens", "cache_read_input_tokens"):
+        for k in ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"):
             self.usage[k] += int(getattr(u, k, 0) or 0)
         served = getattr(msg, "model", None) or candidate
         if served not in self.usage["models"]:
@@ -906,6 +907,8 @@ class ClaudeEngine:
             "thinking": "adaptive, summarized" if caps["adaptive_thinking"] else "omitted (not supported by this model)",
             "stop_reason": msg.stop_reason, "input_tokens": int(getattr(u, "input_tokens", 0) or 0),
             "output_tokens": int(getattr(u, "output_tokens", 0) or 0),
+            "cache_creation_input_tokens": int(getattr(u, "cache_creation_input_tokens", 0) or 0),
+            "cache_read_input_tokens": int(getattr(u, "cache_read_input_tokens", 0) or 0),
         })
         self._collect_thinking(msg, served, task, slots)
         if msg.stop_reason == "refusal":

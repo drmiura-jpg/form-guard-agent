@@ -1489,14 +1489,17 @@ function runLanes(run) {
   const failed = liveFailure(run);  // live calls were made before the run fell back to the offline engine
   const u = failed || run.engine.usage || {};
   const [calls, tin, tout, served] = [u.requests || 0, u.input_tokens || 0, u.output_tokens || 0, (u.models || []).join(", ")];
+  const [ccreate, cread] = [u.cache_creation_input_tokens || 0, u.cache_read_input_tokens || 0];
+  const cacheJa = (ccreate || cread) ? `（キャッシュ書込 ${ccreate}・読込 ${cread}）` : "";
+  const cacheEn = (ccreate || cread) ? ` (cache write ${ccreate} / read ${cread})` : "";
   const note = planned && failed
-    ? L(`ライブ実行は ${calls} 回の API 呼び出し（入力 ${tin} / 出力 ${tout} トークン · 応答モデル ${served}）の後に失敗したため、値はオフラインエンジンで作成しました。下はライブの auto モードで各欄を担当するモデル（計画）です。`,
-      `The live run failed after ${calls} API calls (${tin} input / ${tout} output tokens · served by ${served}), so the values come from the offline engine. Below is where live auto mode would send each field (the plan).`)
+    ? L(`ライブ実行は ${calls} 回の API 呼び出し（入力 ${tin} / 出力 ${tout} トークン${cacheJa} · 応答モデル ${served}）の後に失敗したため、値はオフラインエンジンで作成しました。下はライブの auto モードで各欄を担当するモデル（計画）です。`,
+      `The live run failed after ${calls} API calls (${tin} input / ${tout} output tokens${cacheEn} · served by ${served}), so the values come from the offline engine. Below is where live auto mode would send each field (the plan).`)
     : planned
       ? L("このランはオフラインエンジンで実行しました — モデルは呼び出していません。下はライブの auto モードで各欄を担当するモデル（計画）です。",
         "This run used the offline engine — no model was called. Below is where live auto mode would send each field (the plan).")
-      : L(`ライブ実行：${calls} 回の API 呼び出し · 入力 ${tin} / 出力 ${tout} トークン · 応答モデル ${served}`,
-        `Live run: ${calls} API calls · ${tin} input / ${tout} output tokens · served by ${served}`);
+      : L(`ライブ実行：${calls} 回の API 呼び出し · 入力 ${tin} / 出力 ${tout} トークン${cacheJa} · 応答モデル ${served}`,
+        `Live run: ${calls} API calls · ${tin} input / ${tout} output tokens${cacheEn} · served by ${served}`);
   const lane = (fam, title) => h("div", { class: `lane lane-${fam}` },
     h("div", { class: "lane-h" }, fam === "other" ? h("span", { class: "mb" }, title) : modelChip(models[fam], planned),
       h("span", { class: "mono f-ctx" }, fam === "other" ? "" : models[fam]), h("b", {}, String(lanes[fam].length))),

@@ -15,8 +15,8 @@ Built for **Built with Claude: Japan 2026** (development started Monday, 2026-11
 |---|---|---|---|
 | **① インパクト（潜在的インパクト）**<br>Potential Impact | **30%** | 行政・大学・施設の指定様式（`.docx` / `.xlsx` / 固定 `.pdf`）で、罫線1本・結合セル1つの崩れによる差し戻しを防ぎ、非エンジニアでもWeb画面で各値の原文根拠を確かめてから承認できる（導入はPython 3.10以上・APIキー無しでも全工程が動く） | [トップ画面 `/` 上部バナー](http://127.0.0.1:8000/) · [ハッカソン後の継続利用場面 ↓](#why-this-matters--who-keeps-using-it-after-the-hackathon) |
 | **② デモ（デモの完成度）**<br>Demo & Presentation | **25%** | 作り直し版（失敗再現データ・7項目不合格）との視覚比較、マーカーなし白紙からの4段階空欄自動発見、原文引用ハイライトと推測拒否（法人番号は人の入力待ち） | [`/#tour=1`（視覚比較）](http://127.0.0.1:8000/#tour=1) · [`/#tour=2`（空欄自動発見）](http://127.0.0.1:8000/#tour=2) · [`/#tour=3`（原文根拠・推測拒否）](http://127.0.0.1:8000/#tour=3) · [3分動画台本](docs/DEMO_VIDEO_SCRIPT_JA.md) |
-| **③ Claudeの活用（Claude Code中心の開発・使い分け）**<br>Creative Use of Claude | **25%** | 欄ごとの3段モデル振り分け（Haiku 4.5 / Sonnet 5 / Opus 5.5）＋404フォールバック連鎖、2段フック（`PreToolUse` / `PostToolUse`）、`Edit`/`Write`ツール無しの4サブエージェント（うち3種はフック付き`Bash`を使用）、Skills 6種、依存ゼロの5ツール MCP、公募ポータル [`/portal`](http://127.0.0.1:8000/portal) 連携 | [`/#tour=4`（「Claude Code 連携 · Architecture」タブ）](http://127.0.0.1:8000/#tour=4) · [BUILT_WITH_CLAUDE_CODE.md](docs/BUILT_WITH_CLAUDE_CODE.md) |
-| **④ 深さと実行力（実装の深さと実行力）**<br>Depth & Execution | **20%** | 7区分21項目＋`VIS-01`（指定欄以外のずれ `0 px`）の決定論的検査、版（`revision`）と `SHA-256` に結び付いた人間承認ロック、実機 Word/Excel 16.0 検証、272件の自動テスト（APIキー不要で再現可） | [`/#tour=5`（21項目構造証明＆人間承認ロック）](http://127.0.0.1:8000/#tour=5) · [試行錯誤の記録](docs/BUILT_WITH_CLAUDE_CODE.md#5-iterating-with-claude-code) · [実機検証記録](#verified-on-real-machines-2026-11-03火) · [自動テスト (`tests/test_form_guard.py`)](tests/test_form_guard.py) |
+| **③ Claudeの活用（Claude Code中心の開発・使い分け）**<br>Creative Use of Claude | **25%** | 欄ごとの3段モデル振り分け（Haiku 4.5 / Sonnet 5 / Opus 5.5・実API疎通確認済み）＋404フォールバック連鎖、2段フック（`PreToolUse` / `PostToolUse`）、`Edit`/`Write`ツール無しの4サブエージェント（うち3種はフック付き`Bash`を使用）、Skills 6種、依存ゼロの5ツール MCP、公募ポータル [`/portal`](http://127.0.0.1:8000/portal) 連携 | [`/#tour=4`（「Claude Code 連携 · Architecture」タブ）](http://127.0.0.1:8000/#tour=4) · [BUILT_WITH_CLAUDE_CODE.md](docs/BUILT_WITH_CLAUDE_CODE.md) |
+| **④ 深さと実行力（実装の深さと実行力）**<br>Depth & Execution | **20%** | 7区分21項目＋`VIS-01`（指定欄以外のずれ `0 px`）の決定論的検査、版（`revision`）と `SHA-256` に結び付いた人間承認ロック、実機 Word/Excel 16.0・実API 3階層ルーティング検証、272件の自動テスト（APIキー不要で再現可） | [`/#tour=5`（21項目構造証明＆人間承認ロック）](http://127.0.0.1:8000/#tour=5) · [試行錯誤の記録](docs/BUILT_WITH_CLAUDE_CODE.md#5-iterating-with-claude-code) · [実機検証記録](#verified-on-real-machines-2026-11-03火) · [自動テスト (`tests/test_form_guard.py`)](tests/test_form_guard.py) |
 
 ---
 
@@ -44,7 +44,7 @@ left-hand columns are counted from the files, **not** a timed study of a person)
 | form4 `form4_unmarked_blank.docx` | 7 (locate 11 empty cells, decide office vs applicant) | 113 | 503 XML tags · 38 printed text blocks · 24 merged cells/ranges · 10 border definitions · 18 package parts | 120 ms | 21/21 (PASS) | 9 checklist items |
 | form5 `form5_unmarked_blank.xlsx` | 5 (locate 6 empty cells, decide office vs applicant) | 52 | 282 XML tags · 30 printed text blocks · 34 merged cells/ranges · 269 border definitions · 9 package parts | 154 ms | 21/21 (PASS) | 7 checklist items |
 
-- Across the 5 built-in Word/Excel forms (form1–form5; the fixed-PDF demo 6 is not in this table, 41 designated fields in total), Form-Guard filled 40 fields (848 characters written), leaving 1 unstated field for human input, and verified 2,119 XML tags, 171 printed text blocks, 124 merged cells/ranges and 650 border definitions in about 0.1–0.25 s per form.
+- Across the 5 built-in Word/Excel forms (form1–form5; the fixed-PDF demo 6 is not in this table, 41 designated fields in total), Form-Guard filled 40 fields (848 characters written), leaving 1 unstated field for human input, and verified 2,119 XML tags, 171 printed text blocks, 124 merged cells/ranges and 650 border definitions in under 0.4 s per form (about 0.1–0.25 s in the table above; wall-clock varies with PC load).
 - What is left for the person is the 51-item source-linked sign-off checklist and 1 unstated fact — `法人番号` in form2 — which stays empty for the human instead of being hallucinated.
 
 **Post-hackathon continued use & deployment roadmap**
@@ -165,7 +165,8 @@ How Claude is used at runtime (`form_guard/mapper.py`):
   `claude-haiku-4-5` — the Haiku tier `claude-haiku-4-5-20251001` included — get plain structured-output requests,
   and an unrecognised family or version gets no capability flags at all.
   Request formatting is verified against mock/transport tests; live API availability and model-specific features
-  depend on the caller's Anthropic account tier. Thinking summaries returned by the API are kept in the audit log,
+  depend on the caller's Anthropic account tier. On 2026-11-03（火）, a live 3-tier API run was also verified in
+  `output/live_smoke_form1/audit_log.json` (run `20261103-164113-f83bad`). Thinking summaries returned by the API are kept in the audit log,
   labelled as API-returned summaries.
 - **Self-correction loop**: the validator's findings ("quote not found verbatim", "212 chars exceeds the 200-char
   limit", "1,612,000円 exceeds the printed cap") are sent back in the same conversation; only the failing fields
@@ -409,6 +410,12 @@ A **fixed PDF** is checked against the same ids (`form_guard/pdf_support.py`, `v
 
 ## Verified on real machines (2026-11-03（火）)
 
+- **Live Anthropic API 3-tier routing (`--mode live --model-tier auto`).** On `form1_research_plan_change.docx`
+  (local live run `20261103-164113-f83bad` in `output/live_smoke_form1/audit_log.json`, `filled_sha256: 2198043e2f70c66a2b36a71c4e0c653ffd6a1e8d88740af44d3f9f8356c2a2bc`),
+  all three tiers answered on the first attempt (`model_fallbacks: []`, `escalations: []`):
+  `claude-haiku-4-5-20251001` mapped 3 structured fields (`提出日`, `研究課題番号`, `変更種別`; `effort: null`, thinking omitted),
+  `claude-sonnet-5` mapped 4 standard text/name fields (`研究代表者氏名`, `所属部局`, `変更前の計画概要`, `変更後の計画概要`; `effort: "medium"`, adaptive thinking summarized),
+  and `claude-opus-5-5` condensed `変更理由および予算影響` from 257 chars to 181 chars (`effort: "medium"`, adaptive thinking summarized), passing 21/21 deterministic checks with 0 px layout drift.
 - **Claude Code CLI → MCP.** In a live Claude Code session (`claude-hackathon.cmd`), all five tools of the `.mcp.json`
   server answered: `form_guard_list_demos` 6 demos (incl. fixed PDF), `form_guard_scan` 8 slots (form1), `form_guard_discover_blank_cells`
   11 candidates on form4 (7 applicant, 4 office-only) and 19 ruled boxes on form6 (7 applicant incl. `□ 合意済み　□ 協議中`, 2 office-only locked), `form_guard_fill` `PASS` drafts with their `review_url` (`form6` run `20261103-110647-a585b1`, `filled_sha256: dbb27d227ac7cc102aacecbc2cba5ce87e96034191878c2d0e169d2a3e3d1678`), and
@@ -547,7 +554,7 @@ License: MIT (see [LICENSE](LICENSE)).
 **計測による定量的な裏付け**（`python docs/measure_workflow.py`、オフラインエンジン、架空のサンプル様式。様式ごとの表は
 英語版を参照。手作業の列はファイルから数えた作業量で、人の作業時間を計ったものではありません）：Word/Excel の 5 つの付属様式（form1〜form5、固定PDFのデモ6はこの表の対象外）で、
 Form-Guard は 41 の指定欄に 40 件（848 文字）を記入し、XML タグ 2,119 個・定型文 171 か所・結合セル／範囲 124・罫線定義 650 を
-1 様式あたり約 0.1〜0.25 秒で照合しました。人に残るのは、各値を原文と並べて確認する計 51 項目の最終確認と、メモに無い事実
+1 様式あたり 0.4 秒未満（表では約 0.1〜0.25 秒・PC の負荷により変動）で照合しました。人に残るのは、各値を原文と並べて確認する計 51 項目の最終確認と、メモに無い事実
 1 件（様式2の法人番号）の入力だけです。Form-Guard はその欄を推測で埋めません。
 
 **ハッカソン後の継続利用場面**
@@ -597,7 +604,7 @@ pytest -v
 - 3分デモ動画の台本と絵コンテ（日本語ナレーション・175秒）は [docs/DEMO_VIDEO_SCRIPT_JA.md](docs/DEMO_VIDEO_SCRIPT_JA.md) にあり、このガイドツアー（`#tour=1`〜`#tour=5`）に沿って画面をたどります。
 
 - `ANTHROPIC_API_KEY` を設定すると（`.env` も可、Git には含まれません）、`--mode auto` / `--mode live` で Claude を使います。既定の `--model-tier auto` では、定型の欄（和暦日付・期間・桁数・書式・選択肢）と空欄ラベルの分類を `claude-haiku-4-5-20251001`、通常の文章・金額・氏名を `claude-sonnet-5`、長文の要約と検証器に差し戻された後の自己修正を `claude-opus-5-5` が担当します（`--model-tier opus|sonnet|haiku` で固定も可）。
-- 構造化出力（JSON スキーマ）、adaptive thinking（要約表示）と effort 指定は、`model_capabilities()` の既知モデル表にあるモデルにだけ送ります（表に無いファミリーや将来のバージョンには何も付けません）。モデル別に送信パラメータを切り替えます。確認済みなのはモックによるリクエスト形式で、実APIでの利用可否・対応機能はアカウント権限に依存します。どの欄をどのモデルが担当したかは監査ログとレポートに残ります。
+- 構造化出力（JSON スキーマ）、adaptive thinking（要約表示）と effort 指定は、`model_capabilities()` の既知モデル表にあるモデルにだけ送ります（表に無いファミリーや将来のバージョンには何も付けません）。モデル別に送信パラメータを切り替えます。確認済みなのはモックによるリクエスト形式で、実APIでの利用可否・対応機能はアカウント権限に依存します。2026-11-03（火）には実APIでの3階層ルーティング実行（`output/live_smoke_form1/audit_log.json`、run `20261103-164113-f83bad`）も確認済みです。どの欄をどのモデルが担当したかは監査ログとレポートに残ります。
 - 各欄の `routed_model` / `route_reason` には実際に応答したモデル（自己修正後は `claude-sonnet-5 → claude-opus-5-5 (revision)`）を記録し、オフライン実行では `offline (claude-haiku-4-5-20251001 in live auto)` のように「ライブ auto 時の計画」であることを明示します（API を呼んだとは表示しません。ライブ実行が途中で失敗してオフラインに切り替えた場合は、それまでの API 呼び出しとトークン数を表示します）。
 - Web 画面の「記入値と根拠」で欄ごとに、右上の「モデル」選択（自動：Haiku 4.5 / Sonnet 5 / Opus 5.5、Opus 5.5 のみ・Sonnet 5 のみ・Haiku 4.5 のみ）で実行ごとに切り替えられます。Haiku 4.5 は旧世代のモデルなので、adaptive thinking と effort は送りません。
 
@@ -664,6 +671,11 @@ python -m form_guard.cli --form samples/blank_forms/form6_study_group_grant.pdf 
 
 ### 実機での検証（2026-11-03（火））
 
+- **Anthropic 実API 3階層ルーティング（`--mode live --model-tier auto`）**：`form1_research_plan_change.docx`
+  （ローカル実API実行 `20261103-164113-f83bad`、`output/live_smoke_form1/audit_log.json`、`filled_sha256: 2198043e2f70c66a2b36a71c4e0c653ffd6a1e8d88740af44d3f9f8356c2a2bc`）
+  で3階層すべてが初回で応答し（`model_fallbacks: []`・`escalations: []`）、`claude-haiku-4-5-20251001` が定型3欄（`提出日`・`研究課題番号`・`変更種別`、`effort: null`、thinking 省略）、
+  `claude-sonnet-5` が標準4欄（`研究代表者氏名`・`所属部局`・`変更前の計画概要`・`変更後の計画概要`、`effort: "medium"`、adaptive thinking 要約記録）、
+  `claude-opus-5-5` が長文要約1欄（`変更理由および予算影響`、257字→181字へ抽出短縮、`effort: "medium"`、adaptive thinking 要約記録）を担当して、21/21 項目 `PASS`・描画位置のずれ `0 px` を確認しました。
 - **Claude Code CLI → MCP**：ハッカソン用 CLI（`claude-hackathon.cmd`）で起動した Claude Code から、`.mcp.json` の 5 ツールを
   すべて実行しました（`form_guard_list_demos` はデモ 6 件〔固定PDFを含む〕、`form_guard_scan` は form1 で 8 欄、`form_guard_discover_blank_cells` は
   form4 で候補 11（申請者 7・事務局 4）および固定PDFの form6 で 2 表 19 枠（申請者 7 枠〔`□ 合意済み　□ 協議中` を含む〕・事務局 2 枠ロック）、`form_guard_fill` は form1 および form6（run `20261103-110647-a585b1`、`filled_sha256: dbb27d227ac7cc102aacecbc2cba5ce87e96034191878c2d0e169d2a3e3d1678`）で `PASS` の下書きと `review_url`、`form_guard_verify` は `PASS` 21/21 ＋

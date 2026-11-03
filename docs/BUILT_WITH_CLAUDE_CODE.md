@@ -57,7 +57,7 @@ which means one model — Opus — for every call) disables routing; `--model` o
 
 Request parameters are adapted per model via `model_capabilities()`, an explicit table of known model ids (`KNOWN_MODEL_VERSIONS`: `opus` / `sonnet` / `haiku` 4.5, 4.6, 4.7, 5, 5.5 and `fable` 5 / 5.1):
 - Adaptive thinking (`thinking={"type": "adaptive", "display": "summarized"}`) and `output_config.effort` are sent only to the table's 4.6-and-later entries; legacy models such as `claude-haiku-4-5` — the Haiku tier `claude-haiku-4-5-20251001` included — get a plain structured-output request, and an unrecognised family (`claude-unrecognized-5-5`) or future version (`claude-opus-99-9`) gets no capability flags at all.
-- Effort is clamped to a level the model supports, and the server-side refusal fallback is only requested where the table says it exists. Request formatting is verified against mock/transport tests; live API availability and model-specific features depend on the caller's Anthropic account tier.
+- Effort is clamped to a level the model supports, and the server-side refusal fallback is only requested where the table says it exists. Request formatting is verified against mock/transport tests; live API availability and model-specific features depend on the caller's Anthropic account tier. On 2026-11-03（火）, a live 3-tier API run was also verified in `output/live_smoke_form1/audit_log.json` (run `20261103-164113-f83bad`).
 - The audit log records which model handled which field and why, every served model id, per-call stop reasons and tokens, and the thinking summaries the API returned (labelled "API-returned thinking summary" — a summary written by the API, not the model's raw reasoning). The HTML report shows the routing table.
 
 Every `FieldMapping` carries `routed_model` and `route_reason`:
@@ -168,7 +168,11 @@ iteration and, in Phase 3, to drive the web UI end to end in a headless browser 
 
 ## 6. Real-machine verification (2026-11-03（火）)
 
-Beyond the offline suite, two checks were run on real software on 2026-11-03（火）.
+Beyond the offline suite, three checks were run on real software on 2026-11-03（火）.
+
+**Live Anthropic API 3-tier routing (`--mode live --model-tier auto`).**
+- On `form1_research_plan_change.docx` (local live run `20261103-164113-f83bad` in `output/live_smoke_form1/audit_log.json`, `filled_sha256: 2198043e2f70c66a2b36a71c4e0c653ffd6a1e8d88740af44d3f9f8356c2a2bc`), all three tiers answered on the first attempt (`model_fallbacks: []`, `escalations: []`).
+- `claude-haiku-4-5-20251001` mapped 3 structured fields (`提出日`, `研究課題番号`, `変更種別`; `effort: null`, thinking omitted), `claude-sonnet-5` mapped 4 standard text/name fields (`研究代表者氏名`, `所属部局`, `変更前の計画概要`, `変更後の計画概要`; `effort: "medium"`, adaptive thinking summarized), and `claude-opus-5-5` condensed `変更理由および予算影響` from 257 chars to 181 chars (`effort: "medium"`, adaptive thinking summarized), passing 21/21 deterministic checks with 0 px layout drift.
 
 **Live Claude Code CLI MCP verification.** In a live Claude Code session started with the hackathon CLI wrapper
 (`claude-hackathon.cmd`) in this repository, the `form-guard` server registered in `.mcp.json` answered through all
@@ -237,7 +241,7 @@ Haiku・Sonnet の下書きが根拠確認や印刷されたルールで却下�
 - 存在しないモデル ID と、その API 組織で使えないモデル ID は、どちらも `404 not_found_error` になります。そのとき `ClaudeEngine` は `MODEL_FALLBACK_CHAIN`（`claude-opus-5-5` → `claude-opus-5` → `claude-opus-4-6`、`claude-sonnet-5` → `claude-sonnet-4-5`、`claude-haiku-4-5-20251001` → `claude-haiku-4-5`）に沿って、各モデルの機能に合わせたリクエストで再試行します。
 - 最初に応答した ID がその実行の残りを担当し、監査ログには要求したモデルと実際に応答したモデルの両方（`usage.model_fallbacks`、`usage.calls[].attempted_models`、各欄の `routed_model` の注記）が残ります。
 - adaptive thinking（`display: "summarized"`）と effort は、`model_capabilities()` の既知モデル表（`KNOWN_MODEL_VERSIONS`：`opus`・`sonnet`・`haiku` の 4.5・4.6・4.7・5・5.5 と `fable` 5・5.1）で対応しているモデルにだけ送り、`claude-haiku-4-5` などの旧モデル（Haiku の層の `claude-haiku-4-5-20251001` を含む）には送りません。表に無いファミリーや将来のバージョンには、どの機能フラグも付けません。
-- モデル別に送信パラメータを切り替えます。確認済みなのはモックによるリクエスト形式で、実APIでの利用可否・対応機能はアカウント権限に依存します。どの欄をどのモデルが担当したか（理由つき）、実際に応答したモデル、API が返した思考の要約（「API-returned thinking summary」と明記）は監査ログに記録され、HTML レポートにも表示されます。
+- モデル別に送信パラメータを切り替えます。確認済みなのはモックによるリクエスト形式で、実APIでの利用可否・対応機能はアカウント権限に依存します。2026-11-03（火）には実APIでの3階層ルーティング実行（`output/live_smoke_form1/audit_log.json`、run `20261103-164113-f83bad`）も確認済みです。どの欄をどのモデルが担当したか（理由つき）、実際に応答したモデル、API が返した思考の要約（「API-returned thinking summary」と明記）は監査ログに記録され、HTML レポートにも表示されます。
 
 すべての `FieldMapping` に `routed_model` と `route_reason` を記録します：
 - ライブでは API が実際に返したモデル ID（日付なら `claude-haiku-4-5-20251001`、検証器に差し戻された欄なら `claude-sonnet-5 → claude-opus-5-5 (revision)`）で、サーバー側のフォールバックで別のモデルが応答した場合も `(served by …; requested …)` と残ります。
@@ -253,7 +257,7 @@ Haiku・Sonnet の下書きが根拠確認や印刷されたルールで却下�
 計測値です。`python docs/measure_workflow.py` で再現できます（表は英語版と同じ）。
 
 Word/Excel の 5 つの様式（form1〜form5、固定PDFのデモ6はこの表の対象外）で、Form-Guard は 41 の指定欄に 40 件（848 文字）を記入し、XML タグ 2,119 個・定型文 171 か所・結合セル 124・
-罫線定義 650 を 1 様式あたり約 0.1〜0.25 秒で照合しました（時間は PC の負荷で変わりますが、数えた列は変わりません）。
+罫線定義 650 を 1 様式あたり 0.4 秒未満（約 0.1〜0.25 秒、時間は PC の負荷で変わりますが数えた列は変わりません）で照合しました。
 人に残るのは、各値を原文と並べて確認する計 51 項目の最終確認と、メモに無い事実（様式 2 の法人番号）の入力だけです。
 Form-Guard はその欄を推測で埋めません。同じ数値は Web 画面の Claude Code タブでもその場で計測して表示します。
 
@@ -329,7 +333,11 @@ cp932 環境での stdio 経由の MCP サーバー、2 段のフックを対象
 
 ### 6. 実機での検証（2026-11-03（火））
 
-オフラインのテストに加えて、2026-11-03（火）に実際のソフトウェアで次の 2 つを確認しました。
+オフラインのテストに加えて、2026-11-03（火）に実際のソフトウェアと実APIで次の 3 つを確認しました。
+
+**Anthropic 実API 3階層ルーティング（`--mode live --model-tier auto`）。**
+- `form1_research_plan_change.docx`（ローカル実API実行 `20261103-164113-f83bad`、`output/live_smoke_form1/audit_log.json`、`filled_sha256: 2198043e2f70c66a2b36a71c4e0c653ffd6a1e8d88740af44d3f9f8356c2a2bc`）で3階層すべてが初回で応答しました（`model_fallbacks: []`・`escalations: []`）。
+- `claude-haiku-4-5-20251001` が定型3欄（`提出日`・`研究課題番号`・`変更種別`、`effort: null`、thinking 省略）、`claude-sonnet-5` が標準4欄（`研究代表者氏名`・`所属部局`・`変更前の計画概要`・`変更後の計画概要`、`effort: "medium"`、adaptive thinking 要約記録）、`claude-opus-5-5` が長文要約1欄（`変更理由および予算影響`、257字→181字へ抽出短縮、`effort: "medium"`、adaptive thinking 要約記録）を担当し、21/21 項目 `PASS`・描画位置のずれ `0 px` を確認しました。
 
 **Claude Code CLI からの MCP 実行。**
 - このリポジトリでハッカソン用 CLI（`claude-hackathon.cmd`）から起動した Claude Code のセッションで、`.mcp.json` に登録した `form-guard` サーバーの 5 ツールをすべて呼び出しました。

@@ -406,7 +406,11 @@ def test_live_claude_engine_request_shape_and_self_correction(samples_dir, fake_
     revision = {"fields": [{"slot_id": "所属部局", "status": "filled", "value": "理工学研究科",
                             "source_quotes": ["・所属部局：理工学研究科"], "line_start": 8, "line_end": 8,
                             "confidence": 0.95, "reasoning": "fixed"}]}
-    client = fake_client_factory([fake_message(_claude_fields()), fake_message(revision)])
+    first_msg = fake_message(_claude_fields())
+    first_msg.usage.cache_creation_input_tokens = 400
+    second_msg = fake_message(revision)
+    second_msg.usage.cache_read_input_tokens = 400
+    client = fake_client_factory([first_msg, second_msg])
     run = map_fields(scan(p["form"]).slots, memo, ClaudeEngine(client=client, model_tier="opus"))
     calls = client.beta.messages.calls
     assert len(calls) == 2
@@ -423,6 +427,9 @@ def test_live_claude_engine_request_shape_and_self_correction(samples_dir, fake_
     assert by["研究課題番号"].filled_value == "JR-2026-047"
     assert all(m.status == "filled" for m in run.mappings)
     assert run.usage["requests"] == 2 and run.usage["input_tokens"] == 2400
+    assert run.usage["cache_creation_input_tokens"] == 400 and run.usage["cache_read_input_tokens"] == 400
+    assert run.usage["calls"][0]["cache_creation_input_tokens"] == 400 and run.usage["calls"][0]["cache_read_input_tokens"] == 0
+    assert run.usage["calls"][1]["cache_creation_input_tokens"] == 0 and run.usage["calls"][1]["cache_read_input_tokens"] == 400
 
 
 def test_refusal_is_handled_and_auto_mode_falls_back(samples_dir, fake_client_factory, tmp_path):
@@ -4168,19 +4175,24 @@ def test_r1_audit2_a6_a_live_run_that_fails_part_way_keeps_its_calls_and_tokens(
                                                                                tmp_path):
     p = paths(samples_dir, "form1")
     memo = read_memo(p["memo"])
+    def haiku_with_cache(kw):
+        m = echo_model(_claude_fields())(kw)
+        m.usage.cache_creation_input_tokens = 500
+        return m
     refusal = lambda kw: fake_message({}, "refusal", "cyber", model=kw["model"])  # noqa: E731 - answered, then declined
-    client = fake_client_factory([echo_model(_claude_fields()), refusal])  # Haiku answers, then Sonnet declines
+    client = fake_client_factory([haiku_with_cache, refusal])  # Haiku answers, then Sonnet declines
     r = run_pipeline(p["form"], memo, tmp_path / "partial", mode="auto", client=client)
     usage = r.engine["usage"]
     assert r.engine["mode"] == "demo" and "declined" in r.engine["fallback_reason"]
     assert usage["live_attempt_failed"] is True and usage["requests"] == 2  # before the fix: the offline engine's 0
     assert (usage["input_tokens"], usage["output_tokens"]) == (2400, 600)
+    assert usage["cache_creation_input_tokens"] == 500 and usage["calls"][0]["cache_creation_input_tokens"] == 500
     assert [c["served_model"] for c in usage["calls"]] == [MODEL_HAIKU, MODEL_SONNET] == usage["models"]
     assert usage["model_fallbacks"] == [] and all(rt.get("planned_in_live_auto") for rt in usage["routing"])
     assert r.report.overall_status == "PASS"  # the offline engine produced every value
     html = (tmp_path / "partial" / "report.html").read_text(encoding="utf-8")
-    assert "Live Claude API calls were made before the live run failed: 2 call(s), 2,400 input / 600 output tokens" in html
-    assert "ライブの Claude API を 2 回呼び出した後で失敗しました" in html
+    assert "Live Claude API calls were made before the live run failed: 2 call(s), 2,400 input / 600 output tokens (cache write 500 / read 0)" in html
+    assert "ライブの Claude API を 2 回呼び出した後で失敗しました（入力 2,400 / 出力 600 トークン（キャッシュ書込 500・読込 0）" in html
     assert "no model was called" not in html and "モデルは呼び出していません" not in html
     audit = json.loads((tmp_path / "partial" / "audit_log.json").read_text(encoding="utf-8"))
     assert audit["engine"]["usage"]["live_attempt_failed"] and len(audit["engine"]["usage"]["calls"]) == 2

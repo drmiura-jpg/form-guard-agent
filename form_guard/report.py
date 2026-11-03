@@ -36,10 +36,13 @@ def live_failure_note(eng: dict[str, Any]) -> str:
     if not (usage.get("live_attempt_failed") or (eng.get("fallback_reason") and n > 0)):
         return ""
     tin, tout = int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0)
+    ccreate, cread = int(usage.get("cache_creation_input_tokens") or 0), int(usage.get("cache_read_input_tokens") or 0)
+    cache_en = f" (cache write {ccreate:,} / read {cread:,})" if (ccreate or cread) else ""
+    cache_ja = f"（キャッシュ書込 {ccreate:,}・読込 {cread:,}）" if (ccreate or cread) else ""
     models = ", ".join(usage.get("models") or [])
     return (f"Live Claude API calls were made before the live run failed: {n} call(s), {tin:,} input / {tout:,} output "
-            f"tokens{f', served by {models}' if models else ''}. Every value below comes from the offline engine. ｜ "
-            f"ライブの Claude API を {n} 回呼び出した後で失敗しました（入力 {tin:,} / 出力 {tout:,} トークン"
+            f"tokens{cache_en}{f', served by {models}' if models else ''}. Every value below comes from the offline engine. ｜ "
+            f"ライブの Claude API を {n} 回呼び出した後で失敗しました（入力 {tin:,} / 出力 {tout:,} トークン{cache_ja}"
             f"{f'、応答モデル {models}' if models else ''}）。記入値はすべてオフラインエンジンの結果です。")
 
 CSS = """
