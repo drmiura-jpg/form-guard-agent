@@ -341,11 +341,11 @@ function showTab(name) {
 
 const TOUR = [
   {
-    ja: "左＝生成AIで様式ごと作り直した版（罫線・結合セルの消失、定型文の言い換え、メモに無い数値）。右＝Form-Guard（外科的差込＝書式はそのまま指定欄の文字だけ差し替え、指定欄以外のずれ 0 px）。スライダーを左右に動かして重ねて比べてください。",
-    en: "Left: a naive from-scratch regeneration (borders and merged cells lost, legal text paraphrased, numbers the memo never stated). Right: Form-Guard — surgical fill (only designated text replaced, 0 px drift outside the fields). Drag the slider to compare.",
+    ja: "左＝生成AIで様式ごと作り直した版（失敗を再現した模擬データ：罫線・結合セルの消失、定型文の言い換え、メモに無い数値）。右＝Form-Guard（外科的差込＝書式はそのまま指定欄の文字だけ差し替え、指定欄以外のずれ 0 px）。スライダーを左右に動かして重ねて比べてください。",
+    en: "Left: a naive from-scratch regeneration (simulated failure reproduction: borders and merged cells lost, legal text paraphrased, numbers the memo never stated). Right: Form-Guard — surgical fill (only designated text replaced, 0 px drift outside the fields). Drag the slider to compare.",
     async go() {
-      if (!(S.run && S.run.previews && S.run.previews.naive)) await runDemo("form1");
-      if (!S.run || !S.run.previews.naive) return;
+      const r = await ensureFreshDemo("form1");
+      if (!r || !r.previews || !r.previews.naive) return;
       S.cmp = "naive"; S.layout = "slider";
       showView("run"); showTab("visual"); renderVisual();
     },
@@ -362,8 +362,8 @@ const TOUR = [
     ja: "黄色の原文「483万6千円」から「4,836,000円」へ。補助金申請額は様式に印刷された上限で 1,612,000円 → 1,000,000円 に再抽出。メモに無い法人番号はAIが勝手に推測せず、人の入力待ちにします。",
     en: "From the highlighted memo text 「483万6千円」 to 4,836,000円. The subsidy amount is re-extracted under the printed cap (1,612,000円 → 1,000,000円). The 法人番号 the memo never states is never guessed — it waits for a person.",
     async go() {
-      if (!(S.run && S.run.demo_id === "form2" && S.run.revision === 0)) await runDemo("form2");
-      if (!S.run || S.run.demo_id !== "form2") return;
+      const r = await ensureFreshDemo("form2");
+      if (!r || r.demo_id !== "form2") return;
       showView("run"); showTab("fields"); selectSlot("導入予定金額_税抜", true);
     },
     links: () => [
@@ -372,21 +372,21 @@ const TOUR = [
     ],
   },
   {
-    ja: "欄ごとに Haiku（定型の日付・ID・選択肢）／Sonnet（文章・金額・氏名）／Opus 5.5（長文の要約・差し戻し後の自己修正）を割り当てます。開発では Skills・編集ツール無しの4サブエージェント・2段Hook（AIが動く前後に働く安全ブレーキ）・5ツールMCP（Claude Codeから直接呼べる専用道具箱）が連携します。",
-    en: "Each field goes to Haiku (structured dates, IDs, choices), Sonnet (text, amounts, names) or Opus 5.5 (long-text condensation, self-correction). In development, Skills, 4 read-only subagents, a 2-stage hook (pre/post-write safety brake) and a 5-tool MCP server (direct Claude Code toolbox) work together.",
+    ja: "欄ごとに Haiku（定型の日付・ID・選択肢）／Sonnet（文章・金額・氏名）／Opus 5.5（長文の要約・差し戻し後の自己修正）を割り当てます。開発では Skills・編集ツール無しの4サブエージェント・2段フック（AIが書き込む前と直後に働く安全ブレーキ）・5ツールMCP（ClaudeなどのAIから直接呼べる5つの道具）が連携します。",
+    en: "Each field goes to Haiku (structured dates, IDs, choices), Sonnet (text, amounts, names) or Opus 5.5 (long-text condensation, self-correction). In development, Skills, 4 subagents without edit tools, a 2-stage hook (pre/post-write safety brake on configured target actions) and a 5-tool MCP server (5 tools callable from Claude clients) work together.",
     async go() {
-      if (!(S.run && (S.run.engine.mode === "live" || S.run.demo_id === "form1"))) await runDemo("form1");
-      if (!S.run) return;
+      const r = await ensureFreshDemo("form1");
+      if (!r) return;
       showView("run"); showTab("claude");
     },
     links: () => [[L("「記入値と根拠」で欄ごとのモデルを見る", "Per-field model in Fields & sources"), () => showTab("fields")]],
   },
   {
-    ja: "21項目の決定論的検査と VIS-01（白紙と記入後の1ピクセル単位の見た目比較）、ZIP 内パーツごとの SHA-256（改ざん検知用の指紋データ）、実際に書き換えたバイト範囲。承認は画面上の版と SHA-256 に結び付き、人が全項目を確認するまでダウンロードはサーバー側でロックされます。",
-    en: "21 deterministic checks + VIS-01 (pixel-level visual comparison against the blank form), per-part SHA-256 (tamper-evident fingerprint) and the exact byte ranges rewritten. Approval is bound to the revision on screen and the SHA-256; the download stays locked on the server until a person confirms every item.",
+    ja: "21項目の決定論的検査と VIS-01（内蔵プレビューの枠ずれ・はみ出し検査。固定PDFは画素差分も検査）、ZIP 内パーツごとの SHA-256（改ざん検知用の指紋データ）、実際に書き換えたバイト範囲。承認は画面上の版と SHA-256 に結び付き、人が全項目を確認するまでダウンロードはサーバー側でロックされます。",
+    en: "21 deterministic checks + VIS-01 (built-in preview layout-drift & overflow check; pixel diff for fixed PDFs), per-part SHA-256 (tamper-evident fingerprint) and the exact byte ranges rewritten. Approval is bound to the revision on screen and the SHA-256; the download stays locked on the server until a person confirms every item.",
     async go() {
-      if (!S.run) await runDemo("form1");
-      if (!S.run) return;
+      const r = await ensureFreshDemo("form1");
+      if (!r) return;
       showView("run"); showTab("audit");
     },
     links: () => [[L("人による最終確認を開く", "Open Human approval"), () => showTab("hitl")]],
@@ -441,6 +441,11 @@ function renderDemos() {
   $("#pdfList").replaceChildren(...S.pdf.map((d) => demoButton(d, () => discoverDemo(d.id), true)));
 }
 
+async function ensureFreshDemo(id) {
+  if (S.run && S.run.demo_id === id && S.run.revision === 0 && !S.run.approval && !S.run.auto_preview) return S.run;
+  return await runDemo(id);
+}
+
 async function runDemo(id) {
   S.activeDemo = id;
   renderDemos();
@@ -451,10 +456,12 @@ async function runDemo(id) {
       body: JSON.stringify({ demo_id: id, mode: mode(), model_tier: tier() }),
     });
     setRun(run, true);
+    return run;
   } catch (e) {
     toast(e.status === 422 && mode() === "live"
       ? L(`ライブモードに失敗: ${e.message}。自動かオフラインを選んでください。`, `Live mode failed: ${e.message}. Use Auto or Offline demo.`)
       : L(`実行に失敗: ${e.message}`, `Run failed: ${e.message}`));
+    return null;
   } finally { busy(false); }
 }
 
@@ -848,7 +855,7 @@ function renderVisual() {
   } else {
     $("#sliderA").innerHTML = leftSvg;
     $("#sliderB").innerHTML = r.previews.filled;
-    $("#sliderCapA").textContent = leftKind === "naive" ? L("◀ 生成AIで作り直した版", "◀ Naive AI regeneration") : L("◀ 白紙の原本", "◀ Blank original");
+    $("#sliderCapA").textContent = leftKind === "naive" ? L("◀ 生成AIで作り直した版（失敗を再現した模擬データ）", "◀ Naive AI regeneration (simulated failure reproduction)") : L("◀ 白紙の原本", "◀ Blank original");
     $("#sliderCapB").textContent = "Form-Guard ▶";
   }
   $$(".svg-box [data-slot-id], .slider-stage [data-slot-id]").forEach((el) => {
