@@ -36,4 +36,5 @@ form_guard = ["static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+norecursedirs = [".*", "output", ".venv", "venv", "build", "dist", "*.egg", "node_modules"]
 addopts = "-ra"

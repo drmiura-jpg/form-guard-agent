@@ -59,10 +59,11 @@
 ## 2. プロジェクト概要：解決する課題と、誰のためのものか
 （Project Overview: Problem, Target Users, Solution & Post-Hackathon Use — 審査基準「インパクト 30%」「深さと実行力 20%」対応）
 
-### A. 日本語・標準版（箇条書き・太字・バッククォート・改行除き 1,532字／改行除き 1,612字／そのまま 1,623字）
+### A. 日本語・標準版（箇条書き・太字・バッククォート・改行除き 1,702字／改行除き 1,784字／そのまま 1,796字）
 
-**【誰の・どんな課題か（日本の現場から出発した課題）】**
-- 日本の大学・研究機関、自治体窓口、施設管理の現場では、「様式第1号」などの公式な Word（`.docx`）・Excel（`.xlsx`）・固定レイアウト PDF（`.pdf`）が指定され、**「元の書式・罫線・結合セル・計算式・定型文を変えないこと」**が求められます。罫線1本、結合セル1つ、Excel の `SUM` / `COUNTIF` 計算式1つの崩れが差し戻し（押印や決裁の取り直し・再提出の手戻り）の原因になることがあります。
+**【開発者自身の実体験と、誰の・どんな課題か（日本の現場の痛みから出発した課題）】**
+- 開発者自身、倫理申請などの書類作成で何度も差し戻しに遭い、非常に困った実体験があります。AIで試してもうまくいかず、「もうAIを使うのはやめようか」とまで思いましたが、「元の様式を壊さずに指定欄だけを埋められる仕組みをうまく作っていけば、申請業務がもっと楽になるはずだ」という思いから本プロダクトを開発しました。
+- 日本の大学・研究機関、自治体窓口、施設管理の現場でも、「様式第1号」などの公式な Word（`.docx`）・Excel（`.xlsx`）・固定レイアウト PDF（`.pdf`）が指定され、**「元の書式・罫線・結合セル・計算式・定型文を変えないこと」**が求められます。罫線1本、結合セル1つ、Excel の `SUM` / `COUNTIF` 計算式1つの崩れが差し戻し（押印や決裁の取り直し・再提出の手戻り）の原因になることがあります。
 - しかし、文書全体を作り直す方法では、罫線や結合セル、文言が変わってしまうことがあり、「どこが変わったのか」「どの数字がAIの推測なのか」を確かめるだけで手作業以上の時間がかかるため、現場の事務担当者や申請者が安全に使うには壁がありました。
 
 **【どう解決するか（Form-Guard Agent のアプローチ）】**
@@ -76,17 +77,18 @@
 
 ---
 
-### B. 日本語・短縮版（文字数制限が厳しい欄向け・箇条書き・バッククォート・改行除き 471字／改行除き 479字／そのまま 481字）
+### B. 日本語・短縮版（文字数制限が厳しい欄向け・箇条書き・バッククォート・改行除き 524字／改行除き 532字／そのまま 534字）
 
-- 日本の大学・自治体・施設の申請業務では、指定された Word・Excel・固定PDF 様式の罫線や結合セル、計算式が崩れると差し戻し（押印・決裁の取り直しや再提出の手戻り）の原因になります。文書全体を作り直す方法では書式が変わることがあり、どこが変わったか分からず現場で安全に使えませんでした。
+- 開発者自身も倫理申請などで何度も差し戻されて困り、AIで試してもうまくいかず「もうAIを使うのはやめようか」と思った実体験から開発しました。日本の大学・自治体・施設の申請業務では、指定された Word・Excel・固定PDF 様式の罫線や結合セル、計算式が崩れると差し戻し（押印・決裁の取り直しや再提出の手戻り）の原因になり、文書全体を作り直す方法ではどこが変わったか分からず安全に使えませんでした。
 - Form-Guard Agent は、元の様式は一切触らずに指定欄だけをピンポイントで書き換え（対応する固定PDFは元バイト不変の増分更新）、7区分・21項目の構造検査と視覚検査（Word/Excelの内蔵配置比較・固定PDFの欄外画素比較でずれ `0 px`、最終的な実機表示は人が確認）で欄外の不変を確かめます。
 - マーカーの無い白紙様式でも申請者欄と事務局専用欄を4段階で自動仕分けして誤記入をロックし、AI抽出値に原文引用ハイライトを付与（年の補完は推定表示）。メモに無い事実は推測で埋めず人の入力待ちに残し、人が最終確認するまでダウンロードを解錠しません。Web UI・CLI・Claude Code MCP で現場の定型様式業務に活用できます。
 
 ---
 
-### C. 英語版（English Overview — 箇条書き・太字・斜体・バッククォート・改行除き 1,891 chars／改行除き 1,959 chars／そのまま 1,967 chars）
+### C. 英語版（English Overview — 箇条書き・太字・斜体・バッククォート・改行除き 2,378 chars／改行除き 2,448 chars／そのまま 2,457 chars）
 
-**Problem & Target Users:**
+**Problem & Target Users (Born from Firsthand Experience):**
+- I repeatedly experienced frustrating administrative rejections (差し戻し) on ethics review and institutional forms; when I tried using AI to help, it did not work as I had hoped, to the point where I almost gave up on using AI for paperwork altogether. Form-Guard Agent was born from that firsthand frustration and the conviction that preserving the original template while filling only designated fields can genuinely make application workflows much easier.
 - In Japanese universities, municipal offices, and facility management, official Word (`.docx`), Excel (`.xlsx`), and fixed-layout PDF (`.pdf`) forms come with a strict rule: *do not alter the original layout, borders, merged cells, formulas, or printed clauses*.
 - One broken border or altered clause can trigger administrative rejection (差し戻し), requiring internal seals/approvals to be re-obtained and the form to be re-submitted. Regenerating a complete form can alter borders, merged cells, or formulas and introduce unstated numbers, making it unsafe for non-engineer staff. (The comparison file in the demo uses scripted simulated regeneration failures to illustrate these structural checks.)
 
@@ -143,6 +145,6 @@
 | 審査基準（配点） | 公式チェック項目（要約） | Form-Guard Agent の実装と定量エビデンス |
 | :--- | :--- | :--- |
 | **1. インパクト (30%)** | ・日本の具体的な現場から出発しているか<br>・テーマ1「足りないもの」／テーマ2「阻んでいた壁」を捉えているか<br>・誰がどんな場面でどれくらい困っているか具体的か<br>・ハッカソン後も使い続けられるか | ・研究費変更届（Word）・自治体補助金申請（Word）・月次設備点検（Excel）・白紙2様式・固定PDF助成金申請の計6様式で実証<br>・付属Word/Excel 5様式（41欄中40欄記入・848字）をオフラインで計測：XMLタグ 2,119・定型文 171・結合セル 124・罫線 650 を、計測スクリプトの表で 120〜246 ms・Web保存測定で 119〜379 ms（0.4秒未満）、デモ動画収録時の画面実測（`seg18`）で 361〜1,234 ms（約0.4〜1.2秒）で照合（固定PDF・API応答・人の確認時間は含まない。`form1` ライブAPI記録は各段階合計約29.63秒）<br>・Web UI / CLI / `.mcp.json` で継続利用可能（実務導入時は様式ごとの欄指定と表示確認が必要。固定PDFはページ内にUnicode CIDフォントを持つPDFが対象） |
-| **2. デモ (25%)** | ・冒頭で「誰の、どんな課題を、どう解決するか」が明確か<br>・前提知識のない人でも実際の操作で価値が分かるか<br>・最後まで見たくなる動画か | ・冒頭35秒（0〜24秒で社会的意義と現場課題、24〜35秒の `#tour=1` で比較）において、様式ごと作り直した場合の失敗を再現した比較用の模擬ファイル（結合セル19→0・罫線定義9→0・A4→レター・7項目不合格）と Form-Guard 版（21/21合格・内蔵配置比較のずれ `0 px`）を Before/After スライダーで比較<br>・Web画面上部の5ステップ審査員ガイドツアー（`#tour=1`〜`#tour=5`）と専門用語噛み砕きテロップで非エンジニアにも直感的に伝達 |
+| **2. デモ (25%)** | ・冒頭で「誰の、どんな課題を、どう解決するか」が明確か<br>・前提知識のない人でも実際の操作で価値が分かるか<br>・最後まで見たくなる動画か | ・冒頭35秒（0〜25秒で開発者の実体験・社会的意義と現場課題、25〜35秒の `#tour=1` で比較）において、様式ごと作り直した場合の失敗を再現した比較用の模擬ファイル（結合セル19→0・罫線定義9→0・A4→レター・7項目不合格）と Form-Guard 版（21/21合格・内蔵配置比較のずれ `0 px`）を Before/After スライダーで比較<br>・Web画面上部の5ステップ審査員ガイドツアー（`#tour=1`〜`#tour=5`）と専門用語噛み砕きテロップで非エンジニアにも直感的に伝達 |
 | **3. Claudeの活用 (25%)** | ・基本的な使い方を超えた創造的活用か<br>・Claude Code を開発の中心に据えているか<br>・モデルや機能（Skills、サブエージェント、MCP、フック等）を目的に応じて使い分けているか | ・欄別3モデル自動振り分け（Haiku 4.5 / Sonnet 5 / Opus 5.5：ライブAPI `form1` で3モデルの初回提案応答と `21/21 PASS` を確認）＋上限超過等の決定論的再抽出と Opus 自己修正設計（オフラインデモとモックAPIテストで確認）<br>・2段階フック（`PreToolUse` 白紙保護＋`PostToolUse` 構文・import検査）、`Edit`/`Write` 無しの4サブエージェント（うち3種はフック付き `Bash`）、6 Skills、5ツール MCP＋Web承認引き継ぎ |
 | **4. 深さと実行力 (20%)** | ・試行錯誤を重ねて磨き上げ、課題にじっくり向き合った跡が見えるか<br>・設計と実装が丁寧か<br>・困っている人が安心してそのまま使える形か | ・展開後 **全272件の `pytest` 合格**、オフラインプログラム **45試行（`45/45 ok`・2026-11-04（水）にコミット `282fb0c` で再検証済み）**、ヘッドレス Edge 実ブラウザ **16試行（`16/16 ok`・コンソールエラー0・2026-11-04（水）にコミット `282fb0c` で再検証済み）**<br>・付属Word/Excel 5様式について実機 Microsoft Word 16.0 / Excel 16.0 での開閉・ページ数・計算式再計算（`COUNTIF` / `SUM`）確認済み |
