@@ -37,7 +37,7 @@
 - **日本語（140字以内・137字）**：
   `研究費や行政申請のWord・Excel・固定PDF様式の指定欄だけをバイト単位で記入。Haiku/Sonnet/Opus 5.5の3階層で原文引用つきの値を作り、21項目の構造検査で欄外の不変を確認。根拠の無い値は推測で埋めず、人の承認までWebダウンロードをロックします。`
 - **英語（120 chars / 116 chars）**：
-  `Surgical Word/Excel/PDF form filler with source quotes, 21 structural checks, 0 px non-target drift, and human gate.`
+  `Pinpoint Word/Excel/PDF form filler with source quotes, 21 structural checks, 0 px non-target drift, and human gate.`
 - **英語（240 chars / 224 chars）**：
   `Rewrites only designated fields in official Word, Excel, and fixed-PDF forms while checking for zero layout drift outside target cells via 21 deterministic checks, source grounding, 3-tier Claude routing, and human sign-off.`
 
@@ -59,20 +59,20 @@
 ## 2. プロジェクト概要：解決する課題と、誰のためのものか
 （Project Overview: Problem, Target Users, Solution & Post-Hackathon Use — 審査基準「インパクト 30%」「深さと実行力 20%」対応）
 
-### A. 日本語・標準版（箇条書き・太字・バッククォート・改行除き 1,526字／改行除き 1,606字／そのまま 1,617字）
+### A. 日本語・標準版（箇条書き・太字・バッククォート・改行除き 1,532字／改行除き 1,612字／そのまま 1,623字）
 
 **【誰の・どんな課題か（日本の現場から出発した課題）】**
 - 日本の大学・研究機関、自治体窓口、施設管理の現場では、「様式第1号」などの公式な Word（`.docx`）・Excel（`.xlsx`）・固定レイアウト PDF（`.pdf`）が指定され、**「元の書式・罫線・結合セル・計算式・定型文を変えないこと」**が求められます。罫線1本、結合セル1つ、Excel の `SUM` / `COUNTIF` 計算式1つの崩れが差し戻し（押印や決裁の取り直し・再提出の手戻り）の原因になることがあります。
 - しかし、文書全体を作り直す方法では、罫線や結合セル、文言が変わってしまうことがあり、「どこが変わったのか」「どの数字がAIの推測なのか」を確かめるだけで手作業以上の時間がかかるため、現場の事務担当者や申請者が安全に使うには壁がありました。
 
 **【どう解決するか（Form-Guard Agent のアプローチ）】**
-- Form-Guard Agent は「AIに書類全体を作らせる」のではなく、**「元の白紙様式は一切触らずに指定欄の文字（バイト範囲）だけをピンポイントで書き換え、それ以外が変わっていないことを決定論的に検査する」**エージェントです。
+- Form-Guard Agent は「AIに書類全体を作らせる」のではなく、**「元の白紙様式は一切触らずに指定欄の文字（バイト範囲）だけをピンポイントで書き換え、それ以外が変わっていないことを決められたルールで自動検査する」**エージェントです。
 - **1. 指定欄だけのピンポイント書き換えと21項目＋視覚Diff検査（`VIS-01`）**：対象テキストノードのバイト範囲（固定PDFは増分更新オーバーレイ）だけを書き換え、他のZIPエントリは再圧縮すら行わず生バイト複製します。記入後に7区分・21項目の構造検査と視覚検査（`VIS-01`：Word／Excelは内蔵描画エンジンによる配置比較、対応する固定PDFは指定枠外の画素比較。`0 px` は各比較での測定値であり、任意文書の実機表示・印刷の完全一致保証ではなく最終確認は人が行います）を実行し、付属5様式については実機 Microsoft Word 16.0・Excel 16.0 でも警告ゼロ・ページ数不変・計算式一致を確認済みです。
 - **2. マーカーなし白紙様式の4段階・空欄自動発見**：`{{マーカー}}` が無い白紙様式（デモ4 Word・デモ5 Excel・デモ6 固定PDF）でも、申請者記入欄（`applicant_fillable`）と事務局専用欄（`office_only`：受付番号・審査欄等）を自動仕分けし、事務局欄や計算式セルへの誤記入をロックします。
 - **3. 根拠付き抽出・不明点の明示と人間承認ロック**：AIの抽出値には元メモの原文引用スパンを紐づけ、年の補完は推定フラグ（`year_inferred`）を付けて人が確認し、メモに無い事実（デモ2の法人番号）は推測で埋めず `needs_human_input`（人の追加入力は本人確認記録 `human attestation`）として残します。アプリ側の字数超過修復処理では、検知した条件語の削除を自動保留（`unsafe_condensation`）して削除文を全文表示し、モデルが最初から字数内で要約した文章も含め、省略の妥当性は人が原文全体と照合します。確認者が全項目を確認して承認するまで、ダウンロードはサーバー側でロックされます。
 
 **【ハッカソン後の継続利用と導入条件】**
-- Web UI・CLI・Claude Code MCP サーバー（`.mcp.json`）の3形態で動作し、APIキーがない端末でもオフライン決定論エンジンで再現できます。実務導入時は様式ごとの対象欄設定と実機表示確認を行い、固定PDFはページ内に Unicode の CID フォントを持つ PDF を対象とします（Identity-H やスキャン画像PDF等は安全に拒否。詳細は `README.md` の Limitations 参照）。
+- Web UI・CLI・Claude Code MCP サーバー（`.mcp.json`）の3形態で動作し、APIキーがない端末でもルール式のオフラインデモで再現できます。実務導入時は様式ごとの対象欄設定と実機表示確認を行い、固定PDFはページ内に Unicode の CID フォントを持つ PDF を対象とします（Identity-H やスキャン画像PDF等は安全に拒否。詳細は `README.md` の Limitations 参照）。
 
 ---
 
@@ -91,7 +91,7 @@
 - One broken border or altered clause can trigger administrative rejection (差し戻し), requiring internal seals/approvals to be re-obtained and the form to be re-submitted. Regenerating a complete form can alter borders, merged cells, or formulas and introduce unstated numbers, making it unsafe for non-engineer staff. (The comparison file in the demo uses scripted simulated regeneration failures to illustrate these structural checks.)
 
 **Solution:**
-- Form-Guard Agent performs **byte-range surgical replacement** only on designated fields (and byte-preserving incremental overlay on supported fixed PDFs with embedded Unicode CID fonts; see `README.md` Limitations), backed by **21 deterministic structural checks + `VIS-01` visual verification**:
+- Form-Guard Agent performs **byte-range pinpoint replacement** only on designated fields (and byte-preserving incremental overlay on supported fixed PDFs with embedded Unicode CID fonts; see `README.md` Limitations), backed by **21 deterministic structural checks + `VIS-01` visual verification**:
 - **1. Visual & Structural Checks:** Visual checks compare built-in layout geometry for Word/Excel and pixels outside designated boxes for supported PDFs (`0 px` drift in the built-in checks; native display and printing require final human review, and production adoption requires per-template field and display verification).
 - **2. 4-Stage Blank-Cell Discovery** on unmarked forms (`form4` Word, `form5` Excel, `form6` PDF), separating `applicant_fillable` cells from locked `office_only` cells and Excel formulas.
 - **3. Verbatim Source Grounding (no guessed facts) & Human Gate:** AI-extracted values carry source quotes; inferred years are flagged for review (`year_inferred`), unstated facts stay `needs_human_input`, and reviewer-entered values are recorded as human attestations. The application holds unsafe deletions during its own length repair, while pre-condensed model output is reviewed against the full source.
@@ -142,7 +142,7 @@
 
 | 審査基準（配点） | 公式チェック項目（要約） | Form-Guard Agent の実装と定量エビデンス |
 | :--- | :--- | :--- |
-| **1. インパクト (30%)** | ・日本の具体的な現場から出発しているか<br>・テーマ1「足りないもの」／テーマ2「阻んでいた壁」を捉えているか<br>・誰がどんな場面でどれくらい困っているか具体的か<br>・ハッカソン後も使い続けられるか | ・研究費変更届（Word）・自治体補助金申請（Word）・月次設備点検（Excel）・白紙2様式・固定PDF助成金申請の計6様式で実証<br>・付属Word/Excel 5様式（41欄中40欄記入・848字）をオフラインで計測：XMLタグ 2,119・定型文 171・結合セル 124・罫線 650 を、計測スクリプトの表で 120〜246 ms・Web保存測定で 119〜379 ms＝1様式 0.4秒未満で照合（固定PDF・API応答・人の確認時間は含まない。`form1` ライブAPI記録は各段階合計約29.63秒）<br>・Web UI / CLI / `.mcp.json` で継続利用可能（実務導入時は様式ごとの欄指定と表示確認が必要。固定PDFはページ内にUnicode CIDフォントを持つPDFが対象） |
-| **2. デモ (25%)** | ・冒頭で「誰の、どんな課題を、どう解決するか」が明確か<br>・前提知識のない人でも実際の操作で価値が分かるか<br>・最後まで見たくなる動画か | ・冒頭28秒（`#tour=1`）で、様式ごと作り直した場合の失敗を再現した比較用の模擬ファイル（結合セル19→0・罫線定義9→0・A4→レター・7項目不合格）と Form-Guard 版（21/21合格・内蔵配置比較のずれ `0 px`）を Before/After スライダーで比較<br>・Web画面上部の5ステップ審査員ガイドツアー（`#tour=1`〜`#tour=5`）と専門用語噛み砕きテロップで非エンジニアにも直感的に伝達 |
+| **1. インパクト (30%)** | ・日本の具体的な現場から出発しているか<br>・テーマ1「足りないもの」／テーマ2「阻んでいた壁」を捉えているか<br>・誰がどんな場面でどれくらい困っているか具体的か<br>・ハッカソン後も使い続けられるか | ・研究費変更届（Word）・自治体補助金申請（Word）・月次設備点検（Excel）・白紙2様式・固定PDF助成金申請の計6様式で実証<br>・付属Word/Excel 5様式（41欄中40欄記入・848字）をオフラインで計測：XMLタグ 2,119・定型文 171・結合セル 124・罫線 650 を、計測スクリプトの表で 120〜246 ms・Web保存測定で 119〜379 ms（0.4秒未満）、デモ動画収録時の画面実測（`seg18`）で 361〜1,234 ms（約0.4〜1.2秒）で照合（固定PDF・API応答・人の確認時間は含まない。`form1` ライブAPI記録は各段階合計約29.63秒）<br>・Web UI / CLI / `.mcp.json` で継続利用可能（実務導入時は様式ごとの欄指定と表示確認が必要。固定PDFはページ内にUnicode CIDフォントを持つPDFが対象） |
+| **2. デモ (25%)** | ・冒頭で「誰の、どんな課題を、どう解決するか」が明確か<br>・前提知識のない人でも実際の操作で価値が分かるか<br>・最後まで見たくなる動画か | ・冒頭35秒（0〜24秒で社会的意義と現場課題、24〜35秒の `#tour=1` で比較）において、様式ごと作り直した場合の失敗を再現した比較用の模擬ファイル（結合セル19→0・罫線定義9→0・A4→レター・7項目不合格）と Form-Guard 版（21/21合格・内蔵配置比較のずれ `0 px`）を Before/After スライダーで比較<br>・Web画面上部の5ステップ審査員ガイドツアー（`#tour=1`〜`#tour=5`）と専門用語噛み砕きテロップで非エンジニアにも直感的に伝達 |
 | **3. Claudeの活用 (25%)** | ・基本的な使い方を超えた創造的活用か<br>・Claude Code を開発の中心に据えているか<br>・モデルや機能（Skills、サブエージェント、MCP、フック等）を目的に応じて使い分けているか | ・欄別3モデル自動振り分け（Haiku 4.5 / Sonnet 5 / Opus 5.5：ライブAPI `form1` で3モデルの初回提案応答と `21/21 PASS` を確認）＋上限超過等の決定論的再抽出と Opus 自己修正設計（オフラインデモとモックAPIテストで確認）<br>・2段階フック（`PreToolUse` 白紙保護＋`PostToolUse` 構文・import検査）、`Edit`/`Write` 無しの4サブエージェント（うち3種はフック付き `Bash`）、6 Skills、5ツール MCP＋Web承認引き継ぎ |
 | **4. 深さと実行力 (20%)** | ・試行錯誤を重ねて磨き上げ、課題にじっくり向き合った跡が見えるか<br>・設計と実装が丁寧か<br>・困っている人が安心してそのまま使える形か | ・展開後 **全272件の `pytest` 合格**、オフラインプログラム **45試行（`45/45 ok`・2026-11-04（水）にコミット `282fb0c` で再検証済み）**、ヘッドレス Edge 実ブラウザ **16試行（`16/16 ok`・コンソールエラー0・2026-11-04（水）にコミット `282fb0c` で再検証済み）**<br>・付属Word/Excel 5様式について実機 Microsoft Word 16.0 / Excel 16.0 での開閉・ページ数・計算式再計算（`COUNTIF` / `SUM`）確認済み |
