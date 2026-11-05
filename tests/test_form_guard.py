@@ -1442,6 +1442,22 @@ def test_r1_o5_o7_readme_wording_and_re_anchored_flag():
 # --------------------------------------------------- #20 R1-O6 Host / Origin
 
 
+def test_tunnel_access_key_and_allowed_host(api, monkeypatch):
+    import base64
+    tun = "demo-abc.trycloudflare.com"
+    assert api.get("/api/health", headers={"Host": tun}).status_code == 403  # not allowed by default
+    monkeypatch.setenv("FORM_GUARD_ALLOWED_HOSTS", tun)
+    assert api.get("/api/health", headers={"Host": tun}).status_code == 200  # no key set -> open (local default)
+    monkeypatch.setenv("FORM_GUARD_ACCESS_KEY", "s3cret")
+    r = api.get("/api/health", headers={"Host": tun})
+    assert r.status_code == 401 and "Basic" in r.headers["www-authenticate"]
+    good = "Basic " + base64.b64encode(b"anyone:s3cret").decode()
+    bad = "Basic " + base64.b64encode(b"anyone:wrong").decode()
+    assert api.get("/api/health", headers={"Host": tun, "Authorization": bad}).status_code == 401
+    assert api.get("/api/health", headers={"Host": tun, "Authorization": good}).status_code == 200
+    assert api.get("/api/health", headers={"Host": "evil.example.com", "Authorization": good}).status_code == 403
+
+
 def test_r1_o6_server_refuses_foreign_hosts_and_cross_site_origins(api):
     assert api.get("/api/health", headers={"Host": "evil.example.com"}).status_code == 403
     assert api.get("/api/health", headers={"Host": "evil.example.com"}).json()["detail"] == "forbidden host"

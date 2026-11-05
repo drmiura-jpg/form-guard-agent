@@ -53,6 +53,7 @@ in this app; ``GET /api/portal/forms`` is the same list as JSON for Claude Code 
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -324,6 +325,21 @@ def _origin_host(origin: str) -> str:
         return ""
 
 
+def _access_key_ok(authorization: str) -> bool:
+    """True when no FORM_GUARD_ACCESS_KEY is set, or the HTTP Basic password equals it (constant-time)."""
+    key = os.environ.get("FORM_GUARD_ACCESS_KEY", "")
+    if not key:
+        return True
+    try:
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() != "basic":
+            return False
+        password = base64.b64decode(token.strip()).decode("utf-8").partition(":")[2]
+    except Exception:
+        return False
+    return secrets.compare_digest(password.encode("utf-8"), key.encode("utf-8"))
+
+
 def allowed_hosts() -> set[str]:
     extra = os.environ.get("FORM_GUARD_ALLOWED_HOSTS", "")
     return set(LOCAL_HOSTS) | {h.strip().lower() for h in extra.split(",") if h.strip()}
@@ -420,6 +436,10 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
         hosts = allowed_hosts()
         if _hostname(request.headers.get("host", "")) not in hosts:  # DNS rebinding
             resp = JSONResponse({"detail": "forbidden host"}, status_code=403)
+        elif not _access_key_ok(request.headers.get("authorization", "")):
+            # Optional shared passphrase (FORM_GUARD_ACCESS_KEY) for a temporary public tunnel; any user name.
+            resp = JSONResponse({"detail": "passphrase required"}, status_code=401,
+                                headers={"WWW-Authenticate": 'Basic realm="Form-Guard demo"'})
         elif request.method in UNSAFE_METHODS and "origin" in request.headers and \
                 _origin_host(request.headers["origin"]) not in hosts:
             resp = JSONResponse({"detail": "forbidden origin"}, status_code=403)  # cross-site form / fetch
