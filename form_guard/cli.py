@@ -71,6 +71,7 @@ def _summary_line(result) -> dict:
         "dir": result.out_dir.name if result.out_dir else "",
         "filled_name": result.filled_path.name,
         "engine": result.engine.get("label"),
+        **({"auto_adapt": result.adapt_history} if getattr(result, "adapt_history", None) else {}),
     }
 
 
@@ -80,6 +81,12 @@ def _print_result(result, out_root: Optional[Path] = None) -> None:
     print(f"   {s['status']} · {s['filled']}/{len(result.mappings)} fields filled · "
           f"{s['checks_passed']}/{s['checks_total']} checks passed"
           + (f" · naive regeneration: {s['naive_failures']} failed checks" if s["naive_failures"] is not None else ""))
+    for ad in getattr(result, "adapt_history", None) or []:
+        if ad.get("action") == "auto_discover_unmarked":
+            print(f"   ⚙ auto-adapt: discovered {ad.get('confirmed_count')} blank cell(s) (bound to SHA-256 {str(ad.get('form_sha256') or '')[:12]}…)")
+        elif ad.get("action") == "tighten_max_chars":
+            print(f"   ⚙ auto-adapt round {ad.get('round')}: tightened {ad.get('slot_id')} max_chars "
+                  f"{ad.get('old_max_chars')}→{ad.get('new_max_chars')} (was {ad.get('previous_len')} chars)")
     for m in result.mappings:
         if m.status == "needs_human_input":
             why = "not stated in the memo" if not m.suggested_value else "could not be validated"
@@ -188,6 +195,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--slot-spec", type=Path, help="optional <form>.slots.json (aliases, coordinate targets)")
     ap.add_argument("--discovery", type=Path, help="discovery report written by --discover-blanks (use with --confirm)")
     ap.add_argument("--confirm", metavar="IDS", help="candidate ids the reviewer confirmed (c01,c02,…) or 'recommended'")
+    ap.add_argument("--auto-adapt", action="store_true",
+                    help="automatically discover blank cells on unmarked forms (bound to blank form SHA-256) and "
+                         "self-heal VIS-01 layout overflows by tightening max_chars (up to 3 rounds)")
     ap.add_argument("--naive", type=Path, help="optional naive-regeneration file to audit for comparison")
     ap.add_argument("--set", action="append", default=[], metavar="SLOT=VALUE",
                     help="reviewer-entered value (with --verify: a value the reviewer attests to)")
@@ -249,7 +259,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     if a.discover_blanks:
         from .scanner import discover_blank_cells
 
-        d = discover_blank_cells(a.discover_blanks, mode=a.mode, model_tier=a.model_tier)
+        d = discover_blank_cells(a.discover_blanks, mode=a.mode, model_tier=a.model_tier, model=a.model)
         _print_discovery(d)
         a.out_dir.mkdir(parents=True, exist_ok=True)
         out = a.out_dir / f"{a.discover_blanks.stem}.discovery.json"
@@ -319,13 +329,22 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(f"Confirmed {len(spec['targets'])} cell(s): {', '.join(t['slot_id'] for t in spec['targets'])} → {sp}")
         try:  # a changed blank form or a slot spec designating an office-only cell is refused before writing
             r = run_pipeline(a.form, read_memo(a.memo), a.out_dir, mode=a.mode, model=a.model, naive_path=a.naive,
-                             overrides=_parse_sets(a.set), slot_spec=spec, png=a.png, model_tier=a.model_tier)
+                             overrides=_parse_sets(a.set), slot_spec=spec, png=a.png, model_tier=a.model_tier,
+                             auto_adapt=a.auto_adapt)
         except ValueError as exc:
             print(f"refused before filling: {exc}", file=sys.stderr)
             return 2
         print(f"Engine: {r.engine.get('label')}")
         _print_result(r)
         print(f"   filled file: {r.filled_path}")
+        if a.auto_adapt and getattr(r, "adapt_history", None) and r.scan.spec.get("form_sha256") and (
+            r.scan.spec.get("targets") or r.scan.spec.get("slots")
+        ):
+            asp = a.out_dir / f"{a.form.stem}.adapted.slots.json"
+            if not asp.is_file():
+                asp.write_text(json.dumps(r.scan.spec, ensure_ascii=False, indent=2) + "\n",
+                               encoding="utf-8", newline="\n")
+            print(f"   adapted slot spec: {asp}  (reuse with --slot-spec {asp}; review the cells first)")
         if a.json:
             print(json.dumps(_summary_line(r), ensure_ascii=False, indent=2))
         return 1 if r.report.overall_status == "FAIL" else 0

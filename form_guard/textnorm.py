@@ -671,7 +671,8 @@ def condense_extractive(text: str, max_chars: int, joiner: str = "") -> Optional
 
     Deleting anything from step 4 (a weekday, or a piece with ``protection > 0``) marks the result ``unsafe``: it is
     only offered as a suggestion, never written automatically, and ``held`` names the pieces a human has to decide
-    about.
+    about. Step 5 (single-sentence clause trimming after a top-level comma) is always marked ``unsafe`` and offered
+    only as a suggestion for human review.
     Anything deleted that fits back afterwards is restored. ``removed`` lists every deleted piece
     in reading order. Returns None if the text cannot fit without rewriting.
     """
@@ -761,6 +762,25 @@ def condense_extractive(text: str, max_chars: int, joiner: str = "") -> Optional
     for level in (1, 2):
         drop_asides(level, 0)
         drop_sentences(level)
+    # 5) single-sentence clause trimming (after top-level 、 / ，) when no whole sentence can be dropped:
+    #    always marked unsafe (held) so a human confirms the cut clause and any previously dropped sentences.
+    if total() > max_chars and len(kept_items()) == 1:
+        it0 = kept_items()[0]
+        s0 = text[it0["start"] : it0["end"]]
+        others = [text[o["start"] : o["end"]] for o in items if not o["kept"]]
+        depth, cuts = 0, []
+        for i, ch in enumerate(s0):
+            if ch in "（(「『":
+                depth += 1
+            elif ch in "）)」』":
+                depth = max(0, depth - 1)
+            elif depth == 0 and ch in "、，":
+                cuts.append(i)
+        for i in reversed(cuts):
+            head = s0[:i].rstrip("、， ")
+            if 1 <= len(head) <= max_chars:
+                cut = [s0[len(head) :]] + others
+                return Condensed(head, [head], cut, unsafe=True, held=cut)
     if total() > max_chars:
         return None
     # restore anything that fits again, most valuable (= removed last) first

@@ -1223,9 +1223,9 @@ def repair(slot: FormSlot, draft: Draft, errors: list[ValidationIssue], memo: st
                 removed.extend(c.removed)
             new, flags = draft.with_value(c.text, c.fragments), ["condensed"]
             if c.unsafe:
-                # every protected piece that would be cut (protection > 0: condition, restriction, interim measure,
-                # scope limit, core decision) and every weekday a date would lose
-                cut = "」「".join(r for r in c.removed if protection(r) > 0 or WEEKDAY_NOTE_RE.fullmatch(r))
+                # every protected piece or trimmed clause that would be cut (c.held) and every weekday a date would lose
+                held_items = c.held or [r for r in c.removed if protection(r) > 0 or WEEKDAY_NOTE_RE.fullmatch(r)]
+                cut = "」「".join(held_items)
                 new.hold = [ValidationIssue(
                     code="unsafe_condensation",
                     message=f"fitting {slot.max_chars} chars would delete a condition, restriction, measure or a date's "

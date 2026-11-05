@@ -548,7 +548,8 @@ def acroform_fields(form: PDFForm) -> list[dict[str, Any]]:
 
 
 def discover_pdf(path: Union[str, Path], mode: str = "demo", client: Any = None,
-                 model_tier: Optional[str] = "auto", expected_sha256: Optional[str] = None) -> dict[str, Any]:
+                 model_tier: Optional[str] = "auto", expected_sha256: Optional[str] = None,
+                 model: Optional[str] = None) -> dict[str, Any]:
     """Blank-box discovery for a fixed PDF — the same report format as ``scanner.discover_blank_cells``."""
     from collections import Counter
     from datetime import datetime, timezone
@@ -599,7 +600,7 @@ def discover_pdf(path: Union[str, Path], mode: str = "demo", client: Any = None,
                        "printed_text_untouched": True},
         })
     title = form.title
-    engine = _classify_with_claude(candidates, title, mode, client, model_tier)
+    engine = _classify_with_claude(candidates, title, mode, client, model_tier, model=model)
     live_usage = engine.pop("live_usage", None)
     fields = acroform_fields(form)
     for f in fields:

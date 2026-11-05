@@ -391,6 +391,9 @@ class _DocxRenderer:
         size = pd.get("size", 10.5)
         lines = _break_lines(items, (width - ind_left) * 0.985, first, factor or 1.25)
         if not items:
+            empty_d = dict(pd)
+            self.styles._rpr(p.find(f"{W}pPr/{W}rPr"), empty_d)
+            size = empty_d.get("size", size)
             lines = [_Line([], size * PT_TO_PX * (factor or 1.25), 0)]
         if factor is None:
             exact = line * PX_PER_TWIP
@@ -787,7 +790,8 @@ def _layout_sheet(ws, sheet_index: int, page_no: int, boxes: dict[str, Box]) -> 
                           sum(_measure(ch, st) for _, ch, _ in items))]
                 total_h = sum(ln.height for ln in lines)
                 max_line_w = max((ln.width for ln in lines), default=0.0)
-                overflow = (max(0.0, max_line_w - (x1 - x0 - 4)), max(0.0, total_h - (y1 - y0 - 2)))
+                overflow = (max(0.0, max_line_w - (x1 - x0 - 4)),
+                            max(0.0, (size if len(lines) == 1 else total_h) - (y1 - y0 - 2)))
                 if al.vertical == "top":
                     ty = y0 + 3
                 elif al.vertical == "center":

@@ -5728,8 +5728,8 @@ def test_cli_and_mcp_server_start_when_run_directly_as_scripts(script_rel):
     assert bad.returncode == 2 and "Traceback (most recent call last):" not in (bad.stdout + bad.stderr)
 
 
-def test_r1_1449_audit_regressions(tmp_path):
-    """Regression tests for R1-A1..A6, R1-O6, R1-O7 from 2026-11-03_1449 audit."""
+def test_r1_1449_audit_regressions(samples_dir, tmp_path, fake_client_factory):
+    """Regression tests for R1-A1..A6, R1-O6, R1-O7 from 2026-11-03_1449 audit and auto-adapt R1 audit."""
     from form_guard.constraints import (
         advance_notice_rules,
         checkbox_constraints,
@@ -5838,6 +5838,205 @@ def test_r1_1449_audit_regressions(tmp_path):
     assert protection("なお、フィルター清掃のみで異常なし。") == 0
     res_cond = condense_extractive("設備を導入する。なお、利用は平日のみ。", 8)
     assert res_cond.text == "設備を導入する。" and res_cond.removed and res_cond.unsafe is True
+
+    # --auto-adapt: unmarked form discovery bound to SHA-256 and VIS-01 overflow max_chars tightening
+    from form_guard.cli import main as cli_main
+    from form_guard.pipeline import run_pipeline
+
+    u4 = unmarked(samples_dir, "form4")
+    r_unmarked = run_pipeline(u4["form"], u4["memo"].read_text(encoding="utf-8"), tmp_path / "adapt_u4",
+                              mode="demo", auto_adapt=True)
+    assert r_unmarked.report.overall_status == "PASS"
+    assert any(a["action"] == "auto_discover_unmarked" for a in r_unmarked.adapt_history)
+    assert r_unmarked.scan.spec.get("form_sha256") == hashlib.sha256(u4["form"].read_bytes()).hexdigest()
+
+    wb_narrow = openpyxl.Workbook()
+    ws_narrow = wb_narrow.active
+    ws_narrow.title = "申請書"
+    ws_narrow["A1"] = "各種届出書（架空）"
+    ws_narrow.merge_cells("A1:B1")
+    ws_narrow["A2"] = "申請理由"
+    ws_narrow["B2"] = ""
+    ws_narrow.column_dimensions["A"].width = 14
+    ws_narrow.column_dimensions["B"].width = 24
+    narrow_xlsx = tmp_path / "narrow_form.xlsx"
+    wb_narrow.save(narrow_xlsx)
+    memo_file = tmp_path / "memo.txt"
+    memo_file.write_text("申請理由：設備更新を実施する。なお、フィルター清掃のみで異常なし。\n", encoding="utf-8")
+
+    r_no_adapt = run_pipeline(narrow_xlsx, memo_file.read_text(encoding="utf-8"), tmp_path / "no_adapt",
+                              mode="demo", auto_adapt=False)
+    assert len(r_no_adapt.scan.slots) == 0 and r_no_adapt.report.overall_status == "FAIL"
+
+    out_cli = tmp_path / "with_adapt"
+    rc = cli_main(["--form", str(narrow_xlsx), "--memo", str(memo_file), "--out-dir", str(out_cli),
+                   "--mode", "demo", "--auto-adapt"])
+    assert rc == 0
+    adapted_spec_path = out_cli / "narrow_form.adapted.slots.json"
+    assert adapted_spec_path.is_file()
+    spec_data = json.loads(adapted_spec_path.read_text(encoding="utf-8"))
+    assert spec_data.get("form_sha256") == hashlib.sha256(narrow_xlsx.read_bytes()).hexdigest()
+    audit_data = json.loads((out_cli / "audit_log.json").read_text(encoding="utf-8"))
+    assert audit_data["report"]["overall_status"] == "PASS"
+    assert audit_data["mappings"][0]["filled_value"] == "設備更新を実施する。"
+    assert any(a["action"] == "tighten_max_chars" for a in audit_data.get("auto_adapt", []))
+
+    # R1-A1 / R1-A2 / R1-O1: condense_extractive step 5 (clause trimming) always unsafe, preserves removed/held & verbatim fragments
+    t1 = "定期点検を毎月第一月曜日に実施し、その結果を記録簿に記入して保管する。ただし祝日の場合は翌日とする。"
+    c1 = condense_extractive(t1, 20)
+    assert c1 is not None and c1.unsafe is True
+    assert any("ただし" in h for h in c1.held) and all(f in t1 for f in c1.fragments)
+
+    t2 = "令和8年11月6日（金）に設備を搬入し、据付および試運転を実施する。"
+    c2 = condense_extractive(t2, 20)
+    assert c2 is not None and c2.unsafe is True and all(f in t2 for f in c2.fragments)
+
+    t3 = "新設備（型番A-1、出力5kW、三相200V仕様）を導入し、既存設備を撤去して段階的に全面更新を実施する。"
+    c3 = condense_extractive(t3, 30)
+    assert c3 is not None and c3.text == "新設備（型番A-1、出力5kW、三相200V仕様）を導入し"
+    assert c3.unsafe is True and all(f in t3 for f in c3.fragments)
+
+    t4 = "定期点検を毎月第一月曜日に実施し、その結果を記録簿に記入して3年間保管する。"
+    c4 = condense_extractive(t4, 20)
+    assert c4 is not None and c4.unsafe is True and len(c4.held) >= 1
+
+    t5 = "申請者は同意した、という事実はありません。"
+    c5 = condense_extractive(t5, 8)
+    assert c5 is not None and c5.text == "申請者は同意した" and c5.unsafe is True and len(c5.held) >= 1
+
+    # R1-A3: Word bottom-most table row growth sets identical_outside_slots=False and triggers VIS-01 / auto_adapt
+    doc_grow = docx.Document()
+    tbl_grow = doc_grow.add_table(rows=1, cols=2)
+    tbl_grow.cell(0, 0).text = "申請理由"
+    tbl_grow.cell(0, 1).text = "{{申請理由}}"
+    grow_docx = tmp_path / "grow_bottom.docx"
+    doc_grow.save(grow_docx)
+    memo_grow = "申請理由：業務効率化のため新設備を導入する。なお、既存機器の点検で異常なし。\n"
+    r_grow_no = run_pipeline(grow_docx, memo_grow, tmp_path / "grow_no_adapt", mode="demo", auto_adapt=False)
+    assert r_grow_no.visual["grown_slots"] and r_grow_no.visual["identical_outside_slots"] is False
+    assert r_grow_no.report.overall_status == "FAIL"
+    r_grow_yes = run_pipeline(grow_docx, memo_grow, tmp_path / "grow_with_adapt", mode="demo", auto_adapt=True)
+    assert r_grow_yes.report.overall_status == "PASS"
+    assert r_grow_yes.mappings[0].filled_value == "業務効率化のため新設備を導入する。"
+    assert (tmp_path / "grow_with_adapt" / "grow_bottom.adapted.slots.json").is_file()
+    grow_spec_saved = json.loads((tmp_path / "grow_with_adapt" / "grow_bottom.adapted.slots.json").read_text(encoding="utf-8"))
+    assert grow_spec_saved.get("form_sha256") == hashlib.sha256(grow_docx.read_bytes()).hexdigest()
+
+    # R1-A4 / R1-O5 / R1-A10 / R1-A13 / R1-O8: prior & overrides preservation, slot_spec deepcopy, max_adapt_rounds validation
+    with pytest.raises(ValueError, match="max_adapt_rounds"):
+        run_pipeline(grow_docx, memo_grow, tmp_path / "bad_rounds", mode="demo", auto_adapt=True, max_adapt_rounds=-1)
+    with pytest.raises(ValueError, match="max_adapt_rounds"):
+        run_pipeline(grow_docx, memo_grow, tmp_path / "bad_rounds_bool", mode="demo", auto_adapt=True, max_adapt_rounds=True)
+
+    import copy
+
+    caller_spec = {"slots": {"申請理由": {"label": "申請理由"}}}
+    caller_spec_copy = copy.deepcopy(caller_spec)
+    run_pipeline(grow_docx, memo_grow, tmp_path / "deepcopy_spec", mode="demo", slot_spec=caller_spec, auto_adapt=True)
+    assert caller_spec == caller_spec_copy
+
+    # overrides with human_entered is never tightened away by auto_adapt
+    r_human_ov = run_pipeline(narrow_xlsx, memo_file.read_text(encoding="utf-8"), tmp_path / "human_ov",
+                              mode="demo", auto_adapt=True, overrides={"申請理由": "確認者が直接指定した特別理由テキスト"})
+    assert r_human_ov.mappings[0].status == "human_entered"
+    assert r_human_ov.mappings[0].filled_value == "確認者が直接指定した特別理由テキスト"
+
+    # R1-A12: DataTableFormula attributes included in xlsx_structure comparison
+    from openpyxl.worksheet.formula import DataTableFormula
+    from form_guard.verifier import xlsx_structure
+
+    wb_dt1 = openpyxl.Workbook()
+    ws_dt1 = wb_dt1.active
+    ws_dt1["B2"] = DataTableFormula(ref="B2:C5", r1="D1")
+    b_dt1 = io.BytesIO()
+    wb_dt1.save(b_dt1)
+
+    wb_dt2 = openpyxl.Workbook()
+    ws_dt2 = wb_dt2.active
+    ws_dt2["B2"] = DataTableFormula(ref="B2:C5", r1="E1")
+    b_dt2 = io.BytesIO()
+    wb_dt2.save(b_dt2)
+    assert xlsx_structure(b_dt1.getvalue())["sheets"][0]["formulas"] != xlsx_structure(b_dt2.getvalue())["sheets"][0]["formulas"]
+
+    # Web UI & MCP auto_adapt extension
+    from form_guard.mcp_server import FormGuardMCP
+
+    mcp_inst = FormGuardMCP(root=tmp_path)
+    mcp_res = mcp_inst.call_tool("form_guard_fill", {
+        "form_path": str(narrow_xlsx.relative_to(tmp_path)),
+        "memo_text": memo_file.read_text(encoding="utf-8"),
+        "mode": "demo",
+        "auto_adapt": True,
+    })
+    assert mcp_res["isError"] is False
+    assert mcp_res["structuredContent"]["verification"]["overall_status"] == "PASS"
+    assert mcp_res["structuredContent"]["fields"][0]["value"] == "設備更新を実施する。"
+
+    # R1-A4: prior human_entered mapping preserved across adaptation rounds when another field overflows
+    doc_two = docx.Document()
+    tbl_two = doc_two.add_table(rows=2, cols=2)
+    tbl_two.cell(0, 0).text = "申請者氏名"
+    tbl_two.cell(0, 1).text = "{{申請者氏名}}"
+    tbl_two.cell(1, 0).text = "申請理由"
+    tbl_two.cell(1, 1).text = "{{申請理由}}"
+    two_docx = tmp_path / "two_fields.docx"
+    doc_two.save(two_docx)
+    memo_two = "申請者氏名：旧名 太郎\n申請理由：業務効率化のため新設備を導入する。なお、既存機器の点検で異常なし。\n"
+    r_two_init = run_pipeline(two_docx, memo_two, tmp_path / "two_init", mode="demo", auto_adapt=False)
+    prior_maps = [
+        m.model_copy(update={"status": "human_entered", "filled_value": "新名 花子", "char_count": 5})
+        if m.slot_id == "申請者氏名" else m
+        for m in r_two_init.mappings
+    ]
+    r_two_adapt = run_pipeline(two_docx, memo_two, tmp_path / "two_adapt", mode="demo",
+                               prior=(prior_maps, {"usage": {"requests": 5, "input_tokens": 100, "output_tokens": 50}}),
+                               auto_adapt=True)
+    assert r_two_adapt.report.overall_status == "PASS"
+    by_slot = {m.slot_id: m for m in r_two_adapt.mappings}
+    assert by_slot["申請者氏名"].status == "human_entered" and by_slot["申請者氏名"].filled_value == "新名 花子"
+    assert by_slot["申請理由"].filled_value == "業務効率化のため新設備を導入する。"
+    assert r_two_adapt.engine.get("prior_usage", {}).get("requests") == 5
+    assert r_two_adapt.engine["usage"].get("requests", 0) == 0
+
+    # R1-A5 / R1-O4 / R1-A6: live discovery + multi-round adaptation usage accumulation & model forwarding
+    from conftest import echo_model
+
+    disc_resp = echo_model({"cells": [{"candidate_id": "c01", "role": "applicant_fillable", "reason": "ok"}]})
+    map_resp1 = echo_model({"fields": [{
+        "slot_id": "申請理由", "status": "filled",
+        "value": "設備更新を実施する。なお、フィルター清掃のみで異常なし。",
+        "source_quotes": ["設備更新を実施する。なお、フィルター清掃のみで異常なし。"],
+        "confidence": 0.95, "reasoning": "ok",
+    }]})
+    map_resp2 = echo_model({"fields": [{
+        "slot_id": "申請理由", "status": "filled",
+        "value": "設備更新を実施する。",
+        "source_quotes": ["設備更新を実施する。"],
+        "confidence": 0.95, "reasoning": "ok",
+    }]})
+
+    fake_live = fake_client_factory([disc_resp, map_resp1, map_resp2])
+    r_live_adapt = run_pipeline(
+        narrow_xlsx, memo_file.read_text(encoding="utf-8"), tmp_path / "live_adapt",
+        mode="live", model="claude-custom-pin", client=fake_live, auto_adapt=True,
+    )
+    assert all(c["model"] == "claude-custom-pin" for c in fake_live.beta.messages.calls)
+    assert r_live_adapt.engine["usage"]["requests"] == len(fake_live.beta.messages.calls)
+    assert r_live_adapt.engine["usage"]["input_tokens"] == 1200 * len(fake_live.beta.messages.calls)
+    assert r_live_adapt.engine["discovery_usage"]["requests"] == 1
+    assert len(r_live_adapt.engine["usage"]["usage_by_round"]) >= 2
+
+    # R1-A7: adapted spec rejects a modified blank form on reuse
+    tampered_docx = tmp_path / "tampered_grow.docx"
+    doc_tamper = docx.Document()
+    tbl_t = doc_tamper.add_table(rows=1, cols=2)
+    tbl_t.cell(0, 0).text = "申請理由（改訂版）"
+    tbl_t.cell(0, 1).text = "{{申請理由}}"
+    doc_tamper.save(tampered_docx)
+    with pytest.raises(ValueError, match="blank form changed after discovery"):
+        run_pipeline(tampered_docx, memo_grow, tmp_path / "tamper_run", mode="demo",
+                     slot_spec=tmp_path / "grow_with_adapt" / "grow_bottom.adapted.slots.json")
+
 
 
 

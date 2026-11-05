@@ -114,6 +114,7 @@ class RunRequest(BaseModel):
     mode: str = "auto"
     memo_text: Optional[str] = Field(default=None, max_length=MAX_MEMO_CHARS)
     model_tier: Optional[ModelTier] = None  # None: FORM_GUARD_MODEL_TIER or auto
+    auto_adapt: bool = False
 
 
 class OverrideRequest(BaseModel):
@@ -147,6 +148,7 @@ class RunDemoRequest(BaseModel):
     model_tier: Optional[ModelTier] = None
     discovery_id: Optional[str] = Field(default=None, max_length=64)
     confirmed_targets: Optional[list[Annotated[str, Field(max_length=32)]]] = Field(default=None, max_length=500)
+    auto_adapt: bool = False
 
 
 class DiscoverDemoRequest(BaseModel):
@@ -168,6 +170,7 @@ class FromDiscoveryRequest(BaseModel):
     memo_text: Optional[str] = Field(default=None, max_length=MAX_MEMO_CHARS)  # None: the demo's sample memo
     mode: str = "auto"
     model_tier: Optional[ModelTier] = None
+    auto_adapt: bool = False
 
 
 @dataclass
@@ -464,17 +467,19 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
 
     def _run(form_path: Path, memo: str, mode: str, *, naive: Optional[Path], spec: Optional[dict],
              demo_id: Optional[str], display: str, model_tier: Optional[str] = None,
-             auto_preview: bool = False) -> tuple[str, RunState]:
+             auto_preview: bool = False, auto_adapt: bool = False) -> tuple[str, RunState]:
         run_id = new_run_id()
         run_dir = store.root / run_id
         try:
             result = run_pipeline(form_path, memo, run_dir, mode=mode, naive_path=naive, slot_spec=spec,
-                                  demo_id=demo_id, run_id=run_id, client=app.state.client, model_tier=model_tier)
+                                  demo_id=demo_id, run_id=run_id, client=app.state.client, model_tier=model_tier,
+                                  auto_adapt=auto_adapt)
         except Exception as exc:  # noqa: BLE001 - surface any pipeline error to the UI
             raise HTTPException(422, f"pipeline failed: {exc}") from exc
         blob, sha = _verified_copy(result)  # recorded once, at pipeline completion
+        eff_spec = result.scan.spec if isinstance(result.scan.spec, dict) and (result.scan.spec.get("targets") or result.scan.spec.get("slots")) else spec
         st = RunState(result=result, ai_mappings=[m.model_copy(deep=True) for m in result.mappings],
-                      form_path=form_path, memo_text=memo, naive_path=naive, spec=spec, display_name=display,
+                      form_path=form_path, memo_text=memo, naive_path=naive, spec=eff_spec, display_name=display,
                       verified_bytes=blob, verified_sha256=sha, auto_preview=auto_preview)
         store.put(run_id, st)
         return run_id, st
@@ -576,7 +581,7 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
             p = pdf_paths(d, samples())
         memo = _require_memo(req.memo_text if req.memo_text is not None else read_memo(p["memo"]))
         run_id, st = _run(p["form"], memo, req.mode, naive=p["naive"], spec=None, demo_id=d["id"], display=p["form"].name,
-                          model_tier=req.model_tier)
+                          model_tier=req.model_tier, auto_adapt=req.auto_adapt)
         return _payload(run_id, st)
 
     def _discover(form_path: Path, mode: str, tier: Optional[str]) -> dict[str, Any]:
@@ -635,7 +640,8 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         run_id, st = _run(entry["path"], memo, req.mode, naive=None, spec=spec, demo_id=entry.get("demo_id"),
-                          display=entry.get("display_name") or entry["path"].name, model_tier=req.model_tier)
+                          display=entry.get("display_name") or entry["path"].name, model_tier=req.model_tier,
+                          auto_adapt=req.auto_adapt)
         return _payload(run_id, st)
 
     @app.post("/api/run-demo")
@@ -654,7 +660,7 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
             p = demo_paths(d, samples())
             memo = _require_memo(req.memo_text if req.memo_text is not None else read_memo(p["memo"]))
             run_id, st = _run(p["form"], memo, req.mode, naive=p["naive"], spec=None, demo_id=d["id"],
-                              display=p["form"].name, model_tier=tier)
+                              display=p["form"].name, model_tier=tier, auto_adapt=req.auto_adapt)
             return {"demo_id": d["id"], "unmarked": False, "auto_preview": False, "run": _payload(run_id, st)}
         try:
             u, pdf = discoverable(req.demo_id)
@@ -678,7 +684,7 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         run_id, st = _run(p["form"], memo, req.mode, naive=p.get("naive"), spec=spec, demo_id=u["id"],
-                          display=p["form"].name, model_tier=tier, auto_preview=preview)
+                          display=p["form"].name, model_tier=tier, auto_preview=preview, auto_adapt=req.auto_adapt)
         discovery = {**report, "discovery_id": token, "demo_id": u["id"], "title": u["title"], "title_en": u["title_en"],
                      "org": u["org"], "memo_text": sample_memo}
         return {"demo_id": u["id"], "unmarked": True, "auto_preview": preview, "discovery": discovery,
@@ -756,7 +762,8 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
     @app.post("/api/runs/upload")
     def run_upload(file: UploadFile = File(...), memo_text: str = Form(...), mode: str = Form("auto"),
                    slot_spec: Optional[UploadFile] = File(None), model_tier: Optional[str] = Form(None),
-                   discovery_id: Optional[str] = Form(None), confirmed_targets: Optional[str] = Form(None)):
+                   discovery_id: Optional[str] = Form(None), confirmed_targets: Optional[str] = Form(None),
+                   auto_adapt: bool = Form(False)):
         tier = _check_tier(model_tier)
         if len(memo_text) > MAX_MEMO_CHARS:
             raise HTTPException(413, "memo too long")
@@ -785,7 +792,7 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
             except ValueError as exc:
                 raise HTTPException(422, str(exc)) from exc
         run_id, st = _run(form_path, memo_text, mode, naive=None, spec=spec, demo_id=None,
-                          display=file.filename or form_path.name, model_tier=tier)
+                          display=file.filename or form_path.name, model_tier=tier, auto_adapt=auto_adapt)
         return _payload(run_id, st)
 
     @app.post("/api/runs/import")

@@ -127,9 +127,12 @@ def infer_slot_constraints(
             constraints["separator"] = "、"
     elif "期間" in name:
         fmt = "wareki_period" if wareki else "date"
-    elif name.endswith(("日", "日付")) or "年月日" in blob:
+    elif ((name.endswith(("日", "日付")) or "年月日" in blob)
+          and not re.fullmatch(r"(?:.*_)?日(?:_\d+)?", slot_id)
+          and not any(h.startswith("単位別置:") and h.endswith(("年", "月", "日")) for h in hints)):
         fmt = "wareki_date" if wareki else "date"
-    elif "金額" in name or name.endswith("額") or re.search(r"単位\s*[:：]\s*円", blob):
+    elif (("金額" in name or name.endswith("額") or re.search(r"単位\s*[:：]\s*円", blob))
+          and not any(h.startswith("単位別置:") and "円" in h for h in hints)):
         fmt = "yen"
         if "千円未満切捨" in blob or "千円未満切り捨" in blob:
             constraints["multiple_of"] = 1000

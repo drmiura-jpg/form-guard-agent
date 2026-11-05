@@ -21,6 +21,7 @@
     <a id="portalLink" class="btn btn-ghost btn-sm brand-portal" href="/portal" title="架空学術振興ポータル / Fictional grant &amp; study-group form portal"><span data-bi="🌐 公募様式ポータル (/portal)|Grant portal"></span></a>
   </div>
   <div class="top-actions">
+    <button id="beginnerBtn" class="btn btn-ghost btn-sm" type="button"><span data-bi="🔰 使い方（3ステップ）|🔰 Easy 3-Step Guide"></span></button>
     <button id="suiteBtn" class="btn btn-ghost btn-sm" type="button"><span data-bi="🧩 Claude Code 連携|🧩 Claude Code · Architecture"></span></button>
     <label class="mode-pick" data-tip="Auto は API キーがあれば Claude、無ければオフラインの決定論エンジンを使います|Auto uses Claude when an API key is configured, otherwise the offline demo engine">
       <span data-bi="エンジン|Engine"></span>
@@ -76,6 +77,10 @@
           <input id="specInput" type="file" accept=".json">
           <p class="hint" data-t="オフラインエンジン用の別名や、座標で空欄を指定する targets を書けます。|Aliases for the offline engine, or targets to fill empty table cells by coordinates.">Aliases for the offline engine, or targets to fill empty table cells by coordinates.</p>
         </details>
+        <label class="field-l" style="display:flex;align-items:center;gap:6px;margin-top:6px;">
+          <input id="autoAdaptInput" type="checkbox" checked>
+          <span data-t="ゼロ設定の自動適応モード（Word/Excelのみ：空欄自動検出＋はみ出し文字数の自動引き締め）|Zero-config auto-adapt (Word/Excel only: discover blank cells + self-heal VIS-01 overflow)">ゼロ設定の自動適応モード（Word/Excelのみ：空欄自動検出＋はみ出し文字数の自動引き締め）</span>
+        </label>
         <div class="upload-actions">
           <button class="btn btn-primary" type="submit"><span data-bi="▶ 記入して検査|▶ Run pipeline"></span></button>
           <button id="discoverBtn" class="btn btn-ghost" type="button"><span data-bi="🔍 マーカーなし白紙から空欄を自動発見|🔍 Discover blank cells"></span></button>
@@ -96,6 +101,32 @@
         <li><b>②</b><span data-l="ja">文書を再生成する方式では、罫線・結合セル・定型文・用紙サイズが変わってしまうことがあります（画面の比較例は失敗を再現した模擬データです）。</span><span data-l="en">Methods that re-generate the document can alter borders, merged cells, boilerplate text and page setup (the comparison file is a simulated reproduction of those failures).</span></li>
         <li><b>③</b><span data-l="ja">Form-Guard は Word/Excel の対象 XML テキストノード置換・固定PDFの増分重ね書きを行い、21項目の決定論的検査（描画のずれ・セルのはみ出しを検出した場合は VIS-01 を追加）＋視覚 Diff＋原文ハイライト＋人間承認ゲートで指定欄以外の変更を検査します。Word / Excel 実機での表示・印刷と記入内容の最終確認は人が行います。固定PDFも同様です。</span><span data-l="en">Form-Guard replaces only target XML text nodes in Word/Excel (or writes an incremental overlay on fixed PDFs) and checks for any change outside the designated fields with 21 deterministic checks (plus VIS-01 if layout drift or overflow is detected), a visual diff, source highlighting and a human approval gate. Final display/print review in Word or Excel and fact sign-off stay with a person. Fixed PDFs follow the same review.</span></li>
       </ol>
+    </details>
+    <details id="beginnerBanner" class="why-banner beginner-banner">
+      <summary><span data-bi="🔰 はじめての方へ：AIに不慣れでも使える「3ステップ」かんたん説明書 ＆ 用語集|🔰 Beginner's Guide: 3 Easy Steps &amp; Plain-Language Glossary"></span></summary>
+      <div class="beginner-body">
+        <p class="hint" data-l="ja"><b>最初のお試し前のご確認：</b>画面右上の「エンジン」を <b>「オフライン（キー不要）」</b> にすると、外部サーバーへ一切送信せずパソコン内だけで安全に試せます（「自動 / Auto」は、パソコンにAPIキーが設定されている場合に外部AI［Anthropicのサーバー］へメモ等を送信します。実在の個人情報や機密情報は、お試しでも本番でも入れないでください）。</p>
+        <p class="hint" data-l="en"><b>Before trying for the first time:</b> Set "Engine" in the top right to <b>"Offline demo (no key)"</b> to run 100% locally without sending anything to external servers ("Auto" calls Live Claude on Anthropic's servers when an API key is configured on this machine. Never enter real personal or confidential data).</p>
+        <ol class="why-points">
+          <li><b>①</b><span data-l="ja"><b>えらぶ・入れる：</b>まずは左メニューの <b>「デモ1」〜「デモ6」</b> をクリック！自分の書類では、ファイルを選び、<b>「入力メモ」</b> に架空の会議メモ等を貼り付けてからボタンを押します（1ファイル15 MBまで）。Word（<code>.docx</code>）・Excel（<code>.xlsx</code>）は青い <b>「▶ 記入して検査」</b> を押します（マーカーなしWord/Excelも青い「▶」で欄を自動選択します。記入前に自分で欄を確かめたいときは白い <b>「🔍 マーカーなし白紙から空欄を自動発見」</b>）。固定 PDF（<code>.pdf</code>）は、白い <b>「🔍 マーカーなし白紙から空欄を自動発見」</b> →「④ 人の確定待ち」画面で書く欄（申請者欄）を確認して右下の青い <b>「✅ 検出した空欄を承認して外科的差込を実行」</b> を押します。</span><span data-l="en"><b>1. Pick or upload:</b> Click <b>Demo 1–6</b> on the left, or choose your own file (up to 15 MB), paste fictional notes into <b>"Source memo"</b>, and click a button. For Word (<code>.docx</code>) / Excel (<code>.xlsx</code>), click <b>"▶ Run pipeline"</b> (unmarked Word/Excel forms also auto-select cells with "▶"; use <b>"🔍 Discover blank cells"</b> if you want to confirm cells before filling). For fixed PDFs (<code>.pdf</code>), click <b>"🔍 Discover blank cells"</b>, verify the applicant cells in the discovery table, and click <b>"✅ Approve the detected cells &amp; run the surgical fill"</b>.</span></li>
+          <li><b>②</b><span data-l="ja"><b>見くらべる・直す：</b>中央のタブを左から順に見ます。<b>「見た目の比較」</b>（デモ1〜3左側の赤い✗は比較用に作った模擬的な失敗例、右側が今回のForm-Guardの記入結果です。合否・入力待ちは画面上部で確認してください）→<b>「記入値と根拠」</b>（行をクリックすると右下のメモの引用箇所が<b>黄色</b>に光ります。短縮時の削除文 <code>⚠ condensed — removed:</code> や元メモ全体も見くらべ、直すときは「値を保存」を押します。※保存するとチェックと承認は一度解除されます）→<b>「構造検査」</b>（上部が「✓ 合格 — 人の最終確認へ」か確認）。</span><span data-l="en"><b>2. Compare &amp; edit:</b> Check the tabs from left to right: <b>Visual diff</b> (on Demos 1–3, the left red ✗ pane shows a simulated failure example built for comparison; the right pane shows Form-Guard's result — check the overall status at the top) → <b>Fields &amp; sources</b> (click a row to highlight its yellow memo quote; compare any shortened text or <code>⚠ condensed — removed:</code> against the full memo, and click "Save edit" to edit — saving resets prior checkboxes/approval) → <b>Structural audit</b> (check for "✓ PASS").</span></li>
+          <li><b>③</b><span data-l="ja"><b>チェックして保存：</b><b>「人による最終確認」</b>タブを開きます。未入力欄があれば入力して <b>「反映して再検査」</b> → チェックリストを上から1行ずつ目で読んでチェック → <b>「確認者名」</b> を入れて <b>「承認する」</b> を押すと、緑色の <b>「⬇ 検査済み .docx/.xlsx/.pdf をダウンロード」</b> のロックが解除されます。保存後はお使いの Word / Excel / PDFビューアー実機で開いて最終確認してください。</span><span data-l="en"><b>3. Check &amp; download:</b> Open <b>Human approval</b>. If any field awaits input, fill it and click <b>"Apply &amp; re-verify"</b> → read and check every checklist item → enter your <b>Reviewer</b> name and click <b>"Approve"</b> to unlock <b>"⬇ Download verified .docx/.xlsx/.pdf"</b>. Always open the saved file in real Word / Excel / PDF viewer before submission.</span></li>
+        </ol>
+        <div class="beginner-glossary">
+          <span class="chip" data-l="ja"><b>外科的差込</b>＝元の様式は触らず空欄だけピンポイント記入</span>
+          <span class="chip" data-l="ja"><b>決定論的検査（21項目）</b>＝21項目の自動チェック（書式・根拠・記入ルール）</span>
+          <span class="chip" data-l="ja"><b>VIS-01</b>＝見た目のズレ・はみ出し確認</span>
+          <span class="chip" data-l="ja"><b>原文根拠</b>＝メモの引用もと（黄色マーカー）</span>
+          <span class="chip" data-l="ja"><b>抽出要約</b>＝言い換えなしの文字数カット（元メモ全体と要確認）</span>
+          <span class="chip" data-l="ja"><b>人の入力待ち</b>＝メモに記載がないためAIが推測せず人に聞く欄</span>
+          <span class="chip" data-l="ja"><b>SHA-256</b>＝ファイルの指紋（承認したファイルと同一か検知）</span>
+          <span class="chip" data-l="en"><b>Surgical write</b> = fills only target fields without touching the template</span>
+          <span class="chip" data-l="en"><b>21 deterministic checks</b> = automatic check of layout, quotes &amp; rules</span>
+          <span class="chip" data-l="en"><b>VIS-01</b> = visual drift &amp; cell-overflow check</span>
+          <span class="chip" data-l="en"><b>Grounding</b> = verbatim quote highlighted in yellow</span>
+          <span class="chip" data-l="en"><b>SHA-256</b> = file fingerprint (verifies the downloaded file matches what you approved)</span>
+        </div>
+      </div>
     </details>
     <nav id="tourBar" class="tour" aria-label="Judge quick walkthrough">
       <div class="tour-row">

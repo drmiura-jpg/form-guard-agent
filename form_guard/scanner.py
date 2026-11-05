@@ -141,9 +141,10 @@ def _spec_object(path: Path) -> dict:
 
 
 def load_spec(form_path: Path, spec: Union[dict, str, Path, None]) -> dict:
-    """The slot spec as a dict: given directly, read from a .json path, or the form's sidecar <form>.slots.json."""
+    """The slot spec as a dict: given directly (copied so in-memory adaptation never mutates the caller's dict),
+    read from a .json path, or the form's sidecar <form>.slots.json."""
     if isinstance(spec, dict):
-        return spec
+        return copy.deepcopy(spec)
     if spec:
         return _spec_object(Path(spec))
     side = form_path.with_suffix(".slots.json")
@@ -348,6 +349,25 @@ _UNSAFE_PARAGRAPH_TOKENS = (b"fldSimple", b"fldChar", b"instrText", b":sdt", b"h
                             b":object")
 
 
+def docx_target_paragraph(tgt: dict) -> Optional[int]:
+    """Paragraph index of a .docx body-paragraph coordinate target as a non-negative integer, or None."""
+    if "table" in tgt or "row" in tgt or "col" in tgt or "cell" in tgt:
+        return None
+    v = tgt.get("paragraph")
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v if v >= 0 else None
+    if isinstance(v, str):
+        s = v.strip()
+        if s.isdecimal() and s.isascii() and len(s) <= 9:
+            try:
+                return int(s)
+            except ValueError:
+                return None
+    return None
+
+
 def docx_target_coords(tgt: dict) -> Optional[tuple[int, int, int]]:
     """(table, row, col) of a .docx coordinate target as non-negative integers, or None.
 
@@ -361,8 +381,15 @@ def docx_target_coords(tgt: dict) -> Optional[tuple[int, int, int]]:
             return None
         if isinstance(v, int):
             n = v
-        elif isinstance(v, str) and v.strip().isdigit():
-            n = int(v.strip())
+        elif isinstance(v, str):
+            s = v.strip()
+            if s.isdecimal() and s.isascii() and len(s) <= 9:
+                try:
+                    n = int(s)
+                except ValueError:
+                    return None
+            else:
+                return None
         else:
             return None
         if n < 0:
@@ -379,6 +406,37 @@ def _add_coordinate_target(idx: Optional[PartIndex], tgt: dict, accs: dict, warn
         return
     if idx is None or not slot_id:
         warnings.append(f"coordinate target {tgt!r}: part not found")
+        return
+    p_idx = docx_target_paragraph(tgt)
+    if p_idx is not None:
+        c = next((x for x in idx.containers if x.para_index == p_idx), None)
+        if c is None:
+            warnings.append(f"coordinate target {slot_id!r}: paragraph {p_idx} not found")
+            return
+        text = idx.container_text(c)
+        span = era_date_template(text) if text else None
+        if text and span is None:
+            warnings.append(f"coordinate target {slot_id!r}: paragraph is not empty — refusing to overwrite printed text")
+            return
+        if any(tok in idx.data[c.span[0] : c.span[1]] for tok in _UNSAFE_PARAGRAPH_TOKENS):
+            warnings.append(f"coordinate target {slot_id!r}: the paragraph holds a field, content control or object — "
+                            f"refusing to write into it")
+            return
+        acc = accs.setdefault(slot_id, _Acc(slot_id))
+        if span is not None:
+            occ = _docx_occurrence(idx, c, "document", text[span[0] : span[1]], "date_template", text)
+            occ.location_path += " (printed era-date template designated by coordinates)"
+        else:
+            occ = _docx_occurrence(idx, c, "document", "", "empty_cell", "")
+            occ.location_path += " (empty paragraph designated by coordinates)"
+        acc.occurrences.append(occ)
+        prev_c = idx.containers[c.idx - 1] if c.idx > 0 else None
+        prev_txt = idx.container_text(prev_c).strip() if prev_c is not None else ""
+        if prev_txt:
+            acc.labels.append(prev_txt)
+        if tgt.get("label"):
+            acc.labels.append(str(tgt["label"]))
+        acc.context_label = acc.context_label or prev_txt or str(tgt.get("label") or slot_id)
         return
     coords = docx_target_coords(tgt)
     try:
@@ -940,10 +998,53 @@ def _package_title(path: Path) -> str:
     return path.stem
 
 
+def _docx_para_context_texts(idx: PartIndex, p_idx: int) -> list[str]:
+    """Printed text around a Word body/1-column paragraph: the paragraph itself, preceding paragraphs, and any 1-col cell header."""
+    pos = next((i for i, x in enumerate(idx.containers) if x.para_index == p_idx), None)
+    if pos is None:
+        return ["受付"]  # unknown paragraph index: never let it pass as an applicant field
+    c = idx.containers[pos]
+    texts: list[str] = []
+    own = idx.container_text(c).strip()
+    if own:
+        texts.append(own)
+    for j in range(pos - 1, max(-1, pos - 6), -1):
+        prev = idx.containers[j]
+        if prev.cell is not c.cell:
+            break
+        pt = idx.container_text(prev).strip()
+        if pt:
+            texts.append(pt)
+    if c.cell is not None and c.cell.table_idx < len(idx.tables):
+        t = idx.tables[c.cell.table_idx]
+        for r in range(c.cell.row_idx - 1, -1, -1):
+            if t.rows[r]:
+                bt = _cell_text(idx, t.rows[r][0]).strip()
+                if bt:
+                    texts.append(bt)
+                    break
+    return texts
+
+
 def _docx_blank_candidates(path: Path) -> tuple[list[_Cand], str]:
+    from lxml import etree
+
     with zipfile.ZipFile(path) as zf:
-        idx = index_part("word/document.xml", zf.read("word/document.xml"), "word")
+        raw_doc = zf.read("word/document.xml")
+    idx = index_part("word/document.xml", raw_doc, "word")
     doc_text = "\n".join(idx.container_text(c) for c in idx.containers)
+    W_NS_ATTR = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}w"
+    W_TBL = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}tbl"
+    W_GRIDCOL = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}tblGrid/{http://schemas.openxmlformats.org/wordprocessingml/2006/main}gridCol"
+    tbl_grids: list[list[float]] = []
+    try:
+        root_el = etree.fromstring(raw_doc)
+        for tbl_el in root_el.iter(W_TBL):
+            tbl_grids.append([int(g.get(W_NS_ATTR, "0") or 0) * (96.0 / 1440.0) for g in tbl_el.findall(W_GRIDCOL)])
+        if len(tbl_grids) != len(idx.tables):
+            tbl_grids = []
+    except Exception:
+        tbl_grids = []
 
     def text_of(t: TableInfo, cell: CellInfo) -> str:
         return _cell_text(idx, _resolve_vmerge(t, cell))
@@ -1022,11 +1123,80 @@ def _docx_blank_candidates(path: Path) -> tuple[list[_Cand], str]:
                     if any(tok in idx.data[c0.span[0] : c0.span[1]] for tok in _UNSAFE_PARAGRAPH_TOKENS):
                         rejected = "the cell holds a field, content control or object — never a fill target"
                 span = f"+{cell.grid_span}" if cell.grid_span > 1 else ""
+                cell_maxlen: Optional[int] = None
+                if (t.table_idx < len(tbl_grids) and template_ci is None and not options
+                        and cell.vmerge is None and len(cell.containers) == 1):
+                    gcols = tbl_grids[t.table_idx]
+                    cell_px = sum(gcols[cell.col_idx : cell.col_idx + cell.grid_span])
+                    if 0 < cell_px < 72.0:
+                        cell_maxlen = max(1, int((cell_px - 14.0) // 14.0))
                 cands.append(_Cand(
                     "docx", (0, t.table_idx, ri, cell.col_idx), label_text, base, hints, group, section_of(t, ri),
                     direction, f"word/document.xml › tbl[{t.table_idx}] › tr[{ri}] › tc[grid {cell.col_idx}{span}]",
                     {"part": "word/document.xml", "table": t.table_idx, "row": ri, "col": cell.col_idx}, rejected,
+                    maxlen=cell_maxlen,
                     template=_cell_text(idx, cell) if template_ci is not None else "", options=options))
+    has_applicant_table_cand = any(
+        not c.rejected and not _office_hits(c.label_text, c.section, c.group, *c.hints) for c in cands
+    )
+    table_cand_cells = {(c.coords.get("table"), c.coords.get("row"), c.coords.get("col")) for c in cands if "table" in c.coords}
+    _PROSE_FORM_RE = re.compile(r"登記申請書|取\s*下\s*書|登記の目的")
+    if not has_applicant_table_cand or _PROSE_FORM_RE.search(doc_text[:800]):
+        _STOP_PROSE_RE = re.compile(r"収入印紙貼付台紙|解説及び注意事項等＞|^\s*（注[１1]）|^\s*別\s*紙\b")
+        _SKIP_PROSE_LABEL_RE = re.compile(
+            r"申請書$|取\s*下\s*書$|登記所届出印|参照[。）)]|１通$|出張所|御中$|契印|^\s*記\s*$|希望しません|添付書類|代理権限証明情報|シールを貼る|記載例|取り下げます|書類補正のため"
+        )
+        for ci, c in enumerate(idx.containers):
+            if c.cell is not None:
+                if _grid_width(idx.tables[c.cell.table_idx]) > 1:
+                    continue
+                if (c.cell.table_idx, c.cell.row_idx, c.cell.col_idx) in table_cand_cells:
+                    continue
+            txt = idx.container_text(c)
+            if _STOP_PROSE_RE.search(txt):
+                break
+            ctx_texts = _docx_para_context_texts(idx, c.para_index)
+            sec_txt = ctx_texts[-1] if len(ctx_texts) > 1 else ""
+            grp_txt = ctx_texts[1] if len(ctx_texts) > 2 else ""
+            if era_date_template(txt):
+                rejected = ""
+                if any(tok in idx.data[c.span[0] : c.span[1]] for tok in _UNSAFE_PARAGRAPH_TOKENS):
+                    rejected = "the paragraph holds a field, content control or object — never a fill target"
+                date_lbl = "日付"
+                if "受付" in txt or any("受付" in x for x in ctx_texts[:2]):
+                    date_lbl = "受付日"
+                elif "原因" in txt or any("原因" in x for x in ctx_texts[:2]):
+                    date_lbl = "原因日付"
+                elif ci > 0 and idx.container_text(idx.containers[ci - 1]).strip():
+                    prev_t = re.sub(r"（注[０-９0-9]+）", "", idx.container_text(idx.containers[ci - 1]).strip())
+                    prev_t = re.split(r"　{2,}", prev_t)[0].strip()
+                    if prev_t and len(prev_t) <= 12 and not _is_sentence(prev_t):
+                        date_lbl = prev_t
+                cands.append(_Cand(
+                    "docx", (0, -1, c.para_index, 0), date_lbl, date_lbl, ctx_texts[1:3], grp_txt, sec_txt, "above",
+                    f"word/document.xml › p[{c.para_index}]",
+                    {"part": "word/document.xml", "paragraph": c.para_index}, rejected, template=txt))
+            elif txt == "" and len(c.runs) == 0 and ci > 0:
+                prev_c = idx.containers[ci - 1]
+                if prev_c.cell is not c.cell:
+                    continue
+                prev_raw = idx.container_text(prev_c).strip()
+                if not prev_raw or _is_sentence(prev_raw) or era_date_template(prev_raw) or _SKIP_PROSE_LABEL_RE.search(prev_raw):
+                    continue
+                clean_lbl = re.sub(r"（注[０-９0-9]+）", "", prev_raw).strip()
+                clean_lbl = re.split(r"　{2,}", clean_lbl)[0].strip()
+                if not clean_lbl or _SKIP_PROSE_LABEL_RE.search(clean_lbl):
+                    continue
+                base, hints = _label_parts(clean_lbl)
+                if not base:
+                    continue
+                rejected = ""
+                if any(tok in idx.data[c.span[0] : c.span[1]] for tok in _UNSAFE_PARAGRAPH_TOKENS):
+                    rejected = "the paragraph holds a field, content control or object — never a fill target"
+                cands.append(_Cand(
+                    "docx", (0, -1, c.para_index, 0), clean_lbl, base, list(hints) + ctx_texts[1:3], grp_txt, sec_txt, "above",
+                    f"word/document.xml › p[{c.para_index}]",
+                    {"part": "word/document.xml", "paragraph": c.para_index}, rejected, maxlen=None))
     return cands, doc_text
 
 
@@ -1112,6 +1282,60 @@ def _xlsx_blank_candidates(path: Path) -> tuple[list[_Cand], str]:
                     return val
             return None
 
+        def _col_px(col_idx: int) -> float:
+            w = ws.column_dimensions[get_column_letter(col_idx)].width
+            return round((w if w else 8.43) * 7 + 5)
+
+        def _row_px(row_idx: int) -> float:
+            h = ws.row_dimensions[row_idx].height
+            return round((h if h else 15.0) * (96.0 / 72.0))
+
+        def _has_side(rr: int, cc: int, side: str) -> bool:
+            cell_obj = ws._cells.get((rr, cc))
+            if cell_obj is None or cell_obj.border is None:
+                return False
+            s = getattr(cell_obj.border, side, None)
+            return bool(s is not None and getattr(s, "style", None))
+
+        def has_h_border(b: tuple[int, int, int, int]) -> bool:
+            r0, c0, r1, c1 = b
+            for cc in range(c0, c1 + 1):
+                if _has_side(r0, cc, "top") or _has_side(r1, cc, "bottom"):
+                    return True
+                if r0 > 1 and _has_side(r0 - 1, cc, "bottom"):
+                    return True
+                if _has_side(r1 + 1, cc, "top"):
+                    return True
+            return False
+
+        def has_full_box_border(b: tuple[int, int, int, int]) -> bool:
+            r0, c0, r1, c1 = b
+            top = any(_has_side(r0, cc, "top") or (r0 > 1 and _has_side(r0 - 1, cc, "bottom")) for cc in range(c0, c1 + 1))
+            bottom = any(_has_side(r1, cc, "bottom") or _has_side(r1 + 1, cc, "top") for cc in range(c0, c1 + 1))
+            left = any(_has_side(rr, c0, "left") or (c0 > 1 and _has_side(rr, c0 - 1, "right")) for rr in range(r0, r1 + 1))
+            right = any(_has_side(rr, c1, "right") or _has_side(rr, c1 + 1, "left") for rr in range(r0, r1 + 1))
+            return top and bottom and left and right
+
+        bordered_blank_count = 0
+        seen_boxes_check: set[tuple[int, int, int, int]] = set()
+        for cell_obj in ws._cells.values():
+            if cell_obj.row <= max_row and cell_obj.column <= max_col and cell_obj.value is None:
+                bb = box(cell_obj.row, cell_obj.column)
+                if bb not in seen_boxes_check:
+                    seen_boxes_check.add(bb)
+                    if has_h_border(bb):
+                        bordered_blank_count += 1
+        sheet_has_borders = bordered_blank_count >= 3
+        has_custom_col_widths = any(
+            ws.column_dimensions[get_column_letter(cc)].width is not None for cc in range(1, min(max_col, 30) + 1)
+        )
+        _HEADER_TITLE_RE = re.compile(
+            r"計画書|申込書|概要書|調書|申告書|確認書|誓約書|別紙|別添|様式|制定|御中|[ 　]行$|単位[:：]|留意事項|状況|作成[〕）)]?$|^[（(【〔].*[）)】〕]$"
+        )
+        _DOC_TITLE_EXACT_RE = re.compile(
+            r"^(?:借入申込書|事業計画書|創業計画書|企業概要書|設備投資計画書|月別収支計画書|信用保証委託申込書|経営行動計画書|創業計画添付書|計画書別添|収支等の状況)$"
+        )
+
         seen: set[tuple[int, int]] = set()
 
         def consider(r: int, c: int, label_rc: tuple[int, int], direction: str) -> None:
@@ -1122,8 +1346,27 @@ def _xlsx_blank_candidates(path: Path) -> tuple[list[_Cand], str]:
             rich_era = not template and not options and bool(lit) and bool(era_date_template(lit))
             if (r, c) in seen or (lit and not eraless and not rich_era and (not options or any(o["checked"] for o in options))):
                 return
-            seen.add((r, c))
             b = box(r, c)
+            orig = origin_cell(r, c)
+            f_sz = float(orig.font.sz) if orig is not None and orig.font is not None and orig.font.sz else 11.0
+            em = f_sz * (96.0 / 72.0)
+            box_w = sum(_col_px(cc) for cc in range(b[1], b[3] + 1))
+            box_h = sum(_row_px(rr) for rr in range(b[0], b[2] + 1))
+            has_dv = bool(rule_for("list", r, c) or rule_for("len", r, c))
+            if (b[0], b[1]) == (r, c) and not template and not options and not eraless and not rich_era and not has_dv:
+                if box_w < em + 4.0 or box_h < em * 0.9:
+                    return
+                if sheet_has_borders:
+                    lbl_Preview = str(origin_cell(*label_rc).value or "").strip()
+                    lbl_nospace = re.sub(r"\s+", "", lbl_Preview)
+                    if _DOC_TITLE_EXACT_RE.search(lbl_nospace) and not has_full_box_border(b):
+                        return
+                    if not has_h_border(b):
+                        if b == (r, c, r, c) or direction == "above" or _HEADER_TITLE_RE.search(lbl_Preview):
+                            return
+                    elif direction == "above" and b[1] == b[3] and b[3] + 1 <= max_col and is_label(b[0], b[3] + 1):
+                        return
+            seen.add((r, c))
             ref = f"{get_column_letter(c)}{r}"
             label_text = str(origin_cell(*label_rc).value)
             base, hints = _label_parts(label_text)
@@ -1151,10 +1394,22 @@ def _xlsx_blank_candidates(path: Path) -> tuple[list[_Cand], str]:
                 el = sheet_idx.cells.get(ref)
                 if el is not None and el.children and not template:
                     rejected = "the cell already holds content"
+            cand_maxlen = rule_for("len", r, c)
+            is_wrap = bool(orig is not None and orig.alignment and orig.alignment.wrap_text)
+            if (not template and not options and not has_dv
+                    and (box_w < 58.0 or (has_custom_col_widths and sheet_has_borders and box_w < 96.0))):
+                inner_w = (box_w - 6.0) * 0.96 if is_wrap else (box_w - 4.0)
+                line_cap = max(1, int(inner_w // em))
+                max_lines = max(1, int((box_h - 2.0) // (em * 1.2))) if is_wrap else 1
+                phys_cap = line_cap * max_lines
+                right_lit = literal(b[0], b[3] + 1) if b[3] + 1 <= max_col else ""
+                if re.search(r"^(?:[兆億万千百十]*円|％|%|年|月|日|歳|人|名|か?月|回|件|台|戸|店|社)", right_lit):
+                    hints = list(hints) + [f"単位別置:{right_lit}"]
+                cand_maxlen = min(cand_maxlen, phys_cap) if cand_maxlen else phys_cap
             cands.append(_Cand(
                 "xlsx", (sidx, 0, r, c), label_text, base, hints, group, section_of(r), direction,
                 f"{part} › sheet '{sname}' › {ref}", {"sheet": sidx, "sheet_name": sname, "cell": ref}, rejected,
-                merged_range=rng, allowed=rule_for("list", r, c), maxlen=rule_for("len", r, c), template=template,
+                merged_range=rng, allowed=rule_for("list", r, c), maxlen=cand_maxlen, template=template,
                 options=options))
 
         cells = sorted(ws._cells.values(), key=lambda x: (x.row, x.column))
@@ -1212,19 +1467,22 @@ def _assign_slot_ids(cands: list[_Cand]) -> list[str]:
 
 def discover_blank_cells(path: Union[str, Path], mode: str = "demo", client: Any = None,
                          model_tier: Optional[str] = "auto",
-                         expected_sha256: Optional[str] = None) -> dict[str, Any]:
+                         expected_sha256: Optional[str] = None,
+                         model: Optional[str] = None) -> dict[str, Any]:
     """Propose fillable empty cells of an *unmarked* blank form (no {{markers}}, no .slots.json).
 
     Returns a discovery report for the human pre-fill confirmation gate; nothing is written.
     ``mode`` = demo (deterministic rules) | live (Claude classifies the labels too) | auto.
     ``model_tier`` = auto (Haiku) | opus | sonnet | haiku; None = ``FORM_GUARD_MODEL_TIER`` or auto.
+    ``model`` = optional Claude model ID to pin for stage-2 classification.
     """
     path = Path(path)
     file_type = detect_file_type(path)
     if file_type == "pdf":  # fixed PDF: boxes rebuilt from the ruled lines (pdf_support), same report format
         from .pdf_support import discover_pdf
 
-        return discover_pdf(path, mode=mode, client=client, model_tier=model_tier, expected_sha256=expected_sha256)
+        return discover_pdf(path, mode=mode, client=client, model_tier=model_tier, expected_sha256=expected_sha256,
+                            model=model)
     from .constraints import checkbox_constraints
 
     form_sha = sha256_file(path)
@@ -1270,7 +1528,7 @@ def discover_blank_cells(path: Union[str, Path], mode: str = "demo", client: Any
             cand["kind"] = "checkbox_text"
             cand["options"] = [{k: o[k] for k in ("label", "detail", "needs_input")} for o in c.options]
         candidates.append(cand)
-    engine = _classify_with_claude(candidates, _package_title(path), mode, client, model_tier)
+    engine = _classify_with_claude(candidates, _package_title(path), mode, client, model_tier, model=model)
     # a live classification that failed after the API answered: its calls and tokens stay on record
     live_usage = engine.pop("live_usage", None)
     rejected = [{"location": c.location, "evidence_label": c.label_text, "reason": c.rejected, **c.coords,
@@ -1307,7 +1565,7 @@ UNCLASSIFIED_REASON = "not classified by the model (missing or duplicated in its
 
 
 def _classify_with_claude(candidates: list[dict[str, Any]], title: str, mode: str, client: Any,
-                          model_tier: Optional[str]) -> dict[str, Any]:
+                          model_tier: Optional[str], model: Optional[str] = None) -> dict[str, Any]:
     """Stage 2 in live mode: Claude classifies each printed label. The rules always win towards safety —
     Claude can mark a cell office-only or not-a-field, never turn an office cell into an applicant field.
 
@@ -1322,7 +1580,7 @@ def _classify_with_claude(candidates: list[dict[str, Any]], title: str, mode: st
     resolved = resolve_mode(requested) if client is None else "live"
     if resolved != "live":
         return rules
-    engine = ClaudeEngine(client=client, model_tier=model_tier)
+    engine = ClaudeEngine(model=model, client=client, model_tier=model_tier)
     brief = [{"candidate_id": c["candidate_id"], "printed_label": c["evidence_label"], "group_label": c["group_label"],
               "section": c["section"], "label_position": c["label_direction"]} for c in candidates]
     try:
@@ -1373,6 +1631,8 @@ def _cand_key(c: dict[str, Any]) -> Optional[tuple]:
     """Canonical coordinates of a discovery candidate: (part, table, row, grid col) / (sheet index, sheet name, cell)."""
     try:
         if c.get("file_type") == "docx":
+            if "paragraph" in c and "table" not in c:
+                return ("docx_para", str(c.get("part") or "word/document.xml"), int(c["paragraph"]))
             return ("docx", str(c.get("part") or "word/document.xml"), int(c["table"]), int(c["row"]), int(c["col"]))
         if c.get("file_type") == "xlsx":
             return ("xlsx", int(c["sheet"]), str(c.get("sheet_name") or ""),
@@ -1442,8 +1702,12 @@ def build_confirmed_slot_spec(discovery: dict[str, Any], confirmed_ids: list[str
     for fid in sorted(chosen, key=lambda i: order[i]):
         c = chosen[fid]  # canonical coordinates, slot id and printed rules from the fresh discovery
         if c["file_type"] == "docx":
-            targets.append({"slot_id": c["slot_id"], "part": c.get("part", "word/document.xml"), "table": c["table"],
-                            "row": c["row"], "col": c["col"], "label": c["label"]})
+            if "paragraph" in c and "table" not in c:
+                targets.append({"slot_id": c["slot_id"], "part": c.get("part", "word/document.xml"),
+                                "paragraph": c["paragraph"], "label": c["label"]})
+            else:
+                targets.append({"slot_id": c["slot_id"], "part": c.get("part", "word/document.xml"), "table": c["table"],
+                                "row": c["row"], "col": c["col"], "label": c["label"]})
         elif c["file_type"] == "pdf":
             targets.append({"slot_id": c["slot_id"], "page": c["page"], "rect": list(c["rect"]), "label": c["label"]})
         else:
@@ -1563,6 +1827,14 @@ def office_only_targets(form_path: Union[str, Path], spec: Union[dict, str, Path
                      {str(t.get("part") or "word/document.xml") for t in targets} if p in names}
         for tgt in targets:
             idx = parts.get(str(tgt.get("part") or "word/document.xml"))
+            p_idx = docx_target_paragraph(tgt)
+            if idx is not None and p_idx is not None:
+                c = known.get(("docx_para", idx.part_name, p_idx))
+                texts = ([c.label_text, c.section, c.group, *c.hints] if c else []) + _docx_para_context_texts(idx, p_idx)
+                hits = _office_hits(*texts)
+                if hits:
+                    out.append(f"{tgt.get('slot_id')} → paragraph {p_idx} ({', '.join(hits)})")
+                continue
             coords = docx_target_coords(tgt)
             if idx is None or coords is None:
                 continue  # scan() reports a cell it cannot find (or a negative coordinate) and never fills it

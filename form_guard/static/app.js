@@ -301,6 +301,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   $$("#cmpLayout button").forEach((b) => b.addEventListener("click", () => { S.layout = b.dataset.v; renderVisual(); }));
   $$(".tour-step").forEach((b) => b.addEventListener("click", () => startTour(Number(b.dataset.tour))));
   $("#tourStart").addEventListener("click", () => startTour(1));
+  if ($("#beginnerBtn")) {
+    $("#beginnerBtn").addEventListener("click", () => {
+      const b = $("#beginnerBanner");
+      if (b) { b.open = !b.open; if (b.open) b.scrollIntoView({ behavior: "smooth", block: "nearest" }); }
+    });
+  }
   $("#suiteBtn").addEventListener("click", openSuite);
   $("#suiteBtn2").addEventListener("click", openSuite);
   $("#backToDisc").addEventListener("click", () => { showView("discovery"); renderDiscovery(); });
@@ -590,6 +596,8 @@ async function onUpload(ev) {
   fd.append("model_tier", tier());
   const spec = $("#specInput").files[0];
   if (spec) fd.append("slot_spec", spec);
+  const autoAdapt = $("#autoAdaptInput");
+  if (autoAdapt && autoAdapt.checked && !/\.pdf$/i.test(f.name)) fd.append("auto_adapt", "true");
   S.activeDemo = null;
   renderDemos();
   busy(true, L("アップロードして実行中…", "Uploading and running the pipeline…"));

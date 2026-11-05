@@ -615,11 +615,42 @@ def xlsx_structure(path_or_bytes) -> dict[str, Any]:
         # sparse: only the cells present in the file (iter_rows() would walk the whole used rectangle)
         for c in sorted(ws._cells.values(), key=lambda c: (c.row, c.column)):
             if c.data_type == "f":
-                formulas[c.coordinate] = str(c.value)
+                if hasattr(c.value, "text") or hasattr(c.value, "ref") or hasattr(c.value, "__dict__"):
+                    attrs = tuple(sorted((k, getattr(c.value, k)) for k in vars(c.value) if not k.startswith("_")))
+                    formulas[c.coordinate] = (type(c.value).__name__, getattr(c.value, "text", None),
+                                              getattr(c.value, "ref", None), getattr(c.value, "t", None), attrs)
+                else:
+                    formulas[c.coordinate] = str(c.value)
             b = c.border
             sides = tuple(getattr(getattr(b, s), "style", None) for s in ("left", "right", "top", "bottom"))
             borders += sum(1 for s in sides if s)
-            fill = c.fill.fgColor.rgb if c.fill and c.fill.fill_type else None
+            if c.fill and c.fill.fill_type:
+                if hasattr(c.fill, "fgColor") and c.fill.fgColor is not None:
+                    fc = c.fill.fgColor
+                    fill = (c.fill.fill_type, getattr(fc, "type", None), getattr(fc, "rgb", None),
+                            getattr(fc, "indexed", None), getattr(fc, "theme", None), getattr(fc, "tint", None))
+                else:
+                    fill = (
+                        c.fill.fill_type,
+                        getattr(c.fill, "degree", None),
+                        getattr(c.fill, "left", None),
+                        getattr(c.fill, "right", None),
+                        getattr(c.fill, "top", None),
+                        getattr(c.fill, "bottom", None),
+                        tuple(
+                            (
+                                getattr(s, "position", None),
+                                getattr(getattr(s, "color", None), "type", None),
+                                getattr(getattr(s, "color", None), "rgb", None),
+                                getattr(getattr(s, "color", None), "indexed", None),
+                                getattr(getattr(s, "color", None), "theme", None),
+                                getattr(getattr(s, "color", None), "tint", None),
+                            )
+                            for s in getattr(c.fill, "stop", ())
+                        ),
+                    )
+            else:
+                fill = None
             styles[c.coordinate] = (c.number_format, c.font.b, c.font.sz, c.font.name, fill, sides,
                                     c.alignment.horizontal, c.alignment.vertical, c.alignment.wrap_text)
         dvs = sorted((str(dv.sqref), dv.type, dv.formula1) for dv in ws.data_validations.dataValidation)
@@ -1105,7 +1136,7 @@ def _text_checks(scan, filled_parts, values, pending, designated, checks, stats,
             if co.idx in dset:
                 n_slot += 1
                 sid = slot_by_container.get(co.idx)
-                exp = prepared.get(sid, "") if sid else ""
+                exp = to if sid not in prepared else (to + prepared[sid] if to and not to.strip() else prepared[sid])
                 if tf != exp:
                     slot_ok = False
                     slot_bad.append(f"{sid}: expected «{exp}» got «{tf}»")

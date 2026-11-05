@@ -173,6 +173,9 @@ TOOLS: list[dict[str, Any]] = [
                                         "to the Claude API); auto = Claude if ANTHROPIC_API_KEY is set, else offline — "
                                         "live / auto are an explicit opt-in"},
                 "model_tier": {**_TIER, "default": "auto"},
+                "auto_adapt": {"type": "boolean", "default": False,
+                               "description": "automatically discover blank cells on unmarked forms (bound to blank form "
+                                              "SHA-256) and self-heal VIS-01 layout overflows by tightening max_chars"},
             },
             "required": ["form_path"],
             "additionalProperties": False,
@@ -487,11 +490,13 @@ class FormGuardMCP:
                 raise ToolError(f"refused before filling: {exc}") from exc
             selection = (f"discovery cells {', '.join(spec['confirmed_candidates'])} passed by the MCP client — the "
                          f"human reviewer checks them at sign-off")
+        auto_adapt = bool(args.get("auto_adapt", False))
         run_id = new_run_id()
         out_dir = self._run_dir(run_id)
         try:
             r = run_pipeline(form, memo, out_dir, mode=str(args.get("mode") or "demo"), client=self.client,
-                             slot_spec=spec, run_id=run_id, model_tier=args.get("model_tier") or None)
+                             slot_spec=spec, run_id=run_id, model_tier=args.get("model_tier") or None,
+                             auto_adapt=auto_adapt)
         except ValueError as exc:  # a changed blank form, an office-only target, … — refused before anything is written
             raise ToolError(f"refused before filling: {exc}") from exc
         if r.filled_path.resolve() == form.resolve():  # pragma: no cover - run_pipeline always writes a copy
@@ -502,6 +507,12 @@ class FormGuardMCP:
             sp = out_dir / "confirmed.slots.json"
             sp.write_text(json.dumps(spec, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
             spec_path = self._rel(sp)
+        elif auto_adapt and getattr(r, "adapt_history", None) and not spec_path:
+            asp = out_dir / f"{form.stem}.adapted.slots.json"
+            if asp.is_file():
+                spec_path = self._rel(asp)
+            if any(a.get("action") == "auto_discover_unmarked" for a in r.adapt_history):
+                selection = "auto-adapt blank-cell discovery — the human reviewer checks the cells at sign-off"
         review_url = REVIEW_URL.format(run_id=run_id)
         note = ("Draft written through MCP. It is not approved: a named human reviewer must confirm every HITL "
                 f"checklist item before the file is used — start the web app (python -m form_guard.cli --serve) and "

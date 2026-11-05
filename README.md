@@ -1,9 +1,9 @@
 # Form-Guard Agent
 
-**Fill only the designated fields of a Word / Excel / fixed PDF form, prove that nothing else changed, and keep a human in the loop.**
+**Fill only the designated fields of a Word / Excel / fixed PDF form, check for changes outside the designated fields, and keep a human in the loop.**
 **指定欄だけを記入し、様式の変更を検査する書類記入エージェント**
 
-Built for **Built with Claude: Japan 2026** (development started Monday, 2026-11-02 / 2026-11-02（月）). [日本語版はこちら ↓](#日本語) · [How Claude & Claude Code are used ↓](#claude-usage) · [3分デモ動画の台本 / Demo video script (JA)](docs/DEMO_VIDEO_SCRIPT_JA.md)
+Built for **Built with Claude: Japan 2026** (development started Monday, 2026-11-02 / 2026-11-02（月）). [日本語版はこちら ↓](#日本語) · [🔰 初心者向け・超かんたん説明書 (JA)](docs/BEGINNER_GUIDE_JA.md)（[単体HTML・印刷用（ダウンロードしてブラウザで開く）](docs/BEGINNER_GUIDE_JA.html)） · [How Claude & Claude Code are used ↓](#claude-usage) · [3分デモ動画の台本 / Demo video script (JA)](docs/DEMO_VIDEO_SCRIPT_JA.md)
 
 ![Visual diff: naive regeneration vs Form-Guard](docs/screenshots/01_visual_diff.png)
 
@@ -25,7 +25,7 @@ Built for **Built with Claude: Japan 2026** (development started Monday, 2026-11
 **Concrete pain in Japan's workplaces.**
 - University and research-institute administration (共同研究の計画変更届, 研究設備の利用申請), municipal subsidy and disaster-stockpile counters (補助金の交付申請, 備蓄品の貸出申請) and facility safety inspections (月次点検報告) all run on official `.docx` / `.xlsx` templates with strict cell grids, merged cells, `vMerge`, formulas, drop-down lists and printed legal boilerplate.
 - One broken border, one paraphrased clause or one number the notes never stated can lead to administrative rejection (差し戻し) and another round trip — requiring internal approvals or seals to be re-obtained and the document to be re-submitted.
-- The people who fill these forms every month — research administrators, municipal applicants and back-office staff, mostly not engineers — cannot safely use chat AI for it: asked to "fill in this form", it typically **re-creates the document**, and a re-created document can split merged cells, lose borders, paraphrase legal text, change the page setup and add numbers that are in nobody's notes — and nobody can tell what changed.
+- The people who fill these forms every month — research administrators, municipal applicants and back-office staff, mostly not engineers — face a structural barrier when using document-regenerating approaches, and a re-created document can split merged cells, lose borders, paraphrase legal text, change the page setup or add numbers that are in nobody's notes, making it costly to verify what changed. (The bundled comparison files are scripted examples of these failure modes; they do not measure failure rates across chat AI products.)
 
 - **Theme 1 — depth only someone from the domain sees:** the dangerous failure is not "the AI wrote a wrong
   sentence" but "the AI silently changed the form". Form-Guard checks the form itself (ZIP, XML skeleton, borders,
@@ -72,19 +72,22 @@ left-hand columns are counted from the files, **not** a timed study of a person)
         |            Excel cells), read the rules printed on the form (200字以内, 和暦, 13桁, 上限1,000,000円,
         |            drop-down lists, deadlines between two dates such as 「変更予定日の30日前までに提出」); an
         |            UNMARKED blank form gets a 4-stage blank-cell discovery instead (applicant vs office-only
-        |            cells) and a human confirms the cells to fill
+        |            cells) — with auto-adaptation enabled (default in the web UI / `--auto-adapt`), applicant
+        |            cells are automatically selected and filled into an unapproved draft; to inspect and confirm
+        |            candidate cells before filling, use the manual discovery flow (`--discover-blanks` / 🔍);
+        |            final human sign-off is required in both flows
  2 Map & self-correct  Claude (live, Haiku / Sonnet / Opus routed per field) or a deterministic offline engine
         |            proposes a value + VERBATIM memo quotes; an independent validator checks quotes, numbers,
         |            dates (real calendar date, era, weekday), names, IDs, options and printed rules; failures are
         |            repaired (和暦 with weekday, 483万6千円 → 4,836,000円, half-width IDs, deletion-only
-        |            condensation that never silently drops a condition, interim measure, decision or weekday) or
+        |            condensation with detected deletions flagged for review) or
         |            sent back to Claude (Opus) with the validator's findings
  3 Surgical write .... replace ONLY the marker characters inside the XML bytes; every other ZIP entry is copied
         |            as raw compressed bytes (not even re-compressed)
  4 Verify ............ 21 deterministic checks (plus VIS-01 if layout drift or overflow is detected): ZIP/SHA-256,
         |            XML skeleton, tables/borders/merges, boilerplate text, grounding, constraints, application load
- 5 Human sign-off .... checklist with the source quote for every value (and the full text of anything condensed
-                     away); any field can be corrected; the download unlocks only after a named reviewer confirms
+ 5 Human sign-off .... checklist with the source quote for every value (and deletions recorded by app-side length
+                     repair); any field can be corrected; the download unlocks only after a named reviewer confirms
                      every item (enforced by the server, bound to the revision on screen and the file's SHA-256)
 ```
 
@@ -114,8 +117,8 @@ whole pipeline is reproducible with zero setup.
 The web UI is Japanese first (`日本語 / EN` toggle in the top bar):
 - The **🎬 審査員向け 90秒ガイドツアー / Judge Quick Walkthrough** bar jumps straight to the five proof points: ① visual diff against a naive regeneration, ② blank-cell discovery on an unmarked form, ③ verbatim grounding and no guessing (`483万6千円 → 4,836,000円`, the printed cap, the missing `法人番号`), ④ Claude usage — per-field model routing and the Claude Code suite, ⑤ the 21-check audit and the human approval lock. A **なぜ Form-Guard か？（解決する現場課題）** banner at the top states the problem in three lines.
 - The left rail lists all six demos: **デモ1–デモ5** (Word / Excel) and **デモ6**, a fixed PDF (badge **固定PDF・空欄自動検出**, see [Fixed PDF forms](#fixed-pdf-forms-phase-4)) — three marked forms and the two **unmarked blank forms** — デモ4 (form4 `.docx`) and デモ5 (form5 `.xlsx`), badged **空欄自動検出**.
-- One click on デモ4 / デモ5 runs the 4-stage blank-cell discovery *and* an auto-preview fill of the recommended applicant cells, so the discovery table and the filled result are on screen together; **✅ 検出した空欄を承認して外科的差込を実行** turns the reviewer's own selection into the run that can be signed off (the auto-preview itself can never be approved). An uploaded form without markers goes to discovery automatically, and **🔍 Discover blank cells** is there for your own unmarked forms.
-- Each field in Fields & sources carries a model-tier badge (`Opus 5.5` / `Sonnet 5` / `Haiku 4.5`, or `Offline Rule` plus the live plan). Deep links for recordings: `/#tour=1` … `/#tour=5`, `/#demo=form4` (or `/#unmarked=form4`), `/#pdf=form6`, `/#demo=form2&tab=hitl`, `/#view=claude`, `/#lang=en`, and the grant portal `/portal` (top bar: **🌐 公募様式ポータル (/portal)**). The 3-minute demo video (Japanese narration, 175 s; narration synthesized from the author's own voice with permission via ElevenLabs `https://elevenlabs.io/`, with no external BGM or sound effects) walks through these deep links step by step: [docs/DEMO_VIDEO_SCRIPT_JA.md](docs/DEMO_VIDEO_SCRIPT_JA.md).
+- One click on デモ4 / デモ5 runs the 4-stage blank-cell discovery *and* an auto-preview fill of the recommended applicant cells, so the discovery table and the filled result are on screen together; **✅ 検出した空欄を承認して外科的差込を実行** turns the reviewer's own selection into the run that can be signed off (the auto-preview itself can never be approved). With **ゼロ設定の自動適応モード** checked by default, uploading an unmarked Word/Excel form via **▶ Run pipeline** automatically selects applicant cells and fills them; to inspect and confirm candidate cells before filling (or for fixed PDFs), click **🔍 Discover blank cells** (or uncheck auto-adaptation). Final human sign-off is required in either flow.
+- Each field in Fields & sources carries a model-tier badge (`Opus 5.5` / `Sonnet 5` / `Haiku 4.5`, or `Offline Rule` plus the live plan). Deep links for recordings: `/#tour=1` … `/#tour=5`, `/#demo=form4` (or `/#unmarked=form4`), `/#pdf=form6`, `/#demo=form2&tab=hitl`, `/#view=claude`, `/#lang=en`, and the grant portal `/portal` (top bar: **🌐 公募様式ポータル (/portal)**). The 3-minute demo video (Japanese narration, 175 s; narration synthesized from the author's own voice with permission via ElevenLabs `https://elevenlabs.io/`, with no external BGM or sound effects; Step 5 summary diagram previews 3 publicly distributed blank templates tested offline with synthetic dummy values: `A08` MHLW `https://www.mhlw.go.jp/stf/seisakunitsuite/bunya/koyou_roudou/roudoukijun/roudouhoken.html`, `L13` JFC `https://www.jfc.go.jp/n/service/dl_kokumin.html`, and `L39` Legal Affairs Bureau `https://houmukyoku.moj.go.jp/homu/minji79.html`) walks through these deep links step by step: [docs/DEMO_VIDEO_SCRIPT_JA.md](docs/DEMO_VIDEO_SCRIPT_JA.md).
 
 ## Live Claude mode
 
@@ -255,7 +258,7 @@ python -m form_guard.cli --form samples/blank_forms/form5_unmarked_blank.xlsx --
 **In the web UI:**
 - One click on **デモ4** / **デモ5** (badge **空欄自動検出**, under **マーカーなし白紙様式・空欄自動発見 / Unmarked blank forms**) runs discovery and shows the panel **4段階・白紙空欄の自動検出結果（申請者記入欄 vs 事務局専用欄の自動仕分け）**: the blank form's SHA-256, the candidate / recommended / rejected counts, and every candidate cell with its id, location, printed label, inferred format and limit, role and reason.
 - Applicant cells (`✓ 申請者記入欄 / Applicant field`) are pre-checked; office-only cells (`✗ 事務局専用欄（除外） / Office-only — locked`) can never be checked. Right under the stages, an **auto-preview** shows the recommended applicant cells already filled — the rendered page, the checks passed, the office-only cells left empty and each value with its model badge — so the result can be inspected in the same click.
-- The auto-preview can never be approved: **✅ 検出した空欄を承認して外科的差込を実行** turns the reviewer's selection into the run that continues to the usual visual diff, fields & sources, structural audit and human approval screens. An uploaded form without markers lands here automatically (or press **🔍 Discover blank cells**).
+- The auto-preview can never be approved: **✅ 検出した空欄を承認して外科的差込を実行** turns the reviewer's selection into the run that continues to the usual visual diff, fields & sources, structural audit and human approval screens. With **ゼロ設定の自動適応モード** enabled by default, uploading an unmarked Word/Excel form via **▶ Run pipeline** automatically selects applicant cells and runs the fill; to inspect and confirm candidate cells before filling (or when uploading a fixed PDF), press **🔍 Discover blank cells** (or uncheck auto-adaptation; final human approval is required in either case).
 
 **Web API:**
 - `GET /api/demos` lists all six demos (`unmarked: true` for form4 / form5 / form6, `pdf: true` for form6, labels `デモ1`–`デモ6`).
@@ -263,6 +266,19 @@ python -m form_guard.cli --form samples/blank_forms/form5_unmarked_blank.xlsx --
 - Step by step: `POST /api/discover/demo` (built-in form4 / form5) or `POST /api/discover` (an upload, or a `demo_id`); then `POST /api/runs/from-discovery` (JSON: `discovery_id`, `confirmed_targets` = candidate ids or `"recommended"`, `memo_text`, `mode`, `model_tier`) or `POST /api/runs/upload` (multipart, with `discovery_id` and `confirmed_targets`). `GET /api/unmarked-demos` lists only the two unmarked forms. The discovery stays on the server: the client only names candidate ids, and any other field is refused.
 
 ![Blank-cell discovery inspector on the unmarked form4: applicant cells pre-checked, office-only cells locked, and the ✅ 検出した空欄を承認して外科的差込を実行 button](docs/screenshots/06_unmarked_discovery.png)
+
+### Zero-config auto-adaptation (`--auto-adapt`)
+
+For unmarked blank forms (`.docx` / `.xlsx` templates containing table or paragraph blank slots; auto-adaptation on fixed `.pdf` templates has not been verified), `--auto-adapt` (Web UI checkbox **ゼロ設定の自動適応モード**, CLI `--auto-adapt`, or MCP `form_guard_fill(..., auto_adapt=True)`) chains discovery, fill, and layout self-healing in one run while preserving the human sign-off lock:
+
+```bash
+python -m form_guard.cli --form path/to/your_form.docx --memo path/to/memo.txt --auto-adapt --mode demo --out-dir output/adapted
+# On subsequent runs, pass the saved profile explicitly with --slot-spec:
+python -m form_guard.cli --form path/to/your_form.docx --memo path/to/memo.txt --slot-spec output/adapted/your_form.adapted.slots.json --mode demo --out-dir output/adapted
+```
+
+- **1. Auto-discovery & reusable profile** — discovers applicant cells (`recommended_ids`), locks `office_only` / formula / merged-continuation cells, and when `VIS-01` adaptation runs (`adapt_history` is non-empty), saves `<form>.adapted.slots.json` pinned to `form_sha256` inside `--out-dir` so subsequent runs can pass `--slot-spec <form>.adapted.slots.json`.
+- **2. `VIS-01` cell-overflow self-healing** — if the visual check (`VIS-01`) detects text overflowing a cell (`drift_outside_slots` / `grown_slots`), Form-Guard tightens `max_chars` on the overflowing slots using ratio `0.60–0.65` with minimum `1` (`max(1, min(current_len - 1, int(current_len * ratio)))`) and re-runs extractive condensation and verification (up to `max_adapt_rounds=3` adaptation rounds), recording the `auto_adapt` key in `audit_log.json`. Unmatched fields remain `needs_human_input`, and Web download stays locked until human sign-off.
 
 ## Fixed PDF forms (Phase 4)
 
@@ -352,9 +368,8 @@ python -m form_guard.cli --verify samples/blank_forms/form6_study_group_grant.pd
 | 地域中小企業省エネ設備導入補助金 交付申請書（様式第1号） — 架空市 | `.docx` | `483万6千円` → `4,836,000円`, printed cap `上限1,000,000円` forces re-extraction (1,612,000円 → 1,000,000円), **missing 法人番号 left for the human**, empty cell filled by table coordinates |
 | 月次設備安全点検および改善報告書（様式A-4） — 架空施設 | `.xlsx` | drop-down list values, `COUNTIF` formulas and 40 merged ranges preserved, 177 → 120 chars keeping the interim measure 「交換完了までは…」 and the weekdays of both deadlines, year of 「12月8日（火）」 inferred and flagged |
 
-Each demo also ships a scripted **naive regeneration** (`samples/broken_before/`) that reproduces the usual failure
-modes — US-Letter page, borders and merged cells lost, legal clauses paraphrased, invented numbers such as
-「約50万円」 or a fabricated 13-digit 法人番号 — and Form-Guard's verifier flags every one of them.
+- Demos 1–3 and 6 also ship a scripted **naive regeneration** (`samples/broken_before/`) as a simulated example of regeneration failure modes — US-Letter page, borders and merged cells lost, legal clauses paraphrased, invented numbers such as 「約50万円」 or a fabricated 13-digit 法人番号 — so Form-Guard's verifier can demonstrate flagging each one.
+- *(Note: these `samples/broken_before/` files are scripted test fixtures, not a measurement of failure rates across chat AI products.)*
 
 Two **unmarked** blank forms (no markers, no `.slots.json`) show blank-cell discovery:
 
@@ -451,8 +466,7 @@ Details: [docs/BUILT_WITH_CLAUDE_CODE.md](docs/BUILT_WITH_CLAUDE_CODE.md) (secti
 - The web UI shows every value next to its verbatim source (click a value in the preview to jump to the memo line),
   the self-correction history, and the full structural audit. The reviewer can **correct any field**, including
   AI-filled ones; each edit is written surgically, re-verified and clears any earlier approval.
-- When a value had to be shortened, the checklist shows the **full text that was deleted**; if shortening would delete a condition
-  (ただし, 場合に限り, 禁止, 除く, 不可, 条件 …) the value is not written at all and is offered only as a suggestion.
+- App-side length repair displays its recorded deletions and withholds a value when deletion of a registered protected pattern (ただし, 場合に限り, 禁止, 除く, 不可, 条件 …) is detected. Model summaries already within the limit may have no deletion record; review every shortened value against the full memo.
 - The **download stays locked on the server** until there are no pending fields, verification passed, and a named
   reviewer has confirmed every checklist item. The approval is bound to the revision on screen and to the SHA-256 of
   the exact bytes the verifier checked: `POST /api/runs/{id}/approve` and `GET /api/runs/{id}/download` both
@@ -538,12 +552,14 @@ License: MIT (see [LICENSE](LICENSE)).
 <a id="日本語"></a>
 ## 日本語
 
+> **🔰 AIに不慣れな方・事務担当者向けの「超かんたん説明書（3ステップ図解・用語集・Q&A）」**: [docs/BEGINNER_GUIDE_JA.md](docs/BEGINNER_GUIDE_JA.md)（GitHub上でそのまま読む場合はこちらのMD版をご覧ください。ネット接続なしで1ファイルで開ける・A4印刷対応の単体HTML版は [docs/BEGINNER_GUIDE_JA.html](docs/BEGINNER_GUIDE_JA.html)［ダウンロードしてブラウザで開く］）
+
 ### 誰のどんな課題を解決し、ハッカソン後にどこで使われ続けるか
 
 **日本の職場の具体的な困りごと**：
 - 大学・研究機関の研究事務（共同研究の計画変更届、研究設備の利用申請）、自治体の補助金や防災備蓄品の窓口、施設の安全点検では、罫線・結合セル・`vMerge`・計算式・プルダウン・印刷された定型文を持つ公式の `.docx` / `.xlsx` 様式を使います。
 - 罫線が1本崩れる、文言が1つ言い換わる、メモに無い数字が入るといった不備は差し戻し（押印や決裁の取り直し・再提出の手戻り）の原因になります。毎月これらに記入しているのは、多くがエンジニアではない研究事務・申請者・バックオフィスの担当者です。
-- 生成AIのチャットは多くの場合、様式ごと作り直すため、罫線や文言が変わったり根拠の無い数字が入ったりすることがあり、何が変わったのか誰にも分からないので、安全に使えませんでした。
+- 文書全体を作り直す方式では、結合セル・罫線・固定文言が変わったり根拠の無い数字が入ったりすることがあり、どこが変わったのかを確かめる負担が大きいため、そのまま申請業務に使うには壁がありました（付属の比較ファイルは、その不具合を再現した模擬データであり、生成AI全体の失敗頻度を測定した結果ではありません）。
 
 - **テーマ1（その現場にいた人にしか見えない深さ）**：本当に危ないのは「AIの文章が間違う」ことより「AIが様式を黙って変える」
   ことです。Form-Guard は様式そのもの（ZIP・XML骨格・罫線・結合セル・定型文）を検査し、事実は推測しません（法人番号は人が入力）。
@@ -569,16 +585,16 @@ License: MIT (see [LICENSE](LICENSE)).
 
 ### 何をするツールか
 
-生成AIに「この様式に記入して」と頼むと、多くの場合は文書を**作り直します**。文書ごと作り直す方式では、見た目はそれらしくても、
+文書全体を作り直す方式では、見た目はそれらしくても、
 結合セルが分かれる、罫線が消える、注意事項や誓約文の文言が言い換えられる、用紙設定が変わる、といったことが起こり得ます。
-メモにない数字が紛れ込むこともあります（付属の比較用ファイルは、こうした失敗を再現した模擬データです）。
+メモにない数字が紛れ込むこともあります（付属の比較用ファイルは、こうした失敗を再現した模擬データです）（生成AI全体の失敗頻度を測定した結果ではありません）。
 Form-Guard Agent は次の流れで、**指定欄だけ**を書き換えます。
 
-- **1. スキャン** — `{{項目名}}`・`[記入欄: 項目名]`・座標指定の空欄（Word の表のセル、Excel のセル）を見つけ、様式に印刷された記入ルール（字数・和暦・桁数・上限額・選択肢、「変更予定日の30日前までに提出」のような2つの日付の間の期限）も読み取ります。マーカーの無い白紙様式では、空欄候補を4段階で発見し（申請者欄か事務局欄かも判定）、記入する欄を人が確定します。
+- **1. スキャン** — `{{項目名}}`・`[記入欄: 項目名]`・座標指定の空欄（Word の表のセル、Excel のセル）を見つけ、様式に印刷された記入ルール（字数・和暦・桁数・上限額・選択肢、「変更予定日の30日前までに提出」のような2つの日付の間の期限）も読み取ります。マーカーの無い白紙様式では、空欄候補を4段階で発見します（申請者欄か事務局欄かも判定。マーカーなし Word/Excel は、自動適応モード［`--auto-adapt`・Web初期オン］なら申請者欄を自動選択して仮記入し、記入前に欄を確認したい場合は空欄発見の手動フロー［`--discover-blanks` / 🔍］を選択します。どちらも最終承認は人が行います）。
 - **2. 対応付けと自己修正** — Claude（ライブ。欄の種類に応じて Haiku・Sonnet・Opus を使い分け）またはオフラインの決定論エンジンが、値と**メモ原文そのままの引用**を返します。独立した検証器が引用・数値・日付・記入ルールを確認し、和暦変換・金額表記の統一・半角化・削除のみの要約で直すか、指摘内容を添えて Claude（Opus）に再依頼します。
 - **3. 外科的な書き込み** — XML 内のマーカー文字だけを置き換えます。それ以外の ZIP 内パーツは圧縮済みバイト列のまま複製します。
 - **4. 構造検査** — ZIP・SHA-256、XML骨格、表構造・罫線・結合セル、定型文、根拠、記入ルールなど21項目を決定論的に検査します（描画位置のずれやセルはみ出しが検出された場合は VIS-01 を追加）。
-- **5. 人による最終確認** — 各値をその根拠と並べて確認し、AIが記入した欄も含めてどの欄でも修正できます（修正すると再検査され、承認は取り消されます）。字数制限のために削除した文は全文を表示し、条件（ただし・場合に限り・禁止など）・暫定措置・対応策や日付の曜日が欠ける要約は記入せず候補として人に回します。印刷された期限（「変更予定日の30日前までに提出」など）に2つの日付が合わない場合は、その欄の確認項目に注意を付けます。
+- **5. 人による最終確認** — 各値をその根拠と並べて確認し、AIが記入した欄も含めてどの欄でも修正できます（修正すると再検査され、承認は取り消されます）。アプリ側の字数調整では削除文を表示し、登録された条件語（ただし・場合に限り・禁止など）・暫定措置・対応策・曜日などの削除を検知した場合は記入を保留して候補として人に回します（AIが最初から字数内で要約した場合などは削除表示が出ないこともあるため、省略の妥当性は表示の有無にかかわらず人が元メモ全体と照合します）。印刷された期限（「変更予定日の30日前までに提出」など）に2つの日付が合わない場合は、その欄の確認項目に注意を付けます。
   - **承認とダウンロードのサーバー側ロック** — 確認者名の入力と全項目のチェックが済むまでダウンロードはロックされます。承認は画面上の版（revision）と検査済みファイルの SHA-256 に結び付けて記録し、承認（`POST /api/runs/{id}/approve`）とダウンロード（`GET /api/runs/{id}/download`）では `filled_sha256`（16進64桁）と `revision` の両方が**必須**（欠落・形式不正は 422、版不一致は 409 で拒否）です。
 - **6. MCP で作った下書きも同じ画面で承認** — `form_guard_fill` は下書きの隣に `web_handoff.json`（白紙様式の複製・メモ・スロット定義・対応付け・SHA-256）を残し、結果の `review_url`（`http://127.0.0.1:8000/?run_id=<run id>`）を開くと、その**同じファイル**をモデルを動かさずに読み込み、21項目と VIS-01 を白紙様式に対して再検査します。`audit_log.json` の SHA-256 と一致しない（改ざんされた）下書きや検査に不合格の下書きは読み込みません（`POST /api/runs/import` でも可）。
 
@@ -599,7 +615,7 @@ pytest -v
 - フック（`python scripts/hook_guard.py …`）と MCP サーバー（`python -m form_guard.mcp_server`）は `PATH` 上の `python` で動きます。フックは標準ライブラリだけで動き（Python 3.9 以上なら可）、import 検査には常に `.venv` を優先して使います（`FORM_GUARD_HOOK_PYTHON` で指定も可）。MCP サーバーは依存パッケージが無い場合 `.venv` で自動的に起動し直します。`python` が見つからないとフックがエラー（処理は止まりません）になるので、`.venv` を有効にして Claude Code を起動し直してください。
 
 - Web 画面は日本語が既定です（右上で EN に切替）。上部の「🎬 審査員向け 90秒ガイドツアー」の①〜⑤から、①生成AIの作り直し版との視覚比較、②マーカーなし白紙からの空欄発見、③原文根拠のハイライトと推測拒否（483万6千円→4,836,000円、印刷された上限、法人番号は人の入力待ち）、④Claude のモデル使い分けと Claude Code 連携、⑤21項目の構造検査と人間承認ロック、の各画面へ直接移動できます。
-- 3分デモ動画の台本と絵コンテ（日本語ナレーション・175秒。デモ動画のナレーション音声は作成者本人の承諾のもと本人の声から ElevenLabs `https://elevenlabs.io/` で音声合成し、外部のBGM・効果音は不使用）は [docs/DEMO_VIDEO_SCRIPT_JA.md](docs/DEMO_VIDEO_SCRIPT_JA.md) にあり、このガイドツアー（`#tour=1`〜`#tour=5`）に沿って画面をたどります。
+- 3分デモ動画の台本と絵コンテ（日本語ナレーション・175秒。デモ動画のナレーション音声は作成者本人の承諾のもと本人の声から ElevenLabs `https://elevenlabs.io/` で音声合成し、外部のBGM・効果音は不使用。Step 5 の説明用まとめ図では各機関が一般公開している白紙様式3点［`A08` 厚生労働省 `https://www.mhlw.go.jp/stf/seisakunitsuite/bunya/koyou_roudou/roudoukijun/roudouhoken.html`、`L13` 日本政策金融公庫 `https://www.jfc.go.jp/n/service/dl_kokumin.html`、`L39` 法務局 `https://houmukyoku.moj.go.jp/homu/minji79.html`］に合成ダミー値をオフラインで仮記入した構造検証プレビューを掲載）は [docs/DEMO_VIDEO_SCRIPT_JA.md](docs/DEMO_VIDEO_SCRIPT_JA.md) にあり、このガイドツアー（`#tour=1`〜`#tour=5`）に沿って画面をたどります。
 
 - `ANTHROPIC_API_KEY` を設定すると（`.env` も可、Git には含まれません）、`--mode auto` / `--mode live` で Claude を使います。既定の `--model-tier auto` では、定型の欄（和暦日付・期間・桁数・書式・選択肢）と空欄ラベルの分類を `claude-haiku-4-5-20251001`、通常の文章・金額・氏名を `claude-sonnet-5`、長文の要約と検証器に差し戻された後の自己修正を `claude-opus-5-5` が担当します（`--model-tier opus|sonnet|haiku` で固定も可）。
 - 構造化出力（JSON スキーマ）、adaptive thinking（要約表示）と effort 指定は、`model_capabilities()` の既知モデル表にあるモデルにだけ送ります（表に無いファミリーや将来のバージョンには何も付けません）。モデル別に送信パラメータを切り替えます。確認済みなのはモックによるリクエスト形式で、実APIでの利用可否・対応機能はアカウント権限に依存します。2026-11-03（火）には実APIでの3階層ルーティング実行（ローカルの `.gitignore` 対象 `output/live_smoke_form1/audit_log.json`、run `20261103-164113-f83bad`、コール別明細表は [docs/BUILT_WITH_CLAUDE_CODE.md](docs/BUILT_WITH_CLAUDE_CODE.md) の第6節に掲載）も確認済みです。どの欄をどのモデルが担当したかは監査ログとレポートに残ります。
@@ -620,7 +636,7 @@ python -m form_guard.cli --form samples/blank_forms/form4_unmarked_blank.docx --
 
 - Web 画面では、左の「デモ4」「デモ5」（「空欄自動検出」バッジ）を1回押すだけで、空欄の発見と、推奨の申請者欄への仮記入（自動プレビュー）が同時に行われ、「4段階・白紙空欄の自動検出結果（申請者記入欄 vs 事務局専用欄の自動仕分け）」のパネルに、白紙様式の SHA-256、候補・推奨・除外の件数、候補ごとの ID・位置・印字ラベル・推定ルール・役割・理由と、記入結果のプレビュー（描画・検査結果・空欄のままの事務局欄・欄ごとのモデル）が並びます。
 - 申請者欄は最初からチェック済みで、事務局専用欄はロックされて選べません。自動プレビューは承認できず、「✅ 検出した空欄を承認して外科的差込を実行」を押すと、人が確定した欄だけの実行が作られ、通常の確認画面（見た目の比較・記入値と根拠・構造検査・人による最終確認）へ進みます。
-- マーカーの無い様式をアップロードした場合も自動でこの画面になります。API：`GET /api/demos`（6件）、`POST /api/run-demo`、`POST /api/discover/demo`（付属様式）・`POST /api/discover`（アップロードまたは demo_id）、`POST /api/runs/from-discovery`。
+- 初期状態では「ゼロ設定の自動適応モード」がオンのため、マーカーなしの Word / Excel 様式を「▶ 記入して検査」でアップロードした場合は欄の自動選択・記入結果へ進みます。記入前に対象欄を一覧で確認したい場合（および固定PDFをアップロードする場合）は「🔍 マーカーなし白紙から空欄を自動発見」を押してください（自動適応のチェックを外した場合も記入前の空欄発見画面へ進みます。最終確認・承認はどちらでも必要です）。API：`GET /api/demos`（6件）、`POST /api/run-demo`、`POST /api/discover/demo`（付属様式）・`POST /api/discover`（アップロードまたは demo_id）、`POST /api/runs/from-discovery`。
 
 ### 固定PDF様式と □ → ■ チェック（Phase 4）
 
@@ -694,7 +710,7 @@ python -m form_guard.cli --form samples/blank_forms/form6_study_group_grant.pdf 
 - **防災備蓄品 貸出・返却管理票（マーカーなし, .xlsx）**：結合セルの空欄5か所に書式番号を保ったまま記入、SUM式と結合セルの続き、事務局使用欄（決裁印・受付番号・返却確認）を除外
 - **研究助成申請書（様式第6号・固定PDF, .pdf）**：罫線から 19 枠を復元して申請者欄 7 枠を推奨・事務局欄 2 枠をロック、□ 合意済み → ■ 合意済み、増分更新で元の PDF のバイト列を先頭に保持、指定枠の外の画素差分 0 px
 
-各デモには「生成AIで作り直した場合」のよくある失敗を再現した比較用ファイル（`samples/broken_before/`、模擬データ）も付いています。
+デモ1〜3とデモ6には「生成AIで作り直した場合」のよくある失敗を再現した比較用ファイル（`samples/broken_before/`、模擬データ）も付いています。
 すべてのサンプル様式とテストデータは、本ハッカソン期間中にゼロから自作した架空のものです。
 
 ### 位置付けと注意

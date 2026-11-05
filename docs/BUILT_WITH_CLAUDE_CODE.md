@@ -91,7 +91,7 @@ Every `FieldMapping` carries `routed_model` and `route_reason`:
 
 ## 3. Measured workflow comparison
 
-Measured on 2026-11-02（月） on Windows 11 with Python 3.13, using the offline demo engine (no network; live Claude
+Initially measured on 2026-11-02（月） and updated/re-verified on 2026-11-03（火） (after preserving the era-date weekday in `memo3`, updating the written character count from 844 to 848) on Windows 11 with Python 3.13, using the offline demo engine (no network; live Claude
 calls add API latency that is not included):
 - The left-hand columns count the work a person would do by hand for each fictional form — they are counted from the files by the same script, **not** a timed study of a person.
 - The Form-Guard columns are measured. Reproduce with `python docs/measure_workflow.py`.
@@ -283,7 +283,7 @@ Haiku・Sonnet の下書きが根拠確認や印刷されたルールで却下�
 
 ### 3. 作業量の比較（計測）
 
-- 2026-11-02（月）に Windows 11・Python 3.13 で、オフラインのデモエンジン（ネットワークなし）を使って計測しました。ライブモードでは API の応答時間が加わります（表には含みません）。左側の列は、架空の各様式を人が手作業で処理する場合の作業量を同じスクリプトでファイルから数えたもので、人の作業時間を計ったものではありません。右側の列が Form-Guard の計測値です。`python docs/measure_workflow.py` で再現できます（表は英語版と同じ）。
+- 2026-11-02（月）に初回計測し、2026-11-03（火）に `memo3` の和暦日付曜日保持反映後（記入文字数 844→848 文字）の値として Windows 11・Python 3.13・オフラインのデモエンジン（ネットワークなし）で再確認しました。ライブモードでは API の応答時間が加わります（表には含みません）。左側の列は、架空の各様式を人が手作業で処理する場合の作業量を同じスクリプトでファイルから数えたもので、人の作業時間を計ったものではありません。右側の列が Form-Guard の計測値です。`python docs/measure_workflow.py` で再現できます（表は英語版と同じ）。
 - Word/Excel の 5 つの様式（form1〜form5、固定PDFのデモ6はこの表の対象外）で、Form-Guard は 41 の指定欄に 40 件（848 文字）を記入し、XML タグ 2,119 個・定型文 171 か所・結合セル 124・罫線定義 650 を 1 様式あたり 0.4 秒未満（表の計測では 120〜246 ms・Web 計測タイル実測では 119〜379 ms、時間は PC の負荷で変わりますが数えた列は変わりません）で照合しました。
 - 6つ目の付属デモである固定PDF様式（`form6_study_group_grant.pdf`、A4）でも、ページの罫線から 19 枠を復元し、申請者欄 7 枠（`□ 合意済み → ■ 合意済み`、`税込で48万円 → 480,000円` を含む）を記入、事務局専用欄 2 枠をロックし、白紙PDF（3,742バイト）を先頭に完全保持した増分更新で 21/21 項目 `PASS`・指定枠外の画素差分 `0 px` を達成しています。
 - 人に残るのは、各値を原文と並べて確認する計 51 項目（form6 の 9 項目を含めると 60 項目）の最終確認と、メモに無い事実（様式 2 の法人番号）の入力だけです。Form-Guard はその欄を推測で埋めません。Web 画面の Claude Code タブの作業量比較は Word/Excel の 5 様式（51 項目）を対象としてその場で計測・表示します（form6 の 9 項目は別集計です）。
@@ -353,6 +353,7 @@ git の履歴に、Claude Code で進めた各段階が残っています。ど�
   の罫線矩形から空欄と事務局欄を検出し、元のPDFバイト列を完全な先頭一致（増分更新 / incremental update）のまま保持して
   テキストと `□` → `■`（`requires_human_if_selected` 対応）をオーバーレイし、21項目＋`VIS-01` で検証する `pdf_support.py`、
   および公募ポータル（`/portal`・`GET /api/portal/forms`）と **Claude in Chrome**・Claude Code を結ぶ `portal-form-fill` スキル。
+- **7. ゼロ設定の自動適応モード（`--auto-adapt`）と公開実様式検証（2026-11-04（水））** — マーカーの無い白紙様式（表や対応段落の空欄を持つ `.docx` / `.xlsx`。固定PDFでの自動適応は未検証）に対し、空欄自動発見・申請者欄の選択・`VIS-01` でセルはみ出し（`drift_outside_slots` / `grown_slots`）を検出した際の `max_chars` 自動縮小（比率 `0.60〜0.65`・最小 `1`）＆抽出要約の再実行（最大3ラウンド `max_adapt_rounds=3`）・および `VIS-01` 適応実行時（`adapt_history` が非空のとき）の `form_sha256` 付きプロファイル（`<form>.adapted.slots.json`、次回 `--slot-spec` で指定可能）保存と `audit_log.json` の `auto_adapt` キー記録を一気通貫で行う `--auto-adapt`（Web UI チェックボックス・CLI `--auto-adapt`・MCP `auto_adapt: true`）を追加しました。公開実ファイル計190件（3段階間のURL・SHA-256重複0件）の3段階限定試験（オフライン・合成ダミーメモによる記入試験）では、①官公庁・大学・研究の公開100ファイル（対応形式の完走63件中58件が21項目合格［5件の `GRD-02` 等は隔離環境で修正し63/63合格を確認］、空欄0件の16件は `TEXT-02` のみ不成立、旧バイナリ `.doc`/`.xls`/暗号化等の非対応21件は安全拒否）、②融資・信用保証・登記等の公開40様式（空欄検出39/40件が21項目＋`VIS-01` 合格、図形のみの1件は空欄候補0件）、③①②と重複しない別ジャンルの新規公開50様式に対する `--auto-adapt` 検証（合成ダミーメモで50/50件が21項目＋`VIS-01` 検査通過、計260欄中191欄記入・69欄を `needs_human_input` 保留、全欄記入完了の `PASS` 4様式・入力待ち `needs_human_input` 46様式、`VIS-01` 自動適応発動1様式）で、いずれも構造改変 0件・`GRD-01`（全記入値の原文引用紐付け）違反 0件を確認しました。
 
 テストは、偽の Claude クライアントとモックの通信（404 フォールバックを含む）、改ざん攻撃、ファイルの関門、Web API の承認ゲート、
 cp932 環境での stdio 経由の MCP サーバー、2 段のフックを対象にしています。Claude Code によって、どの段階でも回帰テストを追加し、Phase 3 ではコミット前にヘッドレス

@@ -65,6 +65,7 @@ class PipelineResult:
     builtin_demo: bool = False  # an unmodified built-in demo: sample form + sample memo, no reviewer edits
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds"))
     memo_notes: list[str] = field(default_factory=list)  # invisible characters removed / NFD kana composed at intake
+    adapt_history: list[dict[str, Any]] = field(default_factory=list)  # auto-adapt rounds (slot_id, old/new max_chars)
 
     @property
     def verified_sha256(self) -> str:
@@ -98,6 +99,8 @@ class PipelineResult:
             "timings_ms": {k: round(v * 1000, 1) for k, v in self.timings.items()},
             "scan_warnings": self.scan.warnings,
         }
+        if self.adapt_history:
+            d["auto_adapt"] = self.adapt_history
         if include_previews:
             d["previews"] = self.previews
         return d
@@ -115,22 +118,23 @@ def new_run_id() -> str:
 
 
 def _map(scan_r: ScanResult, memo: str, mode: str, model: Optional[str], client: Any,
-         model_tier: Optional[str] = None) -> tuple[MappingRun, dict]:
+         model_tier: Optional[str] = None, slots: Optional[list[FormSlot]] = None) -> tuple[MappingRun, dict]:
     requested = (mode or "auto").lower()
     resolved = resolve_mode(requested) if client is None else ("live" if requested in ("auto", "live") else "demo")
     engine = make_engine(resolved, model, client, model_tier=model_tier)
     info: dict[str, Any] = {"requested_mode": requested, "mode": resolved, "label": engine.label,
                             "model": getattr(engine, "model", None), "model_tier": getattr(engine, "model_tier", None),
                             "fallback_reason": None}
+    target_slots = scan_r.slots if slots is None else slots
     try:
-        run = map_fields(scan_r.slots, memo, engine, scan_r.title)
+        run = map_fields(target_slots, memo, engine, scan_r.title)
     except LiveEngineError as exc:
         if requested != "auto":
             raise
         partial = copy.deepcopy(getattr(engine, "usage", None) or {})  # the calls that succeeded before the failure
         info.update(mode="demo", label=DemoEngine.label + " — live call failed, used offline engine",
                     fallback_reason=str(exc))
-        run = map_fields(scan_r.slots, memo, DemoEngine(), scan_r.title)
+        run = map_fields(target_slots, memo, DemoEngine(), scan_r.title)
         if partial.get("requests", 0) > 0 or partial.get("calls"):
             # the values come from the offline engine, but the API was called and billed: never report 0 calls
             for key, empty in (("requests", 0), ("input_tokens", 0), ("output_tokens", 0),
@@ -141,6 +145,42 @@ def _map(scan_r: ScanResult, memo: str, mode: str, model: Optional[str], client:
     info["usage"] = run.usage
     info["rounds"] = run.rounds
     return run, info
+
+
+def _merge_usage(usages: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
+    """Combine usage dicts across blank-cell discovery and adaptation rounds without double-counting prior runs."""
+    if len(usages) == 1 and usages[0][0] == "map_round_0":
+        return copy.deepcopy(usages[0][1])
+    has_live = any(("requests" in u or u.get("calls") or u.get("models")) for _, u in usages if isinstance(u, dict))
+    merged: dict[str, Any] = {
+        "models": [], "calls": [], "model_fallbacks": [], "escalations": [], "routing": [],
+    }
+    if has_live:
+        merged.update({
+            "requests": 0, "input_tokens": 0, "output_tokens": 0,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+        })
+    by_stage: list[dict[str, Any]] = []
+    for stage, u in usages:
+        if not isinstance(u, dict):
+            continue
+        by_stage.append({"stage": stage, "usage": copy.deepcopy(u)})
+        if has_live:
+            for k in ("requests", "input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"):
+                merged[k] += int(u.get(k, 0) or 0)
+        for m in u.get("models") or []:
+            if m and m not in merged["models"]:
+                merged["models"].append(m)
+        for k in ("calls", "model_fallbacks", "escalations", "routing"):
+            merged[k].extend(copy.deepcopy(u.get(k) or []))
+        if u.get("live_attempt_failed"):
+            merged["live_attempt_failed"] = True
+        for k, v in u.items():
+            if k not in merged and k not in ("requests", "input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"):
+                merged[k] = copy.deepcopy(v)
+    if len(by_stage) > 1 or (by_stage and by_stage[0]["stage"] == "discovery"):
+        merged["usage_by_round"] = by_stage
+    return merged
 
 
 def is_builtin_demo(demo_id: Optional[str], form_path: Path, memo_text: str, mappings: list[FieldMapping]) -> bool:
@@ -428,6 +468,18 @@ def build_previews(result_scan: ScanResult, filled_path: Path, values: dict[str,
                 ovs.append(Overlay(b.page, b.x + 1.5, b.y + 1.5, b.w - 3, b.h - 3, "fg-slot-cell", lab, sid, box))
     visual = compare_layouts(blank_layout, filled_layout, slot_boxes)
     visual["grown_slots"] = _grown_slots(blank_layout, filled_layout, box_slot, labels)
+    if visual["grown_slots"]:
+        visual["identical_outside_slots"] = False
+        drift_list = list(visual.get("drift_outside_slots") or [])
+        existing_boxes = {d.get("box") for d in drift_list}
+        for g in visual["grown_slots"]:
+            if g["box"] not in existing_boxes:
+                drift_list.append({
+                    "box": g["box"], "slot_id": g["slot_id"], "label": g["label"],
+                    "issue": f"row/cell grew by +{g['grew_px']}px", "grew_px": g["grew_px"],
+                })
+        visual["drift_outside_slots"] = drift_list
+        visual["drift_count"] = len(drift_list)
     for d in visual.get("drift_outside_slots") or []:
         if d.get("box") in box_slot:  # a value overflowing its own cell: name the field
             d["slot_id"] = box_slot[d["box"]]
@@ -467,7 +519,7 @@ def _grown_slots(blank: Layout, filled: Layout, box_slot: dict[str, str], labels
     grown: dict[str, dict[str, Any]] = {}
     for bid, sid in box_slot.items():
         b, f = blank.boxes.get(bid), filled.boxes.get(bid)
-        if b is None or f is None or f.h - b.h <= tolerance:
+        if b is None or f is None or b.kind != "cell" or f.h - b.h <= tolerance:
             continue
         px = round(f.h - b.h, 1)
         if sid not in grown or px > grown[sid]["grew_px"]:
@@ -548,6 +600,8 @@ def run_pipeline(
     write_outputs: bool = True,
     model_tier: Optional[str] = None,
     allow_office_only: bool = False,
+    auto_adapt: bool = False,
+    max_adapt_rounds: int = 3,
 ) -> PipelineResult:
     """Scan -> map & self-correct -> surgical write -> verify -> visual diff, for one blank form and memo.
 
@@ -556,16 +610,43 @@ def run_pipeline(
     A coordinate target (explicit spec or sidecar .slots.json) that points at an office-only cell of the blank form
     (受付番号・受付印・審査欄・決裁・検印・事務局 …) is refused before anything is written, unless the internal
     ``allow_office_only`` override is passed (MCP and the web app never do).
+    When ``auto_adapt`` is True, an unmarked form with 0 slots automatically runs blank-cell discovery and builds an
+    in-memory slot spec bound to the blank form's SHA-256; if ``VIS-01`` reports cell overflow or row growth, the
+    culprit slots' ``max_chars`` are tightened (up to ``max_adapt_rounds`` times) and re-mapped / re-verified.
     """
-    from .scanner import OFFICE_REASON, office_only_targets
+    from .scanner import OFFICE_REASON, build_confirmed_slot_spec, discover_blank_cells, office_only_targets, recommended_ids
 
+    if isinstance(max_adapt_rounds, bool) or not isinstance(max_adapt_rounds, int) or max_adapt_rounds < 0:
+        raise ValueError("max_adapt_rounds must be a non-negative integer")
     timings: dict[str, float] = {}
+    adapt_history: list[dict[str, Any]] = []
+    stage_usages: list[tuple[str, dict[str, Any]]] = []
+    disc_usage: Optional[dict[str, Any]] = None
     t = time.perf_counter()
     form_path = Path(form_path)
     out_dir = Path(out_dir)
+    initial_form_sha = _sha_file(form_path)
     # invisible characters and NFD kana would be copied into the form verbatim: clean the memo once, at intake
     memo_text, memo_notes = clean_text(memo_text.replace("\r\n", "\n").replace("\r", "\n"))
-    scan_r = scan(form_path, slot_spec)
+    scan_r = scan(form_path, copy.deepcopy(slot_spec) if isinstance(slot_spec, dict) else slot_spec)
+    if auto_adapt and not scan_r.slots and slot_spec is None:
+        disc = discover_blank_cells(form_path, mode=mode if mode in ("demo", "live", "auto") else "demo",
+                                    client=client, model_tier=model_tier, model=model)
+        disc_u = (disc.get("engine") or {}).get("usage") or disc.get("live_usage")
+        if isinstance(disc_u, dict) and (disc_u.get("requests", 0) > 0 or disc_u.get("calls")):
+            disc_usage = copy.deepcopy(disc_u)
+            stage_usages.append(("discovery", disc_usage))
+        rec_ids = recommended_ids(disc)
+        if rec_ids:
+            auto_spec = build_confirmed_slot_spec(disc, rec_ids, form_path, allow_office_only=False)
+            auto_spec["source"] = "auto-adapt blank-cell discovery (bound to blank form SHA-256; human review required)"
+            auto_spec["human_confirmed"] = False
+            scan_r = scan(form_path, auto_spec)
+            adapt_history.append({
+                "round": 0, "action": "auto_discover_unmarked",
+                "form_sha256": auto_spec.get("form_sha256"),
+                "confirmed_count": len(rec_ids),
+            })
     office = [] if allow_office_only else office_only_targets(form_path, scan_r.spec)
     if office:
         raise ValueError(f"refused before filling — the slot spec designates office-only cell(s): {'; '.join(office)} "
@@ -573,48 +654,153 @@ def run_pipeline(
     out_dir.mkdir(parents=True, exist_ok=True)
     timings["scan"] = time.perf_counter() - t
 
-    t = time.perf_counter()
-    if prior is not None:
-        mappings, engine_info = [m.model_copy(deep=True) for m in prior[0]], dict(prior[1])
-    else:
-        run, engine_info = _map(scan_r, memo_text, mode, model, client, model_tier)
-        mappings = run.mappings
-    mappings = apply_overrides(scan_r, mappings, overrides or {})
-    # printed deadlines that relate two dates (「変更予定日の30日前までに提出」), on the final values incl. edits
-    mappings = advance_notice_warnings(scan_r.slots, mappings, memo_text)
-    timings["map"] = time.perf_counter() - t
+    tightened_ids: set[str] = set()
+    prev_mappings: list[FieldMapping] = []
+    engine_info: dict[str, Any] = {}
+    for adapt_round in range((max_adapt_rounds if auto_adapt else 0) + 1):
+        t = time.perf_counter()
+        if adapt_round == 0:
+            if prior is not None:
+                mappings, engine_info = [m.model_copy(deep=True) for m in prior[0]], copy.deepcopy(dict(prior[1]))
+            else:
+                run, engine_info = _map(scan_r, memo_text, mode, model, client, model_tier)
+                mappings = run.mappings
+                if isinstance(engine_info.get("usage"), dict):
+                    stage_usages.append(("map_round_0", engine_info["usage"]))
+        else:
+            slots_to_remap = [s for s in scan_r.slots if s.slot_id in tightened_ids]
+            run, round_info = _map(scan_r, memo_text, mode, model, client, model_tier, slots=slots_to_remap)
+            if isinstance(round_info.get("usage"), dict):
+                stage_usages.append((f"adapt_round_{adapt_round}", round_info["usage"]))
+            if not engine_info or prior is not None:
+                engine_info = round_info
+            else:
+                engine_info["rounds"] = int(engine_info.get("rounds", 0) or 0) + int(round_info.get("rounds", 0) or 0)
+                if round_info.get("fallback_reason") and not engine_info.get("fallback_reason"):
+                    engine_info.update(mode=round_info.get("mode"), label=round_info.get("label"),
+                                       fallback_reason=round_info.get("fallback_reason"))
+            remapped_by_id = {m.slot_id: m for m in run.mappings}
+            mappings = [
+                remapped_by_id[m.slot_id] if (m.slot_id in remapped_by_id and m.status != "human_entered")
+                else m.model_copy(deep=True)
+                for m in prev_mappings
+            ]
+        mappings = apply_overrides(scan_r, mappings, overrides or {})
+        # printed deadlines that relate two dates (「変更予定日の30日前までに提出」), on the final values incl. edits
+        mappings = advance_notice_warnings(scan_r.slots, mappings, memo_text)
+        prev_mappings = [m.model_copy(deep=True) for m in mappings]
+        timings["map"] = timings.get("map", 0.0) + (time.perf_counter() - t)
 
-    t = time.perf_counter()
-    values = {m.slot_id: m.filled_value for m in mappings if m.is_written}
-    filled_path = out_dir / f"filled_{form_path.stem}{form_path.suffix}"
-    write = fill_form(scan_r, values, filled_path)
-    timings["write"] = time.perf_counter() - t
+        t = time.perf_counter()
+        values = {m.slot_id: m.filled_value for m in mappings if m.is_written}
+        filled_path = out_dir / f"filled_{form_path.stem}{form_path.suffix}"
+        write = fill_form(scan_r, values, filled_path)
+        timings["write"] = timings.get("write", 0.0) + (time.perf_counter() - t)
 
-    t = time.perf_counter()
-    report = verify(scan_r, filled_path, mappings, memo_text)
-    naive_p = Path(naive_path) if naive_path else None
-    naive_report = compare_naive(scan_r, naive_p, memo_text) if naive_p and naive_p.exists() else None
-    timings["verify"] = time.perf_counter() - t
+        t = time.perf_counter()
+        report = verify(scan_r, filled_path, mappings, memo_text)
+        naive_p = Path(naive_path) if naive_path else None
+        naive_report = compare_naive(scan_r, naive_p, memo_text) if naive_p and naive_p.exists() else None
+        timings["verify"] = timings.get("verify", 0.0) + (time.perf_counter() - t)
 
-    t = time.perf_counter()
-    prepared = {k: prepare_value(v, scan_r.file_type) for k, v in values.items()}
-    previews, visual = build_previews(scan_r, filled_path, prepared, naive_p, naive_report, out_dir if png else None)
-    report.visual_diff_summary = visual
-    if not visual.get("identical_outside_slots", True):
-        report.checks.append(_drift_check(visual))
-        report.failed_count += 1
-        report.overall_status = "FAIL"
-    timings["visual"] = time.perf_counter() - t
+        t = time.perf_counter()
+        prepared = {k: prepare_value(v, scan_r.file_type) for k, v in values.items()}
+        previews, visual = build_previews(scan_r, filled_path, prepared, naive_p, naive_report, out_dir if png else None)
+        report.visual_diff_summary = visual
+        if not visual.get("identical_outside_slots", True):
+            report.checks.append(_drift_check(visual))
+            report.failed_count += 1
+            report.overall_status = "FAIL"
+        timings["visual"] = timings.get("visual", 0.0) + (time.perf_counter() - t)
+
+        if not auto_adapt or visual.get("identical_outside_slots", True) or adapt_round >= max_adapt_rounds:
+            break
+        adjustments = _tighten_overflow_slots(scan_r, mappings, visual, adapt_round + 1)
+        if not adjustments:
+            break
+        tightened_ids = {a["slot_id"] for a in adjustments}
+        adapt_history.extend(adjustments)
+
+    if stage_usages:
+        if prior is not None and isinstance(prior[1].get("usage"), dict):
+            engine_info["prior_usage"] = copy.deepcopy(prior[1]["usage"])
+        engine_info["usage"] = _merge_usage(stage_usages)
+        if disc_usage is not None:
+            engine_info["discovery_usage"] = disc_usage
+
+    if auto_adapt and adapt_history:
+        current_sha = _sha_file(form_path)
+        if current_sha != initial_form_sha:
+            raise ValueError("blank form changed during auto-adapt — re-run on a stable file")
+        existing_sha = scan_r.spec.get("form_sha256")
+        if existing_sha and existing_sha != current_sha:
+            raise ValueError("blank form SHA-256 does not match the slot spec's form_sha256")
+        scan_r.spec["form_sha256"] = current_sha
+        scan_r.spec.setdefault("human_confirmed", False)
 
     result = PipelineResult(
         run_id=run_id or new_run_id(), form_path=form_path, filled_path=filled_path, memo_text=memo_text,
         scan=scan_r, mappings=mappings, write=write, report=report, naive_report=naive_report, previews=previews,
         visual=visual, engine=engine_info, timings=timings, demo_id=demo_id, out_dir=out_dir, naive_path=naive_p,
         builtin_demo=is_builtin_demo(demo_id, form_path, memo_text, mappings), memo_notes=memo_notes,
+        adapt_history=adapt_history,
     )
     if write_outputs:
         write_run_outputs(result)
     return result
+
+
+def _tighten_overflow_slots(scan_r: ScanResult, mappings: list[FieldMapping], visual: dict[str, Any],
+                            round_no: int) -> list[dict[str, Any]]:
+    """Reduce ``max_chars`` on slots that caused VIS-01 cell overflow or row growth, so the next mapping pass
+    condenses or holds them for human review instead of overflowing the form layout."""
+    by_id = {m.slot_id: m for m in mappings}
+    culprit_ratios: dict[str, float] = {}
+    for d in visual.get("drift_outside_slots") or []:
+        sid = d.get("slot_id")
+        if sid:
+            culprit_ratios[sid] = min(culprit_ratios.get(sid, 0.7), 0.65)
+    for g in visual.get("grown_slots") or []:
+        sid = g.get("slot_id")
+        if sid:
+            culprit_ratios[sid] = min(culprit_ratios.get(sid, 0.7), 0.6)
+    adjustments: list[dict[str, Any]] = []
+    for slot in scan_r.slots:
+        if slot.slot_id not in culprit_ratios:
+            continue
+        if slot.required_format == "choice" or slot.constraints.get("checkbox"):
+            continue
+        m = by_id.get(slot.slot_id)
+        if m is not None and m.status == "human_entered":
+            continue
+        cur_val = (m.filled_value or "") if m else ""
+        cur_len = len(cur_val)
+        if cur_len <= 1:
+            continue
+        old_max = slot.max_chars
+        ratio = culprit_ratios[slot.slot_id]
+        target_max = max(1, min(cur_len - 1, int(cur_len * ratio)))
+        if old_max is not None and target_max >= old_max:
+            target_max = max(1, old_max - 1)
+        if old_max is not None and target_max == old_max:
+            continue
+        slot.max_chars = target_max
+        slot_spec_slots = scan_r.spec.setdefault("slots", {})
+        slot_entry = slot_spec_slots.setdefault(slot.slot_id, {"label": slot.label})
+        slot_entry["max_chars"] = target_max
+        for t_entry in scan_r.spec.get("targets") or []:
+            if isinstance(t_entry, dict) and t_entry.get("slot_id") == slot.slot_id:
+                t_entry["max_chars"] = target_max
+        adjustments.append({
+            "round": round_no,
+            "action": "tighten_max_chars",
+            "slot_id": slot.slot_id,
+            "label": slot.label,
+            "previous_len": cur_len,
+            "old_max_chars": old_max,
+            "new_max_chars": target_max,
+        })
+    return adjustments
 
 
 def _drift_check(visual: dict[str, Any]):
@@ -666,6 +852,13 @@ def write_run_outputs(result: PipelineResult) -> dict[str, Path]:
     rp = out / "report.html"
     rp.write_text(build_report_html(result.to_dict()), encoding="utf-8", newline="\n")
     paths["report"] = rp
+    if getattr(result, "adapt_history", None) and result.scan.spec.get("form_sha256") and (
+        result.scan.spec.get("targets") or result.scan.spec.get("slots")
+    ):
+        asp = out / f"{result.form_path.stem}.adapted.slots.json"
+        asp.write_text(json.dumps(result.scan.spec, ensure_ascii=False, indent=2) + "\n",
+                       encoding="utf-8", newline="\n")
+        paths["adapted_spec"] = asp
     return paths
 
 

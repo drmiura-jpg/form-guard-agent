@@ -368,6 +368,9 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-sp
 .why-points { list-style: none; margin: 8px 0 2px; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .why-points li { display: grid; grid-template-columns: 22px 1fr; gap: 4px; font-size: 13px; color: var(--ink-2); line-height: 1.5; }
 .why-points b { color: var(--accent); font-size: 15px; }
+.beginner-banner { border-left-color: var(--good); }
+.beginner-body { margin-top: 6px; }
+.beginner-glossary { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line); }
 .demo-no { flex: none; font: 750 11px/1 var(--sans); padding: 4px 7px; border-radius: 5px; background: var(--accent); color: var(--accent-ink); }
 .badge-auto { flex: none; margin-left: auto; font: 700 10.5px/1 var(--sans); padding: 4px 7px; border-radius: 999px;
   color: var(--warn-ink); background: var(--warn-soft); border: 1px solid var(--warn); white-space: nowrap; }
