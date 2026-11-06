@@ -82,7 +82,40 @@ $("#toStep2").addEventListener("click", () => go(2));
 $("#sample").addEventListener("change", () => { $("#srcSample").checked = true; });
 $("#file").addEventListener("change", () => { $("#srcUpload").checked = true; });
 $("#memo").addEventListener("input", () => { $("#memo").dataset.sample = "0"; });
+$("#makeTemplate").addEventListener("click", () => {
+  if (state.busy) return;
+  if ($("#memo").value.trim() && $("#memo").dataset.template !== "1" && !confirm("いまのメモを、書式から作ったひな形に置き換えますか？")) return;
+  const ok = fillTemplate();
+  msg("#msg3", ok ? "📝 書式の記入欄からメモのひな形を作りました。「：」の右側に書いてください。" : "先に STEP 2 で書式を入れてください。", !ok);
+});
 
+const WD = "日月火水木金土";
+function todayJa() { const d = new Date(); return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日（${WD[d.getDay()]}）`; }
+function templateText() {
+  const rows = (state.candidates || []).filter((c) => c.recommended);
+  const hint = (c) => {
+    const f = c.required_format || "";
+    if (/申請日|届出日|提出日|記入日/.test(c.label) && /date/.test(f)) return todayJa();
+    return "";
+  };
+  const note = (c) => {
+    const f = c.required_format || "", parts = [];
+    if (f === "wareki_date") parts.push("例：2026年11月10日（火）");
+    if (f === "wareki_period") parts.push("例：2026年11月16日（月）から2026年11月27日（金）まで");
+    if (f === "yen") parts.push("例：48,000円");
+    if (f === "person_name") parts.push("氏名だけ");
+    if (f === "choice") parts.push("様式の選択肢から1つ");
+    if (c.max_chars) parts.push(`${c.max_chars}字以内`);
+    return parts.length ? `　←（${parts.join("・")}）` : "";
+  };
+  return "【記入メモ】このメモの「：」の右側に書いてください。書かなかった欄は空欄のまま、あとで入力できます。\n\n" +
+    rows.map((c) => `${c.label.replace(/\s+/g, "")}：${hint(c)}${hint(c) ? "" : note(c)}`).join("\n") + "\n";
+}
+function fillTemplate() {
+  if (!(state.candidates || []).some((c) => c.recommended)) return false;
+  $("#memo").value = templateText(); $("#memo").dataset.sample = "0"; $("#memo").dataset.template = "1";
+  return true;
+}
 function resetRun() { state.run = null; $("#fields").innerHTML = ""; $("#checklist").innerHTML = ""; }
 
 async function discover() {
@@ -96,7 +129,8 @@ async function discover() {
     const fd = new FormData(); fd.append("file", f); fd.append("mode", m);
     const d = await api("/api/discover", { method: "POST", body: fd });
     if (my !== state.seq) return "stale";
-    state.discoveryId = d.discovery_id; state.discoveryKey = key; resetRun();
+    state.discoveryId = d.discovery_id; state.discoveryKey = key; state.candidates = d.candidates || []; resetRun();
+    if (!$("#memo").value.trim()) fillTemplate();
     return `記入欄の候補を ${d.candidates.length} か所見つけました。`;
   }
   const id = $("#sample").value, key = `sample:${id}:${m}`;
@@ -105,7 +139,7 @@ async function discover() {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ demo_id: id, mode: m }),
   });
   if (my !== state.seq) return "stale";
-  state.discoveryId = d.discovery_id; state.discoveryKey = key; resetRun();
+  state.discoveryId = d.discovery_id; state.discoveryKey = key; state.candidates = d.candidates || []; resetRun();
   if (!$("#memo").value.trim() || $("#memo").dataset.sample === "1") { $("#memo").value = d.memo_text || ""; $("#memo").dataset.sample = "1"; }
   return `「${d.title}」を読み込みました。記入欄の候補 ${d.candidates.length} か所。`;
 }
@@ -119,16 +153,25 @@ $("#toStep3").addEventListener("click", async () => {
     if (r === "stale") return;
     msg("#msg2", r || "");
     go(3);
+    if ($("#memo").dataset.template === "1") {
+      msg("#msg3", "📝 書式から記入メモのひな形を作りました。「：」の右側に書いて「AIに記入してもらう」を押してください。");
+      $("#memo").focus(); return;
+    }
     if (auto() && $("#memo").value.trim()) { setBusy(false); await runFill(); return; }
   } catch (e) { msg("#msg2", "読み込めませんでした：" + e.message, true); }
   finally { setBusy(false); }
 });
 
 // STEP 3 — fill (おまかせ: then self-check and jump to the human checks)
+// the template's guide text (instruction line and "←（例：…）" notes) is never sent as material
+// and a template line left empty ("所属機関：") is dropped, so the next line can never be read as its value
+const cleanMemo = (s) => s.replace(/^【記入メモ】.*$/m, "").replace(/[ \u3000]*←（[^\n]*$/gm, "")
+  .split("\n").filter((ln) => !/^[^：:\n]{1,40}[：:][ \u3000]*$/.test(ln)).join("\n").trim();
 async function runFill() {
   if (state.fromChat || !state.discoveryId) return msg("#msg3", state.fromChat ? "材料を変えて記入し直すときは、元のチャットで依頼してください。" : "先に STEP 2 で書式を入れてください。", true);
-  const memo = $("#memo").value.trim();
-  if (!memo) return msg("#msg3", "材料の文章を貼り付けてください。", true);
+  const memo = cleanMemo($("#memo").value);
+  if (!memo || !/：\s*\S/.test(memo) && $("#memo").dataset.template === "1")
+    return msg("#msg3", "メモの「：」の右側に、少なくとも1つ書いてください。", true);
   if (state.busy) return;
   setBusy(true); msg("#msg3", "");
   const my = ++state.seq;
