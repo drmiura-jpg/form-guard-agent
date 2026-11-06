@@ -136,6 +136,8 @@ def load_dotenv(path: Optional[Path] = None) -> None:
 
 
 def live_credentials_present() -> bool:
+    if os.environ.get("FORM_GUARD_FORCE_DEMO") == "1":  # e.g. a temporary public tunnel: never spend API credit
+        return False
     return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
 
 
