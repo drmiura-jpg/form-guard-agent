@@ -36,7 +36,7 @@ function setBusy(on) {
   $$("button").forEach((b) => { if (b.id !== "toStep2" || !on) b.disabled = on; });
   $("#sample").disabled = on; $("#file").disabled = on;
   $$("#fields input[data-slot]").forEach((i) => { i.disabled = on; });
-  if (!on && state.fromChat) $("#runBtn").disabled = true;
+  if (!on && state.fromChat) { $("#runBtn").disabled = true; $("#makeTemplate").disabled = true; }
   if (!on) $("#approveBtn").disabled = !(state.run && state.run.can_approve && state.run.report.overall_status === "PASS");
 }
 function go(n) {
@@ -81,40 +81,62 @@ $("#toStep2").addEventListener("click", () => go(2));
 // STEP 2 — picking a file / sample also selects its radio; memo samples never leak into an upload
 $("#sample").addEventListener("change", () => { $("#srcSample").checked = true; });
 $("#file").addEventListener("change", () => { $("#srcUpload").checked = true; });
-$("#memo").addEventListener("input", () => { $("#memo").dataset.sample = "0"; });
+// Memo template: one "項目名：" line per recommended cell (today's date for the filing date). The guide (examples,
+// character limits, choices) is shown OUTSIDE the textarea, so nothing but what the user wrote is ever sent.
+// dataset: template=1 (made from the fields of memoFor), edited=1 (the user typed in it), sample=1 (sample memo).
+const memoEl = () => $("#memo");
+memoEl().addEventListener("input", () => { memoEl().dataset.sample = "0"; memoEl().dataset.edited = "1"; });
+const isUntouchedTemplate = () => memoEl().dataset.template === "1" && memoEl().dataset.edited !== "1";
 $("#makeTemplate").addEventListener("click", () => {
-  if (state.busy) return;
-  if ($("#memo").value.trim() && $("#memo").dataset.template !== "1" && !confirm("いまのメモを、書式から作ったひな形に置き換えますか？")) return;
+  if (state.busy || state.fromChat) return;
+  if (memoEl().value.trim() && !isUntouchedTemplate() && !confirm("いまのメモを、書式から作ったひな形に置き換えますか？（書いた内容は消えます）")) return;
   const ok = fillTemplate();
-  msg("#msg3", ok ? "📝 書式の記入欄からメモのひな形を作りました。「：」の右側に書いてください。" : "先に STEP 2 で書式を入れてください。", !ok);
+  msg("#msg3", ok ? "📝 書式の記入欄から「項目名：」の一覧を作りました。「：」の右側に書いてください。"
+    : !state.discoveryId ? "先に STEP 2 で書式を入れてください。"
+    : "この書式には、ひな形にできる記入欄（おすすめの欄）が見つかりませんでした。詳しい画面（右上のリンク）で欄を選んでください。", !ok);
 });
 
 const WD = "日月火水木金土";
 function todayJa() { const d = new Date(); return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日（${WD[d.getDay()]}）`; }
-function templateText() {
-  const rows = (state.candidates || []).filter((c) => c.recommended);
-  const hint = (c) => {
-    const f = c.required_format || "";
-    if (/申請日|届出日|提出日|記入日/.test(c.label) && /date/.test(f)) return todayJa();
-    return "";
-  };
-  const note = (c) => {
-    const f = c.required_format || "", parts = [];
-    if (f === "wareki_date") parts.push("例：2026年11月10日（火）");
-    if (f === "wareki_period") parts.push("例：2026年11月16日（月）から2026年11月27日（金）まで");
-    if (f === "yen") parts.push("例：48,000円");
-    if (f === "person_name") parts.push("氏名だけ");
-    if (f === "choice") parts.push("様式の選択肢から1つ");
-    if (c.max_chars) parts.push(`${c.max_chars}字以内`);
-    return parts.length ? `　←（${parts.join("・")}）` : "";
-  };
-  return "【記入メモ】このメモの「：」の右側に書いてください。書かなかった欄は空欄のまま、あとで入力できます。\n\n" +
-    rows.map((c) => `${c.label.replace(/\s+/g, "")}：${hint(c)}${hint(c) ? "" : note(c)}`).join("\n") + "\n";
+const normLabel = (s) => String(s || "").replace(/[\s\u3000]+/g, "");
+const FILING_DATE = /^(?:提出|申請|届出|届け出|申込|申し込み|記入|作成)(?:年月)?日$/;  // exact label only (never 前回申請日)
+function templateRows() {
+  return (state.candidates || []).filter((c) => c.recommended).map((c) => {
+    const f = c.required_format || "", label = normLabel(c.label), notes = [];
+    if (f === "wareki_date" || f === "date") notes.push("例：2026年11月10日（火）");
+    if (f === "wareki_period") notes.push("例：2026年11月16日（月）から2026年11月27日（金）まで");
+    if (f === "yen") notes.push("例：48,000円");
+    if (f === "person_name") notes.push("氏名だけ");
+    if (f === "choice") {
+      const cons = c.constraints || {}, opts = cons.allowed_values || [];
+      notes.push(opts.length ? `${opts.join("／")}${cons.multi_select ? " から選ぶ（複数可）" : " から1つ"}` : "様式の選択肢から選ぶ");
+    }
+    if (c.max_chars) notes.push(`${c.max_chars}字以内`);
+    if (/\d$/.test(label) && c.section) notes.push(`様式の「${c.section}」の欄`);
+    const today = FILING_DATE.test(label) && /date/.test(f) ? todayJa() : "";
+    return { label, today, notes };
+  });
 }
 function fillTemplate() {
-  if (!(state.candidates || []).some((c) => c.recommended)) return false;
-  $("#memo").value = templateText(); $("#memo").dataset.sample = "0"; $("#memo").dataset.template = "1";
+  const rows = templateRows();
+  if (!rows.length) return false;
+  memoEl().value = rows.map((r) => `${r.label}：${r.today}`).join("\n") + "\n";
+  Object.assign(memoEl().dataset, { sample: "0", template: "1", edited: "0", memoFor: state.discoveryKey });
+  state.templateLabels = rows.map((r) => r.label);
+  $("#memoGuide").innerHTML = "<b>書き方のヒント</b>（メモ欄には入りません）<ul>" + rows.map((r) =>
+    `<li>${esc(r.label)}${r.today ? "：今日の日付を入れました（違えば直してください）" : r.notes.length ? "：" + esc(r.notes.join("・")) : ""}</li>`).join("") +
+    "</ul>「項目名：」のあとに何も書いていない行は空欄として扱い、あとで STEP 4 で入力できます。値は「：」と同じ行に書いてください。";
   return true;
+}
+function clearTemplateState() { Object.assign(memoEl().dataset, { template: "0", edited: "0" }); state.templateLabels = []; $("#memoGuide").innerHTML = ""; }
+// only the empty lines of the template's own labels are dropped; any other memo is sent exactly as written
+function cleanMemo(s) {
+  if (memoEl().dataset.template !== "1") return s.trim();
+  const known = new Set(state.templateLabels || []);
+  return s.split("\n").filter((ln) => {
+    const m = ln.match(/^(.+?)[：:][\s\u3000]*$/);
+    return !(m && known.has(normLabel(m[1])));
+  }).join("\n").trim();
 }
 function resetRun() { state.run = null; $("#fields").innerHTML = ""; $("#checklist").innerHTML = ""; }
 
@@ -123,14 +145,16 @@ async function discover() {
   if (src() === "upload") {
     const f = $("#file").files[0];
     if (!f) throw new Error("様式ファイルを選んでください。");
-    if ($("#memo").dataset.sample === "1") { $("#memo").value = ""; $("#memo").dataset.sample = "0"; }
+    if (memoEl().dataset.sample === "1") { memoEl().value = ""; memoEl().dataset.sample = "0"; }
     const key = `upload:${f.name}:${f.size}:${f.lastModified}:${m}`;
     if (state.discoveryId && state.discoveryKey === key) return null;
     const fd = new FormData(); fd.append("file", f); fd.append("mode", m);
     const d = await api("/api/discover", { method: "POST", body: fd });
     if (my !== state.seq) return "stale";
     state.discoveryId = d.discovery_id; state.discoveryKey = key; state.candidates = d.candidates || []; resetRun();
-    if (!$("#memo").value.trim()) fillTemplate();
+    if (!memoEl().value.trim() || isUntouchedTemplate()) { if (!fillTemplate()) { memoEl().value = ""; clearTemplateState(); } }
+    else if (memoEl().dataset.memoFor && memoEl().dataset.memoFor !== key)
+      state.memoWarning = "⚠️ 前の書式のために書いたメモが残っています。この書式に合っているか確かめてください（「📝 ひな形を作る」で作り直せます）。";
     return `記入欄の候補を ${d.candidates.length} か所見つけました。`;
   }
   const id = $("#sample").value, key = `sample:${id}:${m}`;
@@ -140,7 +164,10 @@ async function discover() {
   });
   if (my !== state.seq) return "stale";
   state.discoveryId = d.discovery_id; state.discoveryKey = key; state.candidates = d.candidates || []; resetRun();
-  if (!$("#memo").value.trim() || $("#memo").dataset.sample === "1") { $("#memo").value = d.memo_text || ""; $("#memo").dataset.sample = "1"; }
+  if (!memoEl().value.trim() || memoEl().dataset.sample === "1" || isUntouchedTemplate()) {
+    memoEl().value = d.memo_text || ""; clearTemplateState(); Object.assign(memoEl().dataset, { sample: "1", memoFor: key });
+  } else if (memoEl().dataset.memoFor && memoEl().dataset.memoFor !== key)
+    state.memoWarning = "⚠️ 前の書式のために書いたメモが残っています。この書式に合っているか確かめてください。";
   return `「${d.title}」を読み込みました。記入欄の候補 ${d.candidates.length} か所。`;
 }
 
@@ -153,9 +180,10 @@ $("#toStep3").addEventListener("click", async () => {
     if (r === "stale") return;
     msg("#msg2", r || "");
     go(3);
-    if ($("#memo").dataset.template === "1") {
-      msg("#msg3", "📝 書式から記入メモのひな形を作りました。「：」の右側に書いて「AIに記入してもらう」を押してください。");
-      $("#memo").focus(); return;
+    if (state.memoWarning) { msg("#msg3", state.memoWarning, true); state.memoWarning = ""; return; }
+    if (isUntouchedTemplate()) {
+      msg("#msg3", "📝 書式から「項目名：」の一覧を作りました。「：」の右側に書いて「AIに記入してもらう」を押してください。");
+      memoEl().focus(); return;
     }
     if (auto() && $("#memo").value.trim()) { setBusy(false); await runFill(); return; }
   } catch (e) { msg("#msg2", "読み込めませんでした：" + e.message, true); }
@@ -163,15 +191,11 @@ $("#toStep3").addEventListener("click", async () => {
 });
 
 // STEP 3 — fill (おまかせ: then self-check and jump to the human checks)
-// the template's guide text (instruction line and "←（例：…）" notes) is never sent as material
-// and a template line left empty ("所属機関：") is dropped, so the next line can never be read as its value
-const cleanMemo = (s) => s.replace(/^【記入メモ】.*$/m, "").replace(/[ \u3000]*←（[^\n]*$/gm, "")
-  .split("\n").filter((ln) => !/^[^：:\n]{1,40}[：:][ \u3000]*$/.test(ln)).join("\n").trim();
 async function runFill() {
   if (state.fromChat || !state.discoveryId) return msg("#msg3", state.fromChat ? "材料を変えて記入し直すときは、元のチャットで依頼してください。" : "先に STEP 2 で書式を入れてください。", true);
-  const memo = cleanMemo($("#memo").value);
-  if (!memo || !/：\s*\S/.test(memo) && $("#memo").dataset.template === "1")
-    return msg("#msg3", "メモの「：」の右側に、少なくとも1つ書いてください。", true);
+  if (isUntouchedTemplate()) return msg("#msg3", "メモの「：」の右側に、分かるところを書いてから押してください。", true);
+  const memo = cleanMemo(memoEl().value);
+  if (!memo) return msg("#msg3", "材料の文章を書くか貼り付けてください。", true);
   if (state.busy) return;
   setBusy(true); msg("#msg3", "");
   const my = ++state.seq;
@@ -394,7 +418,7 @@ go(1);
     state.run = await api(`/api/runs/${encodeURIComponent(runId)}`);
     state.fromChat = true;
     $("#memo").value = ((state.run.memo || {}).text) || ""; $("#memo").readOnly = true; $("#memo").dataset.sample = "0";
-    $("#runBtn").disabled = true;
+    $("#runBtn").disabled = true; $("#makeTemplate").disabled = true;
     msg("#msg3", "この下書きは Claude とのチャットで作られました。材料を変えて記入し直すときは、元のチャットで依頼してください（欄ごとの修正は STEP 4 でできます）。");
     renderReview();
     [1, 2, 3].forEach(markAuto);

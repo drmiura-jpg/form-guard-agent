@@ -128,7 +128,8 @@
     <h2>STEP 3　材料を渡す</h2>
     <p class="lead">書式に書いてほしい内容を、メモ・メール本文・箇条書きなど、どんな形でもよいので貼り付けてください。AI はこの文章にあることだけを書きます（書いていないことは推測せず、空欄のまま確認待ちにします）。</p>
     <textarea id="memo" placeholder="例）申請日：2026年11月10日（火）&#10;申請者：山田 太郎（材料工学研究室 准教授）&#10;利用目的：…"></textarea>
-    <div class="row"><button id="makeTemplate">📝 書式からメモのひな形を作る</button><span class="hint">書式の記入欄を読み取って「項目名：」の一覧を作ります。申請日は今日の日付が入ります。</span></div>
+    <div class="row"><button id="makeTemplate">📝 ひな形を作る（書式の項目一覧）</button><span class="hint">書式の記入欄を読み取って「項目名：」の一覧を自動で作ります（申請日・提出日などには今日の日付）。氏名・目的などの中身は、あなたが書くか、メール等を貼ってください。</span></div>
+    <div class="hint" id="memoGuide"></div>
     <div class="row"><button data-back="2">← 戻る</button><button class="primary" id="runBtn">AIに記入してもらう ✍️</button></div>
     <div class="progress" id="progress"></div>
     <div class="msg" id="msg3"></div>
