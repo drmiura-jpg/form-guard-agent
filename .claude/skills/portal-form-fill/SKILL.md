@@ -90,7 +90,8 @@ human input. CLI: `python -m form_guard.cli --verify ORIGINAL FILLED --memo MEMO
 Open the `review_url` from the fill result (`http://127.0.0.1:8000/?run_id=…`) in Chrome (Claude in Chrome: a new
 tab). The web app re-verifies the exact draft and shows the visual diff, the sources and the checklist. Tell the user
 that a named reviewer must confirm every item and approve; then the download unlocks. Do not tick the checklist and
-do not press 承認 yourself.
+do not press 承認 yourself. For first-time users, also give the guided page `http://127.0.0.1:8000/start?run_id=…`
+(it opens straight at the human checks; see docs/CHAT_GUIDE_JA.md).
 
 ## Rules
 

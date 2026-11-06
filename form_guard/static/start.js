@@ -252,3 +252,23 @@ $("#approveBtn").addEventListener("click", async () => {
 });
 
 go(1);
+
+// Opened from a Claude chat (MCP form_guard_fill → /start?run_id=…): the AI already filled and verified the draft;
+// load it and go straight to the human checks (STEP 4 when something is missing, otherwise STEP 5).
+(async () => {
+  const runId = new URLSearchParams(location.search).get("run_id");
+  if (!runId || !/^\d{8}-\d{6}-[0-9a-f]{6}$/.test(runId)) return;
+  setBusy(true);
+  try {
+    state.run = await api(`/api/runs/${encodeURIComponent(runId)}`);
+    renderReview();
+    [1, 2, 3].forEach(markAuto);
+    const rep = state.run.report || {};
+    $("#progress").textContent = "🤖 Claude がチャットから記入・自己チェックした下書きを読み込みました。";
+    if (!(rep.pending_slots || []).length && rep.overall_status === "PASS" && state.run.can_approve) { prepareStep5(); go(5); }
+    else go(4);
+    [1, 2, 3].forEach(markAuto);
+  } catch (e) {
+    $("#aiStatus").insertAdjacentHTML("beforeend", `<span class="pill ng">下書き ${esc(runId)} を読み込めません：${esc(e.message)}</span>`);
+  } finally { setBusy(false); }
+})();
