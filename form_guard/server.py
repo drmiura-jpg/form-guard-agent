@@ -66,7 +66,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Literal, Optional, Union
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
@@ -340,6 +340,19 @@ def _access_key_ok(authorization: str) -> bool:
     return secrets.compare_digest(password.encode("utf-8"), key.encode("utf-8"))
 
 
+def _cookie_token(key: str) -> str:
+    """The cookie carries an ASCII (URL-safe Base64) form of the passphrase, so non-ASCII passphrases work."""
+    return base64.urlsafe_b64encode(key.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def _cookie_ok(token: str) -> bool:
+    key = os.environ.get("FORM_GUARD_ACCESS_KEY", "")
+    if not key:
+        return True
+    return bool(token) and secrets.compare_digest(token.encode("ascii", "replace"),
+                                                  _cookie_token(key).encode("ascii"))
+
+
 def allowed_hosts() -> set[str]:
     extra = os.environ.get("FORM_GUARD_ALLOWED_HOSTS", "")
     return set(LOCAL_HOSTS) | {h.strip().lower() for h in extra.split(",") if h.strip()}
@@ -434,19 +447,33 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
     @app.middleware("http")
     async def security_headers(request, call_next):
         hosts = allowed_hosts()
+        key = os.environ.get("FORM_GUARD_ACCESS_KEY", "")
         if _hostname(request.headers.get("host", "")) not in hosts:  # DNS rebinding
             resp = JSONResponse({"detail": "forbidden host"}, status_code=403)
-        elif not _access_key_ok(request.headers.get("authorization", "")):
-            # Optional shared passphrase (FORM_GUARD_ACCESS_KEY) for a temporary public tunnel; any user name.
-            resp = JSONResponse({"detail": "passphrase required"}, status_code=401,
-                                headers={"WWW-Authenticate": 'Basic realm="Form-Guard demo"'})
         elif request.method in UNSAFE_METHODS and "origin" in request.headers and \
                 _origin_host(request.headers["origin"]) not in hosts:
             resp = JSONResponse({"detail": "forbidden origin"}, status_code=403)  # cross-site form / fetch
+        elif key and request.method in ("GET", "HEAD") and "key" in request.query_params:
+            # ?key=<passphrase> link for browsers that never show the Basic prompt: set a cookie, drop only "key"
+            if not secrets.compare_digest(request.query_params["key"].encode("utf-8"), key.encode("utf-8")):
+                resp = JSONResponse({"detail": "passphrase required"}, status_code=401,
+                                    headers={"WWW-Authenticate": 'Basic realm="Form-Guard demo"'})
+            else:
+                rest = urlencode([(k, v) for k, v in request.query_params.multi_items() if k != "key"])
+                target = "/" + request.url.path.lstrip("/\\")  # never "//host" (open redirect)
+                resp = Response(status_code=303, headers={"Location": target + ("?" + rest if rest else ""),
+                                                          "Cache-Control": "no-store"})
+                resp.set_cookie("fg_key", _cookie_token(key), httponly=True, secure=True,
+                                samesite="lax", max_age=12 * 3600)
+        elif key and not (_access_key_ok(request.headers.get("authorization", "")) or
+                          _cookie_ok(request.cookies.get("fg_key", ""))):
+            # Optional shared passphrase (FORM_GUARD_ACCESS_KEY) for a temporary public tunnel; any user name.
+            resp = JSONResponse({"detail": "passphrase required"}, status_code=401,
+                                headers={"WWW-Authenticate": 'Basic realm="Form-Guard demo"'})
         else:
             resp = await call_next(request)
         resp.headers.setdefault("X-Content-Type-Options", "nosniff")
-        if request.url.path == "/" or request.url.path.startswith("/static/"):
+        if request.url.path in ("/", "/start") or request.url.path.startswith("/static/"):
             resp.headers["Cache-Control"] = "no-cache"  # always revalidate the UI (ETag) so updates show up
         resp.headers.setdefault("Referrer-Policy", "no-referrer")
         resp.headers.setdefault("Content-Security-Policy",
@@ -557,6 +584,11 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
     @app.get("/", response_class=HTMLResponse)
     def index():
         return FileResponse(STATIC_DIR / "index.html", media_type="text/html; charset=utf-8")
+
+    @app.get("/start", response_class=HTMLResponse)
+    def start():
+        """Guided 5-step page: connect AI → upload form → paste material → review → approve & download."""
+        return FileResponse(STATIC_DIR / "start.html", media_type="text/html; charset=utf-8")
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 

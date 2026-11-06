@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Form-Guard かんたん5ステップ</title>
+<link rel="icon" href="data:,">
+<style>
+  :root { --ink:#111; --sub:#555; --line:#ddd; --ok:#0a8a3a; --warn:#c77700; --ng:#c62828; --accent:#1a56db; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:"Segoe UI","Hiragino Sans","Yu Gothic UI",sans-serif; color:var(--ink); background:#f6f7f9; }
+  header { background:#fff; border-bottom:1px solid var(--line); padding:14px 20px; display:flex; justify-content:space-between; align-items:center; }
+  header h1 { font-size:18px; margin:0; }
+  header a { font-size:13px; color:var(--sub); }
+  main { max-width:960px; margin:0 auto; padding:20px; }
+  .banner { background:#fff4e5; border:1px solid #f3c27a; color:#7a4a00; border-radius:10px; padding:10px 14px; margin-bottom:14px; font-size:14px; }
+  ol.steps { list-style:none; display:flex; gap:6px; padding:0; margin:0 0 18px; }
+  ol.steps li { flex:1; text-align:center; padding:10px 4px; border-radius:8px; background:#e9ecf1; color:var(--sub); font-size:13px; }
+  ol.steps li b { display:block; font-size:15px; }
+  ol.steps li.on { background:var(--accent); color:#fff; }
+  ol.steps li.done { background:#d7ecdf; color:var(--ok); }
+  ol.steps li.auto { background:#e7defa; color:#5b2bb5; }
+  section.card { background:#fff; border:1px solid var(--line); border-radius:12px; padding:22px; display:none; }
+  section.card.on { display:block; }
+  h2 { margin:0 0 6px; font-size:20px; }
+  p.lead { margin:0 0 16px; color:var(--sub); }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin:10px 0; }
+  button { font-size:15px; padding:10px 18px; border-radius:8px; border:1px solid var(--line); background:#fff; cursor:pointer; }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  button.auto { background:#5b2bb5; color:#fff; border-color:#5b2bb5; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  .pill { display:inline-block; padding:3px 9px; border-radius:999px; font-size:12px; margin:2px 2px 0 0; }
+  .pill.ok { background:#d7ecdf; color:var(--ok); } .pill.warn { background:#fdecd2; color:var(--warn); } .pill.ng { background:#fde0e0; color:var(--ng); }
+  .choice { border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin:8px 0; display:flex; gap:10px; align-items:flex-start; }
+  .choice input[type=radio], .choice input[type=checkbox] { margin-top:4px; }
+  .choice small { color:var(--sub); display:block; }
+  textarea { width:100%; min-height:220px; font-size:14px; padding:10px; border-radius:8px; border:1px solid var(--line); font-family:inherit; }
+  input[type=text] { font-size:14px; padding:8px; border-radius:6px; border:1px solid var(--line); width:100%; }
+  input[type=text].dirty { border-color:var(--warn); background:#fffaf0; }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th, td { border-bottom:1px solid var(--line); padding:8px 6px; text-align:left; vertical-align:top; }
+  th { background:#fafbfc; font-weight:600; }
+  tr.attention td { background:#fffaf0; }
+  td.src { color:var(--sub); font-size:12px; }
+  ul.checklist { list-style:none; padding:0; margin:8px 0; }
+  ul.checklist li { border:1px solid var(--line); border-radius:8px; padding:8px 10px; margin:6px 0; }
+  ul.checklist li.attention { border-color:#f3c27a; background:#fffaf0; }
+  ul.checklist label { display:flex; gap:8px; align-items:flex-start; cursor:pointer; }
+  .msg { margin-top:10px; font-size:14px; } .msg.err { color:var(--ng); }
+  .big { font-size:24px; font-weight:700; margin:4px 0; }
+  .hint { font-size:13px; color:var(--sub); }
+  .progress { font-size:14px; color:#5b2bb5; margin:8px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>📝 Form-Guard かんたん5ステップ</h1>
+  <a href="/">詳しい画面（審査・検証用）へ →</a>
+</header>
+<main>
+  <div id="banner"></div>
+  <ol class="steps" id="steps">
+    <li data-s="1"><b>STEP 1</b>AIとつなぐ</li>
+    <li data-s="2"><b>STEP 2</b>書式を入れる</li>
+    <li data-s="3"><b>STEP 3</b>材料を渡す</li>
+    <li data-s="4"><b>STEP 4</b>AIの記入を確認</li>
+    <li data-s="5"><b>STEP 5</b>できあがり</li>
+  </ol>
+
+  <section class="card" data-s="1">
+    <h2>STEP 1　AIとつなぐ</h2>
+    <p class="lead">記入を担当する AI と、進め方を選びます。</p>
+    <div id="aiStatus" class="row"><span class="hint">AI の設定を確認しています…</span></div>
+    <label class="choice"><input type="radio" name="mode" value="live" id="modeLive"><div><b>Claude（本番の AI）で記入する</b><small>材料の文章と様式の空欄の情報を Anthropic の API に送ります。欄ごとに Haiku / Sonnet / Opus を自動で使い分けます。</small></div></label>
+    <label class="choice"><input type="radio" name="mode" value="demo" id="modeDemo"><div><b>お試しモード（APIキー不要）</b><small>外部には送らず、決まったルールで材料から値を抜き出します。費用はかかりません。</small></div></label>
+    <label class="choice"><input type="checkbox" id="autoMode" checked><div><b>🤖 おまかせで進める（おすすめ）</b><small>書式と材料を入れたら、AI が空欄探し→記入→自己チェックまで一気に進めます。人が止まるのは「材料にない欄」と「最後の承認」だけです。</small></div></label>
+    <div class="row"><button class="primary" id="toStep2" disabled>次へ：書式を入れる →</button></div>
+  </section>
+
+  <section class="card" data-s="2">
+    <h2>STEP 2　書式を入れる</h2>
+    <p class="lead">記入したい白紙の様式（Word / Excel / PDF）を選びます。手元にない場合は、サンプル様式を使えます。</p>
+    <label class="choice"><input type="radio" name="src" value="upload" id="srcUpload" checked><div><b>自分の様式ファイルをアップロード</b><small>.docx / .xlsx / .pdf（目印のない白紙でも、AI が空欄を見つけます）</small>
+      <div class="row"><input type="file" id="file" accept=".docx,.xlsx,.pdf"></div></div></label>
+    <label class="choice"><input type="radio" name="src" value="sample" id="srcSample"><div><b>サンプル様式を使う（架空の書式）</b><small>はじめての方はこちら。記入例の材料も自動で入ります。</small>
+      <div class="row"><select id="sample">
+        <option value="form4">施設・備品一時使用許可申請書（Word）</option>
+        <option value="form5">防災備蓄品 貸出・返却管理票（Excel）</option>
+        <option value="form6">研究助成申請書（固定PDF）</option>
+      </select> <a href="/portal" target="_blank" rel="noopener">様式をダウンロードできる窓口を見る</a></div></div></label>
+    <div class="row"><button data-back="1">← 戻る</button><button class="primary" id="toStep3">次へ：材料を渡す →</button></div>
+    <div class="msg" id="msg2"></div>
+  </section>
+
+  <section class="card" data-s="3">
+    <h2>STEP 3　材料を渡す</h2>
+    <p class="lead">書式に書いてほしい内容を、メモ・メール本文・箇条書きなど、どんな形でもよいので貼り付けてください。AI はこの文章にあることだけを書きます（書いていないことは推測せず、空欄のまま確認待ちにします）。</p>
+    <textarea id="memo" placeholder="例）申請日：2026年11月10日（火）&#10;申請者：山田 太郎（材料工学研究室 准教授）&#10;利用目的：…"></textarea>
+    <div class="row"><button data-back="2">← 戻る</button><button class="primary" id="runBtn">AIに記入してもらう ✍️</button></div>
+    <div class="progress" id="progress"></div>
+    <div class="msg" id="msg3"></div>
+  </section>
+
+  <section class="card" data-s="4">
+    <h2>STEP 4　AIの記入を確認</h2>
+    <p class="lead">AI が書いた値と、その根拠（材料のどこから取ったか）です。🟧 の行は AI の自信が低いか注意がある欄なので、優先して見てください。違っていたら書き換えて「反映して再検査」を押します。</p>
+    <div class="row" id="checkSummary"></div>
+    <table><thead><tr><th style="width:24%">項目</th><th style="width:38%">記入する値</th><th>根拠（材料からの引用）・注意</th></tr></thead><tbody id="fields"></tbody></table>
+    <div class="row"><button id="saveEdits">反映して再検査</button><span class="hint">反映するたびに、指定欄以外が変わっていないかを機械で検査し直します。</span></div>
+    <div class="row"><button data-back="3">← 材料に戻る</button><button class="primary" id="toStep5">次へ：できあがり →</button></div>
+    <div class="msg" id="msg4"></div>
+  </section>
+
+  <section class="card" data-s="5">
+    <h2>STEP 5　できあがり（人の最終確認）</h2>
+    <p class="lead">下の確認項目を1つずつ確かめてチェックし、承認するとダウンロードできます（承認前はダウンロードできません）。</p>
+    <div id="finalSummary"></div>
+    <ul class="checklist" id="checklist"></ul>
+    <div class="row" style="max-width:420px"><input type="text" id="reviewer" placeholder="確認した人の名前"></div>
+    <div class="row"><button data-back="4">← 確認に戻る</button><button class="primary" id="approveBtn">承認してダウンロード ⬇️</button></div>
+    <p class="hint">ダウンロード後は、Word・Excel・PDF ビューアーで開いて、表示と印刷の見た目も確認してください。</p>
+    <div class="msg" id="msg5"></div>
+  </section>
+</main>
+<script src="/static/start.js"></script>
+</body>
+</html>

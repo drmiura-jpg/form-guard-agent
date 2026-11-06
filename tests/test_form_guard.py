@@ -1456,6 +1456,36 @@ def test_tunnel_access_key_and_allowed_host(api, monkeypatch):
     assert api.get("/api/health", headers={"Host": tun, "Authorization": bad}).status_code == 401
     assert api.get("/api/health", headers={"Host": tun, "Authorization": good}).status_code == 200
     assert api.get("/api/health", headers={"Host": "evil.example.com", "Authorization": good}).status_code == 403
+    assert api.get("/?key=wrong", headers={"Host": tun}, follow_redirects=False).status_code == 401
+    link = api.get("/?key=s3cret", headers={"Host": tun}, follow_redirects=False)
+    assert link.status_code == 303 and "fg_key=" in link.headers["set-cookie"]
+    assert "samesite=lax" in link.headers["set-cookie"].lower() and "s3cret" not in link.headers["set-cookie"]
+    cookie = link.headers["set-cookie"].split(";")[0]
+    assert api.get("/api/health", headers={"Host": tun, "Cookie": cookie}).status_code == 200
+    assert api.get("/api/health", headers={"Host": tun, "Cookie": "fg_key=bogus"}).status_code == 401
+    # only "key" is dropped from the redirect; "//" can never become an external redirect
+    keep = api.get("/start?run_id=20261103-101500-a1b2c3&key=s3cret&x=1", headers={"Host": tun}, follow_redirects=False)
+    assert keep.headers["location"] == "/start?run_id=20261103-101500-a1b2c3&x=1"
+    assert not api.get("//evil.example.com?key=s3cret", headers={"Host": tun},
+                       follow_redirects=False).headers.get("location", "/").startswith("//")
+    # Origin is checked before the passphrase: a cross-site POST with the right key is refused, no cookie is set
+    cross = api.post("/api/runs?key=s3cret", json={}, headers={"Host": tun, "Origin": "https://evil.example.com",
+                                                                "Authorization": good})
+    assert cross.status_code == 403 and "set-cookie" not in cross.headers
+    # a non-ASCII passphrase works through the cookie link
+    monkeypatch.setenv("FORM_GUARD_ACCESS_KEY", "合言葉")
+    jp = api.get("/start?key=合言葉", headers={"Host": tun}, follow_redirects=False)
+    assert jp.status_code == 303
+    assert api.get("/api/health", headers={"Host": tun, "Cookie": jp.headers["set-cookie"].split(";")[0]}).status_code == 200
+
+
+def test_start_page_is_served_without_inline_script(api):
+    page = api.get("/start")
+    assert page.status_code == 200 and '<script src="/static/start.js"></script>' in page.text
+    assert "<script>" not in page.text and "STEP 5" in page.text
+    assert page.headers["cache-control"] == "no-cache"
+    assert api.get("/static/start.js").status_code == 200
+    assert 'href="/start"' in api.get("/").text
 
 
 def test_r1_o6_server_refuses_foreign_hosts_and_cross_site_origins(api):
