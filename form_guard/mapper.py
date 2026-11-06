@@ -145,6 +145,10 @@ def resolve_mode(mode: str = "auto") -> str:
     mode = (mode or "auto").lower()
     if mode not in ("auto", "live", "demo"):
         raise ValueError("mode must be auto, live or demo")
+    if os.environ.get("FORM_GUARD_FORCE_DEMO") == "1":
+        if mode == "live":
+            raise LiveEngineError("live mode is disabled on this server (FORM_GUARD_FORCE_DEMO=1) / 一時公開中は本番の AI を使えません")
+        return "demo"
     if mode == "auto":
         load_dotenv()
         return "live" if live_credentials_present() else "demo"
@@ -827,12 +831,17 @@ class ClaudeEngine:
 
     @property
     def client(self):
+        if os.environ.get("FORM_GUARD_FORCE_DEMO") == "1":
+            raise LiveEngineError("live mode is disabled on this server (FORM_GUARD_FORCE_DEMO=1) / 一時公開中は本番の AI を使えません")
         if self._client is None:
             try:
                 import anthropic
             except ImportError as exc:  # pragma: no cover
                 raise LiveEngineError("the anthropic package is not installed") from exc
+            load_dotenv()  # the key may exist only in the git-ignored .env (FORM_GUARD_API_KEY)
             api_key = os.environ.get("FORM_GUARD_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+            if not api_key and not os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+                raise LiveEngineError("no Claude API key: run pwsh scripts/setup_api_key.ps1 (FORM_GUARD_API_KEY in .env)")
             self._client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
         return self._client
 
@@ -867,6 +876,8 @@ class ClaudeEngine:
     def _call(self, thread: list[dict[str, Any]], model: str, task: str, system: str = SYSTEM_PROMPT,
               schema: Optional[dict[str, Any]] = None, key: str = "fields",
               slots: Optional[list[str]] = None) -> dict[str, Any]:
+        if os.environ.get("FORM_GUARD_FORCE_DEMO") == "1":
+            raise LiveEngineError("live mode is disabled on this server (FORM_GUARD_FORCE_DEMO=1) / 一時公開中は本番の AI を使えません")
         try:
             import anthropic
 
@@ -1644,6 +1655,8 @@ def advance_notice_warnings(slots: list[FormSlot], mappings: list[FieldMapping],
 def make_engine(mode: str, model: Optional[str] = None, client: Any = None, effort: Optional[str] = None,
                 model_tier: Optional[str] = None):
     if mode == "live":
+        if os.environ.get("FORM_GUARD_FORCE_DEMO") == "1" and client is None:
+            raise LiveEngineError("live mode is disabled on this server (FORM_GUARD_FORCE_DEMO=1) / 一時公開中は本番の AI を使えません")
         if client is None:
             load_dotenv()
         return ClaudeEngine(model=model, client=client, effort=effort, model_tier=model_tier)

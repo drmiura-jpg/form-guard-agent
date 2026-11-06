@@ -604,7 +604,7 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
 
     @app.get("/api/health")
     def health():
-        live = live_credentials_present() or app.state.client is not None
+        live = (live_credentials_present() or app.state.client is not None) and os.environ.get("FORM_GUARD_FORCE_DEMO") != "1"
         return {"status": "ok", "version": __version__, "live_available": live,
                 "default_mode": "live" if live else "demo", "default_model": os.environ.get("FORM_GUARD_MODEL") or DEFAULT_MODEL,
                 "model_tiers": list(MODEL_TIERS),

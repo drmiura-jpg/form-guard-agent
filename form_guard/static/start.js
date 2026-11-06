@@ -4,7 +4,7 @@
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 const LOCAL = ["127.0.0.1", "localhost", "[::1]", "::1"];
-const state = { step: 0, run: null, discoveryId: null, discoveryKey: "", busy: false, seq: 0, modeTouched: false };
+const state = { step: 0, run: null, discoveryId: null, discoveryKey: "", busy: false, seq: 0, modeTouched: false, liveConfirmed: false };
 
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -40,6 +40,7 @@ function setBusy(on) {
   if (!on) $("#approveBtn").disabled = !(state.run && state.run.can_approve && state.run.report.overall_status === "PASS");
 }
 function go(n) {
+  if (state.fromChat && n < 4) n = 4;
   const prev = state.step; state.step = n;
   $$("section.card").forEach((c) => c.classList.toggle("on", +c.dataset.s === n));
   $$("#steps li").forEach((li) => { const s = +li.dataset.s; li.className = s === n ? "on" : s < n ? "done" : ""; });
@@ -49,6 +50,12 @@ function markAuto(n) { $$("#steps li").forEach((li) => { if (+li.dataset.s === n
 const mode = () => (document.querySelector("input[name=mode]:checked") || {}).value || "demo";
 const src = () => document.querySelector("input[name=src]:checked").value;
 const auto = () => $("#autoMode").checked;
+function ensureLiveConfirmed() {
+  if (mode() !== "live" || state.liveConfirmed) return true;
+  const ok = confirm("本番の Claude（Anthropic API・従量課金）へ様式と材料の文章を送って処理します。よろしいですか？（無料のお試しモードにする場合はキャンセルして STEP 1 で切り替えてください）");
+  if (ok) state.liveConfirmed = true;
+  return ok;
+}
 $$("[data-back]").forEach((b) => b.addEventListener("click", () => { if (!state.busy) go(+b.dataset.back); }));
 
 // public tunnel notice: fictional samples only
@@ -57,16 +64,15 @@ if (!LOCAL.includes(location.hostname)) {
   $("#srcSample").checked = true;
 }
 
-// STEP 1 — the user's own choice is never overwritten by a late health reply
+// STEP 1 — default is always free demo mode; live mode is chosen explicitly by the user
 $$("input[name=mode]").forEach((r) => r.addEventListener("change", () => { state.modeTouched = true; }));
 (async () => {
   try {
     const h = await api("/api/health");
     if (h.live_available) {
-      $("#aiStatus").innerHTML = '<span class="pill ok">API キー設定あり（実際の接続は記入時に確認します）</span>';
-      if (!state.modeTouched) $("#modeLive").checked = true;
+      $("#aiStatus").innerHTML = '<span class="pill ok">API キー設定あり（初期選択は無料のお試しモードです。本番の AI を使うときは下で選んでください）</span>';
     } else {
-      $("#aiStatus").innerHTML = '<span class="pill warn">API キー未設定のため、お試しモードで動きます</span>';
+      $("#aiStatus").innerHTML = '<span class="pill warn">お試しモード（無料・API キー不要）で動きます</span>';
       $("#modeLive").disabled = true;
       $("#modeDemo").checked = true;
     }
@@ -141,6 +147,8 @@ function cleanMemo(s) {
 function resetRun() { state.run = null; $("#fields").innerHTML = ""; $("#checklist").innerHTML = ""; }
 
 async function discover() {
+  if (state.fromChat) throw new Error("チャットから開いた下書きです。別の書式は新しい画面から始めてください。");
+  if (!ensureLiveConfirmed()) throw new Error("本番の AI モードの実行をキャンセルしました。");
   const my = ++state.seq, m = mode();
   if (src() === "upload") {
     const f = $("#file").files[0];
@@ -196,6 +204,7 @@ async function runFill() {
   if (isUntouchedTemplate()) return msg("#msg3", "メモの「：」の右側に、分かるところを書いてから押してください。", true);
   const memo = cleanMemo(memoEl().value);
   if (!memo) return msg("#msg3", "材料の文章を書くか貼り付けてください。", true);
+  if (!ensureLiveConfirmed()) return msg("#msg3", "本番の AI モードの実行をキャンセルしました。", true);
   if (state.busy) return;
   setBusy(true); msg("#msg3", "");
   const my = ++state.seq;
@@ -406,7 +415,7 @@ go(1);
 
 // demo video: shown only when the server has it (GET /media/demo.mp4 is not part of the repository)
 fetch("/media/demo.mp4", { headers: { Range: "bytes=0-0" }, credentials: "same-origin" }).then((r) => {
-  if (r.ok) { $("#demoVideo").src = "/media/demo.mp4"; $("#video").hidden = false; }
+  if (r.ok) { $("#demoVideo").src = "/media/demo.mp4"; $("#video").hidden = false; if ($("#videoCta")) $("#videoCta").hidden = false; }
 }).catch(() => {});
 
 // Opened from a Claude chat (MCP form_guard_fill → /start?run_id=…): the AI already filled and verified the draft;
@@ -422,6 +431,8 @@ fetch("/media/demo.mp4", { headers: { Range: "bytes=0-0" }, credentials: "same-o
   try {
     state.run = await api(`/api/runs/${encodeURIComponent(runId)}`);
     state.fromChat = true;
+    if ($("#backToStep3")) $("#backToStep3").hidden = true;
+    if ($("#newStartLink")) $("#newStartLink").hidden = false;
     $("#memo").value = ((state.run.memo || {}).text) || ""; $("#memo").readOnly = true; $("#memo").dataset.sample = "0";
     $("#runBtn").disabled = true; $("#makeTemplate").disabled = true;
     msg("#msg3", "この下書きは Claude とのチャットで作られました。材料を変えて記入し直すときは、元のチャットで依頼してください（欄ごとの修正は STEP 4 でできます）。");

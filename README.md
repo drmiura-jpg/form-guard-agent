@@ -100,6 +100,7 @@ Anything Form-Guard cannot ground in the memo is **never guessed**: it is left f
 > かんたん5ステップ画面 `/start` では form4–form10 の7種類（目印のない様式：Word 3・Excel 3・固定PDF 1）を選べます。
 > 合計10種類。STEP 5「詳細レポートでチェック」で、機械検査のかんたん説明・記入前後の比較・欄ごとの確認チェックを1画面で行います。
 > Claude にチャットで頼む手順は [docs/CHAT_GUIDE_JA.md](docs/CHAT_GUIDE_JA.md)（MCP の結果の `start_url` を開くだけ）。
+> Claude Code での使い方（`/fill-form`・専用 API キー設定 `scripts/setup_api_key.ps1`・費用の区分）は [docs/CLAUDE_CODE_MANUAL_JA.md](docs/CLAUDE_CODE_MANUAL_JA.md)。
 
 ```bash
 python -m venv .venv
@@ -112,8 +113,7 @@ python -m form_guard.cli --serve         # web UI on http://127.0.0.1:8000 (all 
 pytest -v                                # 277 tests
 ```
 
-Requires Python 3.10+. Without `ANTHROPIC_API_KEY` everything runs on the deterministic **offline demo engine**, so the
-whole pipeline is reproducible with zero setup.
+Requires Python 3.10+. Pass `--mode demo` for guaranteed offline execution (no API calls); in `--mode auto`, when neither `FORM_GUARD_API_KEY` nor `ANTHROPIC_API_KEY` is set, everything runs on the deterministic **offline demo engine**, so the whole pipeline is reproducible with zero setup.
 
 **Using the repository's Claude Code setup:**
 - Clone the repository, run the install steps above, and start Claude Code from the repository root, in the shell in which `.venv` is activated (to work from another folder, point `.mcp.json` and `.claude/settings.json` at this environment and at `scripts/hook_guard.py`).
@@ -132,7 +132,10 @@ Set the key in your shell or in a git-ignored `.env` file in the project root:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | – | enables live mode (`--mode auto` picks it up) |
+| `FORM_GUARD_API_KEY` | – | Form-Guard dedicated API key in `.env` (`pwsh scripts/setup_api_key.ps1`; keeps Claude Code Max subscription untouched; `--mode auto` picks it up) |
+| `ANTHROPIC_API_KEY` | – | fallback API key that also enables live mode (`--mode auto` picks it up) |
+| `FORM_GUARD_FORCE_DEMO` | `0` | when `1` (default in `scripts/share_tunnel.ps1`), disables live API calls and forces offline demo mode |
+| `FORM_GUARD_DEMO_VIDEO` | – | optional path to a local `.mp4` walkthrough video served at `GET /media/demo.mp4` on `/start` |
 | `FORM_GUARD_MODEL_TIER` | `auto` | `auto` routes per field (below); `opus` / `sonnet` / `haiku` use one model (CLI: `--model-tier`) |
 | `FORM_GUARD_MODEL_TIERING` | – | `auto` / `off` — the same switch as `--model-tiering` (`off` = one model, Opus, for every call) |
 | `FORM_GUARD_MODEL` | – | pins one model id for every call (CLI: `--model`) |
@@ -624,7 +627,7 @@ pytest -v
 - Web 画面は日本語が既定です（右上で EN に切替）。上部の「🎬 審査員向け 90秒ガイドツアー」の①〜⑤から、①生成AIの作り直し版との視覚比較、②マーカーなし白紙からの空欄発見、③原文根拠のハイライトと推測拒否（483万6千円→4,836,000円、印刷された上限、法人番号は人の入力待ち）、④Claude のモデル使い分けと Claude Code 連携、⑤21項目の構造検査と人間承認ロック、の各画面へ直接移動できます。
 - 3分デモ動画の台本と絵コンテ（日本語ナレーション・175秒。デモ動画のナレーション音声は作成者本人の承諾のもと本人の声から ElevenLabs `https://elevenlabs.io/` で音声合成し、外部のBGM・効果音は不使用。Step 5 の説明用まとめ図では各機関が一般公開している白紙様式3点［`A08` 厚生労働省 `https://www.mhlw.go.jp/stf/seisakunitsuite/bunya/koyou_roudou/roudoukijun/roudouhoken.html`、`L13` 日本政策金融公庫 `https://www.jfc.go.jp/n/service/dl_kokumin.html`、`L39` 法務局 `https://houmukyoku.moj.go.jp/homu/minji79.html`］に合成ダミー値をオフラインで仮記入した構造検証プレビューを掲載）は [docs/DEMO_VIDEO_SCRIPT_JA.md](docs/DEMO_VIDEO_SCRIPT_JA.md) にあり、このガイドツアー（`#tour=1`〜`#tour=5`）に沿って画面をたどります。
 
-- `ANTHROPIC_API_KEY` を設定すると（`.env` も可、Git には含まれません）、`--mode auto` / `--mode live` で Claude を使います。既定の `--model-tier auto` では、定型の欄（和暦日付・期間・桁数・書式・選択肢）と空欄ラベルの分類を `claude-haiku-4-5-20251001`、通常の文章・金額・氏名を `claude-sonnet-5`、長文の要約と検証器に差し戻された後の自己修正を `claude-opus-5-5` が担当します（`--model-tier opus|sonnet|haiku` で固定も可）。
+- `FORM_GUARD_API_KEY`（推奨：`pwsh scripts/setup_api_key.ps1` で `.env` に保存・Claude Code 本体の Max 定額枠と分離）または `ANTHROPIC_API_KEY` を設定すると、`--mode auto` / `--mode live` で Claude を使います（通信しないオフライン実行を固定したいときは `--mode demo` または `FORM_GUARD_FORCE_DEMO=1` を指定します。詳しい手順は [docs/CLAUDE_CODE_MANUAL_JA.md](docs/CLAUDE_CODE_MANUAL_JA.md)）。既定の `--model-tier auto` では、定型の欄（和暦日付・期間・桁数・書式・選択肢）と空欄ラベルの分類を `claude-haiku-4-5-20251001`、通常の文章・金額・氏名を `claude-sonnet-5`、長文の要約と検証器に差し戻された後の自己修正を `claude-opus-5-5` が担当します（`--model-tier opus|sonnet|haiku` で固定も可）。
 - 構造化出力（JSON スキーマ）、adaptive thinking（要約表示）と effort 指定は、`model_capabilities()` の既知モデル表にあるモデルにだけ送ります（表に無いファミリーや将来のバージョンには何も付けません）。モデル別に送信パラメータを切り替えます。確認済みなのはモックによるリクエスト形式で、実APIでの利用可否・対応機能はアカウント権限に依存します。2026-11-03（火）には実APIでの3階層ルーティング実行（ローカルの `.gitignore` 対象 `output/live_smoke_form1/audit_log.json`、run `20261103-164113-f83bad`、コール別明細表は [docs/BUILT_WITH_CLAUDE_CODE.md](docs/BUILT_WITH_CLAUDE_CODE.md) の第6節に掲載）も確認済みです。どの欄をどのモデルが担当したかは監査ログとレポートに残ります。
 - 各欄の `routed_model` / `route_reason` には実際に応答したモデル（自己修正後は `claude-sonnet-5 → claude-opus-5-5 (revision)`）を記録し、オフライン実行では `offline (claude-haiku-4-5-20251001 in live auto)` のように「ライブ auto 時の計画」であることを明示します（API を呼んだとは表示しません。ライブ実行が途中で失敗してオフラインに切り替えた場合は、それまでの API 呼び出しとトークン数を表示します）。
 - Web 画面の「記入値と根拠」で欄ごとに、右上の「モデル」選択（自動：Haiku 4.5 / Sonnet 5 / Opus 5.5、Opus 5.5 のみ・Sonnet 5 のみ・Haiku 4.5 のみ）で実行ごとに切り替えられます。Haiku 4.5 は旧世代のモデルなので、adaptive thinking と effort は送りません。

@@ -6136,9 +6136,14 @@ def test_start_page_explains_every_flag_and_category_and_loads_chat_drafts(api):
 
 
 def test_start_page_media_and_optional_demo_video(api, monkeypatch, tmp_path):
+    from form_guard.mapper import ClaudeEngine, LiveEngineError, make_engine, resolve_mode
     page = api.get("/start").text
+    js = api.get("/static/start.js").text
     for name in ("hero", "step1", "step2", "step3", "step4", "step5"):
         assert f"/static/media/{name}.jpg" in page and api.get(f"/static/media/{name}.jpg").status_code == 200
+    assert "id=\"videoCta\" href=\"#video\" hidden" in page and "$(\"#videoCta\").hidden = false" in js
+    assert "id=\"modeDemo\" checked" in page and "API 従量課金" in page
+    assert "if (state.fromChat && n < 4) n = 4;" in js
     monkeypatch.setenv("FORM_GUARD_DEMO_VIDEO", str(tmp_path / "missing.mp4"))
     assert api.get("/media/demo.mp4").status_code == 404  # the page then keeps the player hidden
     video = tmp_path / "demo.mp4"
@@ -6146,3 +6151,35 @@ def test_start_page_media_and_optional_demo_video(api, monkeypatch, tmp_path):
     monkeypatch.setenv("FORM_GUARD_DEMO_VIDEO", str(video))
     r = api.get("/media/demo.mp4", headers={"Range": "bytes=0-0"})
     assert r.status_code == 206 and r.headers["content-type"] == "video/mp4"
+
+    # R1-A1 / R1-O1: FORM_GUARD_FORCE_DEMO=1 blocks explicit live mode and injected/reused clients
+    monkeypatch.setenv("FORM_GUARD_API_KEY", "sk-ant-test-dummy-key")
+    monkeypatch.setenv("FORM_GUARD_FORCE_DEMO", "1")
+    assert resolve_mode("auto") == "demo"
+    assert api.get("/api/health").json()["live_available"] is False
+    with pytest.raises(LiveEngineError):
+        resolve_mode("live")
+    with pytest.raises(LiveEngineError):
+        make_engine("live")
+    with pytest.raises(LiveEngineError):
+        _ = ClaudeEngine(client=object()).client
+    with pytest.raises(LiveEngineError):
+        ClaudeEngine(client=object())._call([], "claude-sonnet-5", "map")
+    d = api.post("/api/discover/demo", json={"demo_id": "form7", "mode": "demo"}).json()
+    live_res = api.post("/api/runs/from-discovery", json={"discovery_id": d["discovery_id"],
+                                                          "confirmed_targets": "recommended", "mode": "live"})
+    assert live_res.status_code == 422
+
+    # R1-O2: ClaudeEngine().client loads FORM_GUARD_API_KEY from .env in a fresh process
+    monkeypatch.delenv("FORM_GUARD_FORCE_DEMO", raising=False)
+    for k in ("FORM_GUARD_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        monkeypatch.delenv(k, raising=False)
+    (tmp_path / ".env").write_text("FORM_GUARD_API_KEY=sk-ant-from-dotenv\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    import types
+    seen_keys = []
+    monkeypatch.setitem(sys.modules, "anthropic",
+                        types.SimpleNamespace(Anthropic=lambda api_key=None: seen_keys.append(api_key) or {"key": api_key}))
+    eng = ClaudeEngine()
+    assert eng.client == {"key": "sk-ant-from-dotenv"} and seen_keys == ["sk-ant-from-dotenv"]
+    monkeypatch.delenv("FORM_GUARD_API_KEY", raising=False)

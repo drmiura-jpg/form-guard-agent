@@ -1,5 +1,5 @@
 # Temporary public demo URL (Cloudflare quick tunnel) protected by a passphrase.
-# Usage: pwsh scripts/share_tunnel.ps1 [-Port 8000] [-Key <letters and digits>]
+# Usage: pwsh scripts/share_tunnel.ps1 [-Port 8000] [-Key <letters and digits>] [-AllowLive]
 # Open the printed "/start?key=..." link in a browser (it sets a 12-hour cookie), or use the Basic prompt
 # (any user name, password = passphrase). Stop with Ctrl+C. Use only the built-in fictional demo forms while public.
 param(
@@ -8,11 +8,13 @@ param(
     [switch]$AllowLive  # without it the public server never calls the Anthropic API (demo mode only)
 )
 $ErrorActionPreference = "Stop"
-Set-Location (Split-Path $PSScriptRoot -Parent)  # repository root, wherever the script is started from
+Push-Location (Split-Path $PSScriptRoot -Parent)  # repository root, wherever the script is started from
 if (-not (Get-Command cloudflared -ErrorAction SilentlyContinue)) {
+    Pop-Location
     throw "cloudflared が見つかりません。 winget install --id Cloudflare.cloudflared でインストールしてください。"
 }
 if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) {
+    Pop-Location
     throw "ポート $Port は使用中です（別のサービスを公開しないため中止）。 -Port で別の番号を指定してください。"
 }
 if (-not $Key) {
@@ -22,9 +24,12 @@ if (-not $Key) {
 }
 $log = Join-Path $env:TEMP "form_guard_tunnel.log"
 $cf = $null; $server = $null
+$prevAccessKey = $env:FORM_GUARD_ACCESS_KEY
+$prevAllowedHosts = $env:FORM_GUARD_ALLOWED_HOSTS
+$prevForceDemo = $env:FORM_GUARD_FORCE_DEMO
 try {
     $env:FORM_GUARD_ACCESS_KEY = $Key
-    if (-not $AllowLive) { $env:FORM_GUARD_FORCE_DEMO = "1" }
+    $env:FORM_GUARD_FORCE_DEMO = if ($AllowLive) { "0" } else { "1" }
     $server = Start-Process python -ArgumentList "-m form_guard.cli --serve --port $Port" -PassThru -NoNewWindow
     $ready = $false
     for ($i = 0; $i -lt 30 -and -not $ready; $i++) {
@@ -57,5 +62,8 @@ try {
 }
 finally {
     foreach ($p in @($server, $cf)) { if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } }
-    Remove-Item Env:FORM_GUARD_ACCESS_KEY, Env:FORM_GUARD_ALLOWED_HOSTS, Env:FORM_GUARD_FORCE_DEMO -ErrorAction SilentlyContinue
+    if ($null -eq $prevAccessKey) { Remove-Item Env:FORM_GUARD_ACCESS_KEY -ErrorAction SilentlyContinue } else { $env:FORM_GUARD_ACCESS_KEY = $prevAccessKey }
+    if ($null -eq $prevAllowedHosts) { Remove-Item Env:FORM_GUARD_ALLOWED_HOSTS -ErrorAction SilentlyContinue } else { $env:FORM_GUARD_ALLOWED_HOSTS = $prevAllowedHosts }
+    if ($null -eq $prevForceDemo) { Remove-Item Env:FORM_GUARD_FORCE_DEMO -ErrorAction SilentlyContinue } else { $env:FORM_GUARD_FORCE_DEMO = $prevForceDemo }
+    Pop-Location
 }
