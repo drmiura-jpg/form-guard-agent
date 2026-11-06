@@ -199,21 +199,83 @@ $("#saveEdits").addEventListener("click", async () => {
   finally { setBusy(false); }
 });
 
-// STEP 5 — one checkbox per required checklist item; only the ticked ids are sent
+// STEP 5 — 詳細レポートでチェック: plain-language verdict, machine checks, before/after images, one big card per
+// required checklist item (only the ticked ids are sent)
+const CATS = {
+  zip: ["📦 ファイルが壊れていない", "書類ファイルの中身が欠けたり壊れたりしていないか"],
+  xml: ["🧩 ファイルの中の形が正しい", "Word・Excel が読める正しい形のままか"],
+  layout: ["📐 罫線・枠・書式が変わっていない", "表の枠、罫線、文字の大きさ、余白が白紙と同じか"],
+  text: ["📝 印刷された文字が変わっていない", "注意書き・誓約文・項目名が1文字も変わっていないか"],
+  grounding: ["🔎 書いた内容が材料に書いてある", "AI が書いた値が、渡した材料の文章にそのまま書いてあるか（作り話をしていないか）"],
+  constraints: ["📏 書き方のルールを守っている", "文字数の上限、和暦の日付、金額の書き方などのルール"],
+  application: ["💻 Word・Excel で開ける", "別の仕組みで開き直しても正しく読めるか"],
+  pdf: ["📄 PDF が壊れていない", "白紙の PDF はそのままで、記入分だけが上に重なっているか"],
+  visual: ["👀 見た目のずれがない", "記入欄の外の見た目が1ピクセルもずれていないか"],
+};
+function catOf(c) { const k = (c.category || "").toLowerCase(); return CATS[k] ? k : (c.check_id || "").toLowerCase().startsWith("pdf") ? "pdf" : k; }
+const svgImg = (svg, alt) => svg ? `<img alt="${esc(alt)}" src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}">` : "<p class='hint'>（画像なし）</p>";
+let previewView = "filled";
+function renderPreview() {
+  const pv = (state.run && state.run.previews) || {};
+  const blank = `<figure><figcaption>記入前（白紙）</figcaption>${svgImg(pv.blank, "記入前")}</figure>`;
+  const filled = `<figure><figcaption>記入後（AI が書いたもの）</figcaption>${svgImg(pv.filled, "記入後")}</figure>`;
+  $("#preview").innerHTML = previewView === "both" ? blank + filled : previewView === "blank" ? blank : filled;
+  $$(".rp-tab").forEach((b) => b.classList.toggle("on", b.dataset.view === previewView));
+}
+$$(".rp-tab").forEach((b) => b.addEventListener("click", () => { previewView = b.dataset.view; renderPreview(); }));
+function updateProgress() {
+  const all = $$("#checklist .ck"), done = all.filter((c) => c.checked);
+  all.forEach((c) => c.closest("li").classList.toggle("done", c.checked));
+  $("#ckProgress").textContent = `（${done.length} / ${all.length} 確認済み）`;
+  $("#ckBar").style.width = all.length ? `${(100 * done.length) / all.length}%` : "0";
+}
+function plainPrompt(h, labels) {
+  if (h.item_id === "global:visual") return ["👀 書類の見た目", "上の「② 書類の見た目を比べる」で、色の枠の外（罫線・注意書き・誓約文）が白紙と同じことを目で確かめた"];
+  if (h.item_id === "global:responsibility") return ["🙋 最終判断は自分がする", "AI の記入は下書きです。内容が正しいか、提出してよいかは自分が判断します"];
+  const label = labels[h.slot_id] || h.label || h.slot_id || "";
+  return [`「${label}」の欄`, String(h.prompt_ja || h.prompt || "").replace(/原文\s*L(\d+)(?:[–-]L?(\d+))?/g,
+    (_, a, b) => `材料の${a}${b ? "〜" + b : ""}行目`)];
+}
+const FLAG_JA = {
+  wareki: "西暦を和暦に直して書きました", weekday_ok: "曜日が日付と合っているのを確認済み", weekday: "曜日を付け足しました",
+  year_inferred: "⚠️ 年が書いていなかったので AI が推定しました。年が正しいか見てください",
+  unsafe_condensation: "⚠️ 文字数に収めるため短くしました。大事な言葉が消えていないか見てください",
+  advance_notice: "⚠️ 期限（〇日前までに提出など）のルールに注意が必要です",
+  low_conf: "⚠️ AI の自信が低い欄です。特によく見てください", human: "人が入力した値です",
+};
 function prepareStep5() {
-  const r = state.run, rep = r.report || {};
+  const r = state.run, rep = r.report || {}, vis = r.visual || {};
   const items = (rep.hitl_checklist || []).filter((h) => h.required);
   const ok = rep.overall_status === "PASS" && r.can_approve;
-  $("#finalSummary").innerHTML =
-    `<p class="big">${ok ? "✅ 記入完了・機械検査に合格" : "❌ このままでは承認できません"}</p>
-     <p class="hint">様式：${esc(r.display_name || "")}　/　記入した欄：${(r.mappings || []).length} か所　/
-     <a href="/api/runs/${encodeURIComponent(r.run_id)}/report" target="_blank" rel="noopener">検査レポート（指定欄以外の比較表示）を見る</a></p>`;
+  const checks = rep.checks || [], failed = checks.filter((c) => !c.passed);
+  const filledN = (r.mappings || []).filter((m) => m.filled_value).length;
+  const compared = vis.boxes_compared != null ? `記入欄の外 ${vis.boxes_compared} か所を比べて、ずれ ${vis.drift_count ?? 0} か所` : "";
+  $("#verdict").innerHTML = ok
+    ? `<div class="rp-verdict ok">✅ 書式は崩れていません。<br>AI は ${filledN} か所の欄だけに書きました。<small>機械の検査 ${checks.length} 項目すべて合格。${esc(compared)}。最後に下の確認項目をあなたが押せば完成です。</small></div>`
+    : `<div class="rp-verdict ${failed.length ? "ng" : "warn"}">${failed.length ? `❌ 機械の検査で ${failed.length} 項目が不合格です` : "✏️ まだ入力待ちの欄があります"}<small>このままでは承認できません。「記入内容の修正に戻る」から直してください。</small></div>`;
+  const groups = {};
+  checks.forEach((c) => { const k = catOf(c); (groups[k] = groups[k] || []).push(c); });
+  if (vis.boxes_compared != null) groups.visual = [{ passed: (vis.drift_count ?? 0) === 0 && (vis.overflow_count ?? 0) === 0 }];
+  $("#machineCards").innerHTML = Object.entries(groups).map(([k, list]) => {
+    const bad = list.filter((c) => !c.passed).length, [title, sub] = CATS[k] || [k, ""];
+    return `<div class="rp-card ${bad ? "ng" : "ok"}"><b>${bad ? "❌" : "✅"} ${esc(title)}</b><span>${esc(sub)}</span>
+      ${bad ? `<br><span>不合格 ${bad} 件：${list.filter((c) => !c.passed).map((c) => esc(c.details || c.check_id)).join(" / ")}</span>` : ""}</div>`;
+  }).join("");
+  renderPreview();
+  const labels = Object.fromEntries((r.slots || []).map((s) => [s.slot_id, s.label || s.slot_id]));
   $("#checklist").innerHTML = items.map((h) => {
     const att = (h.flags || []).length || h.importance === "high";
-    const flags = (h.flags || []).map((f) => `<span class="pill warn">${esc(f)}</span>`).join("");
+    const flags = (h.flags || []).map((f) => `<span class="pill ${String(FLAG_JA[f] || "").startsWith("⚠️") ? "warn" : "ok"}">${esc(FLAG_JA[f] || f)}</span>`).join("");
+    const [title, text] = plainPrompt(h, labels);
+    const value = h.kind === "field" ? `<span class="val">${esc(h.value || "（空欄）")}</span>` : "";
+    const why = h.source_quote ? `<span class="why">材料に書いてあったこと：「${esc(h.source_quote)}」</span>` : "";
     return `<li class="${att ? "attention" : ""}"><label><input type="checkbox" class="ck" value="${esc(h.item_id)}">
-      <span>${esc(h.prompt_ja || h.prompt)} ${flags}${h.source_quote ? `<br><span class="hint">根拠：「${esc(h.source_quote)}」</span>` : ""}</span></label></li>`;
+      <span><b>${esc(title)}</b>${value}<span class="why">${esc(text)}</span>${why}${flags}</span></label></li>`;
   }).join("");
+  $$("#checklist .ck").forEach((c) => c.addEventListener("change", updateProgress));
+  updateProgress();
+  $("#techReport").href = `/api/runs/${encodeURIComponent(r.run_id)}/report`;
+  $("#finalSummary").textContent = r.display_name || "";
   $("#checklist").dataset.run = `${r.run_id}:${r.revision}:${r.filled.sha256}`;
   $("#approveBtn").disabled = !ok;
   msg("#msg5", ok ? "" : "機械検査に合格していないか、入力待ちの欄があります。STEP 4 に戻って直してください。", !ok);

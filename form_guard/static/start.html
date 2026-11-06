@@ -50,6 +50,34 @@
   .big { font-size:24px; font-weight:700; margin:4px 0; }
   .hint { font-size:13px; color:var(--sub); }
   .progress { font-size:14px; color:#5b2bb5; margin:8px 0; }
+  .rp-title { font-size:28px; }
+  .rp-lead { font-size:17px; color:#333; margin:6px 0 16px; }
+  .rp-verdict { border-radius:14px; padding:22px 24px; margin:10px 0 18px; font-size:30px; font-weight:800; line-height:1.4; }
+  .rp-verdict small { display:block; font-size:16px; font-weight:500; margin-top:6px; }
+  .rp-verdict.ok { background:#e3f5e9; color:#0a6b2e; border:3px solid #0a8a3a; }
+  .rp-verdict.ng { background:#fde8e8; color:#9b1c1c; border:3px solid #c62828; }
+  .rp-verdict.warn { background:#fff4e5; color:#7a4a00; border:3px solid #e39a2d; }
+  .rp-h { font-size:21px; margin:22px 0 10px; }
+  .rp-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px; }
+  .rp-card { border-radius:12px; padding:14px 16px; border:2px solid var(--line); background:#fff; }
+  .rp-card b { font-size:18px; display:block; } .rp-card span { font-size:14px; color:var(--sub); }
+  .rp-card.ok { border-color:#9fd5b1; background:#f3fbf6; } .rp-card.ng { border-color:#f1a3a3; background:#fff5f5; }
+  .rp-tabs { display:flex; gap:6px; margin-bottom:8px; }
+  .rp-tab { font-size:16px; padding:8px 16px; } .rp-tab.on { background:#111; color:#fff; border-color:#111; }
+  .rp-preview { display:flex; gap:12px; border:1px solid var(--line); border-radius:12px; padding:10px; background:#f0f2f5; overflow:auto; max-height:900px; }
+  .rp-preview figure { margin:0; flex:1; min-width:0; } .rp-preview figcaption { font-weight:700; margin-bottom:4px; }
+  .rp-preview img { width:100%; height:auto; background:#fff; box-shadow:0 1px 4px rgba(0,0,0,.15); }
+  .rp-progress { font-size:16px; color:var(--accent); font-weight:600; }
+  .rp-bar { height:12px; background:#e9ecf1; border-radius:6px; overflow:hidden; margin-bottom:8px; }
+  .rp-bar div { height:100%; width:0; background:var(--ok); transition:width .2s; }
+  ul.checklist.big li { padding:14px 16px; border-width:2px; border-radius:12px; font-size:17px; }
+  ul.checklist.big li.done { border-color:#9fd5b1; background:#f3fbf6; }
+  ul.checklist.big input.ck { width:30px; height:30px; flex:none; margin:2px 6px 0 0; accent-color:var(--ok); }
+  ul.checklist.big .val { font-size:20px; font-weight:700; display:block; margin:4px 0; }
+  ul.checklist.big .why { font-size:14px; color:var(--sub); display:block; }
+  .rp-final { display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin:18px 0 8px; }
+  .rp-final input { max-width:360px; font-size:18px; padding:12px; }
+  button.huge { font-size:22px; padding:16px 28px; border-radius:12px; }
 </style>
 </head>
 <body>
@@ -64,7 +92,7 @@
     <li data-s="2"><b>STEP 2</b>書式を入れる</li>
     <li data-s="3"><b>STEP 3</b>材料を渡す</li>
     <li data-s="4"><b>STEP 4</b>AIの記入を確認</li>
-    <li data-s="5"><b>STEP 5</b>できあがり</li>
+    <li data-s="5"><b>STEP 5</b>詳細レポートでチェック</li>
   </ol>
 
   <section class="card" data-s="1">
@@ -107,19 +135,32 @@
     <div class="row" id="checkSummary"></div>
     <table><thead><tr><th style="width:24%">項目</th><th style="width:38%">記入する値</th><th>根拠（材料からの引用）・注意</th></tr></thead><tbody id="fields"></tbody></table>
     <div class="row"><button id="saveEdits">反映して再検査</button><span class="hint">反映するたびに、指定欄以外が変わっていないかを機械で検査し直します。</span></div>
-    <div class="row"><button data-back="3">← 材料に戻る</button><button class="primary" id="toStep5">次へ：できあがり →</button></div>
+    <div class="row"><button data-back="3">← 材料に戻る</button><button class="primary" id="toStep5">次へ：詳細レポートでチェック →</button></div>
     <div class="msg" id="msg4"></div>
   </section>
 
   <section class="card" data-s="5">
-    <h2>STEP 5　できあがり（人の最終確認）</h2>
-    <p class="lead">下の確認項目を1つずつ確かめてチェックし、承認するとダウンロードできます（承認前はダウンロードできません）。</p>
-    <div id="finalSummary"></div>
-    <ul class="checklist" id="checklist"></ul>
-    <div class="row" style="max-width:420px"><input type="text" id="reviewer" placeholder="確認した人の名前"></div>
-    <div class="row"><button data-back="4">← 確認に戻る</button><button class="primary" id="approveBtn">承認してダウンロード ⬇️</button></div>
+    <h2 class="rp-title">🔍 STEP 5　詳細レポートでチェック</h2>
+    <p class="rp-lead">AI が書いた書類を、<b>あなたの目で</b>確かめる画面です。上から順に見て、下の確認項目をすべて押すと承認できます。</p>
+    <div id="verdict"></div>
+    <h3 class="rp-h">① 機械がチェックしたこと（かんたん説明）</h3>
+    <div class="rp-grid" id="machineCards"></div>
+    <h3 class="rp-h">② 書類の見た目を比べる</h3>
+    <div class="rp-tabs"><button type="button" class="rp-tab on" data-view="filled">記入後</button><button type="button" class="rp-tab" data-view="blank">記入前（白紙）</button><button type="button" class="rp-tab" data-view="both">左右に並べる</button></div>
+    <div class="rp-preview" id="preview"></div>
+    <p class="hint">色のついた枠が AI が書いた欄です。枠の外（罫線・注意書き・誓約文）が白紙と同じかを見比べてください。</p>
+    <h3 class="rp-h">③ あなたが目で確かめること <span id="ckProgress" class="rp-progress"></span></h3>
+    <div class="rp-bar"><div id="ckBar"></div></div>
+    <ul class="checklist big" id="checklist"></ul>
+    <div class="rp-final">
+      <input type="text" id="reviewer" placeholder="確認した人の名前（例：山田 太郎）">
+      <button class="primary huge" id="approveBtn">✅ 承認してダウンロード</button>
+    </div>
+    <div class="row"><button data-back="4">← 記入内容の修正に戻る</button>
+      <span class="hint">もっと詳しい技術レポート：<a id="techReport" target="_blank" rel="noopener">こちら</a></span></div>
     <p class="hint">ダウンロード後は、Word・Excel・PDF ビューアーで開いて、表示と印刷の見た目も確認してください。</p>
     <div class="msg" id="msg5"></div>
+    <div id="finalSummary" hidden></div>
   </section>
 </main>
 <script src="/static/start.js"></script>
