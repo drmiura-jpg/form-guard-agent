@@ -110,11 +110,15 @@
     <p class="lead">記入したい白紙の様式（Word / Excel / PDF）を選びます。手元にない場合は、サンプル様式を使えます。</p>
     <label class="choice"><input type="radio" name="src" value="upload" id="srcUpload" checked><div><b>自分の様式ファイルをアップロード</b><small>.docx / .xlsx / .pdf（目印のない白紙でも、AI が空欄を見つけます）</small>
       <div class="row"><input type="file" id="file" accept=".docx,.xlsx,.pdf"></div></div></label>
-    <label class="choice"><input type="radio" name="src" value="sample" id="srcSample"><div><b>サンプル様式を使う（架空の書式）</b><small>はじめての方はこちら。記入例の材料も自動で入ります。</small>
+    <label class="choice"><input type="radio" name="src" value="sample" id="srcSample"><div><b>サンプル様式を使う（架空の書式・全7種類）</b><small>はじめての方はこちら。記入例の材料も自動で入ります。</small>
       <div class="row"><select id="sample">
         <option value="form4">施設・備品一時使用許可申請書（Word）</option>
         <option value="form5">防災備蓄品 貸出・返却管理票（Excel）</option>
         <option value="form6">研究助成申請書（固定PDF）</option>
+        <option value="form7">国内出張申請書（Word）</option>
+        <option value="form8">物品購入申請書（Excel）</option>
+        <option value="form9">休暇届（Word）</option>
+        <option value="form10">会議室予約申請書（Excel）</option>
       </select> <a href="/portal" target="_blank" rel="noopener">様式をダウンロードできる窓口を見る</a></div></div></label>
     <div class="row"><button data-back="1">← 戻る</button><button class="primary" id="toStep3">次へ：材料を渡す →</button></div>
     <div class="msg" id="msg2"></div>

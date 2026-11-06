@@ -3221,7 +3221,7 @@ def test_run_demo_for_marked_forms_and_discover_by_demo_id_or_upload(api, sample
     r = api.post("/api/run-demo", json={"demo_id": "form1", "mode": "demo"}).json()
     assert not r["unmarked"] and r["run"]["report"]["overall_status"] == "PASS" and "naive" in r["run"]["previews"]
     assert api.post("/api/run-demo", json={"demo_id": "form1", "confirmed_targets": ["c01"]}).status_code == 400
-    assert api.post("/api/run-demo", json={"demo_id": "form9"}).status_code == 404
+    assert api.post("/api/run-demo", json={"demo_id": "form99"}).status_code == 404
     assert api.post("/api/run-demo", json={"demo_id": "form4", "approve": True}).status_code == 422  # extra fields refused
     d4 = api.post("/api/discover", data={"demo_id": "form4", "mode": "demo"})
     assert d4.status_code == 200 and d4.json()["demo_id"] == "form4" and len(d4.json()["candidates"]) == 11
@@ -6089,3 +6089,16 @@ def test_r1_1449_audit_regressions(samples_dir, tmp_path, fake_client_factory):
 
 
 
+
+
+def test_extra_everyday_forms_are_discovered_filled_and_pass(api):
+    """form7–form10 (fictional everyday forms for /start): office-only cells locked, recommended cells filled, PASS."""
+    for demo in ("form7", "form8", "form9", "form10"):
+        d = api.post("/api/discover/demo", json={"demo_id": demo, "mode": "demo"}).json()
+        assert sum(1 for c in d["candidates"] if c["recommended"]) == 7, demo
+        assert any(not c["recommended"] for c in d["candidates"]), demo  # office-only area is never recommended
+        r = api.post("/api/runs/from-discovery", json={"discovery_id": d["discovery_id"],
+                                                       "confirmed_targets": "recommended", "mode": "demo"}).json()
+        assert r["report"]["overall_status"] == "PASS" and not r["report"]["pending_slots"], demo
+        assert all(m["source_quote"] for m in r["mappings"]), demo
+    assert 'value="form10"' in api.get("/start").text

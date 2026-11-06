@@ -97,6 +97,24 @@ UNMARKED_FORMS = [
 ]
 
 
+# Four more everyday unmarked forms (fictional) for the guided /start page. They are not part of the six judged demos
+# (DEMOS / UNMARKED_FORMS / PDF_FORMS): discovery treats them exactly like form4 / form5.
+EXTRA_UNMARKED_FORMS = [
+    {"id": "form7", "title": "国内出張申請書（マーカーなし白紙様式）", "title_en": "Domestic Business Trip Request (unmarked blank form)",
+     "org": "架空サンプル株式会社（fictional company）", "file_type": "docx", "form": "form7_business_trip.docx",
+     "memo": "memo7_business_trip.txt", "highlights": ["trip period in 和暦", "office-only 承認印 locked"]},
+    {"id": "form8", "title": "物品購入申請書（マーカーなし白紙様式）", "title_en": "Purchase Request (unmarked blank workbook)",
+     "org": "架空学術機関 会計課（fictional institute）", "file_type": "xlsx", "form": "form8_purchase_request.xlsx",
+     "memo": "memo8_purchase_request.txt", "highlights": ["yen amount", "office-only 決裁欄 locked"]},
+    {"id": "form9", "title": "休暇届（マーカーなし白紙様式）", "title_en": "Leave Request (unmarked blank form)",
+     "org": "架空市役所 人事課（fictional city office）", "file_type": "docx", "form": "form9_leave_request.docx",
+     "memo": "memo9_leave_request.txt", "highlights": ["leave period in 和暦", "office-only 受理欄 locked"]},
+    {"id": "form10", "title": "会議室予約申請書（マーカーなし白紙様式）", "title_en": "Meeting Room Booking Request (unmarked blank workbook)",
+     "org": "架空市民交流センター（fictional community centre）", "file_type": "xlsx", "form": "form10_room_booking.xlsx",
+     "memo": "memo10_room_booking.txt", "highlights": ["date and time slot", "office-only 受付欄 locked"]},
+]
+
+
 PDF_FORMS = [
     {
         "id": "form6",
@@ -135,7 +153,7 @@ def pdf_paths(item: dict, samples_dir: Path | None = None) -> dict[str, Path]:
 
 
 def unmarked_by_id(form_id: str) -> dict:
-    for u in UNMARKED_FORMS:
+    for u in UNMARKED_FORMS + EXTRA_UNMARKED_FORMS:
         if u["id"] == form_id:
             return u
     raise KeyError(form_id)
@@ -288,6 +306,61 @@ MEMO6 = """件名：研究助成の申請準備メモ（次世代AI・分散シ�
 MEMOS = {"memo1_research_change.txt": MEMO1, "memo2_subsidy_application.txt": MEMO2,
          "memo3_safety_inspection.txt": MEMO3, "memo4_equipment_use.txt": MEMO4,
          "memo5_stockpile_loan.txt": MEMO5, "memo6_study_group_grant.txt": MEMO6}
+
+MEMOS.update({
+    "memo7_business_trip.txt": """出張申請の下書きメモ（架空サンプル株式会社 営業部）
+作成：2026年11月12日（木）
+
+申請日：2026年11月12日（木）
+申請者氏名：見本 七海（営業部 主任）
+所属部署：営業部 第二営業課
+出張先：架空県架空市（架空産業展示会 会場）
+出張期間：2026年11月24日（火）から2026年11月25日（水）まで
+用務内容：架空産業展示会に出展し、新製品の説明と取引先3社との打合せを行う。
+概算旅費：58,400円（新幹線往復と宿泊1泊の見込み）
+
+メモ：承認印と旅費精算番号は総務部が記入するので空欄のまま。
+""",
+    "memo8_purchase_request.txt": """物品購入の相談メール（架空学術機関 材料工学研究室）
+送信日：2026年11月13日（金）
+
+申請日：2026年11月13日（金）
+申請者氏名：架空 一郎
+所属：材料工学研究室
+品名・数量：精密電子天びん 1台
+購入予定金額：162,800円（税込）
+購入理由：既存の天びんが故障し、試料の重量測定ができないため更新する。
+納品希望日：2026年12月1日（火）
+
+※決裁印・予算科目・発注番号は会計課が記入。
+""",
+    "memo9_leave_request.txt": """休暇の届出メモ（架空市役所 市民課）
+作成：2026年11月16日（月）
+
+届出日：2026年11月16日（月）
+氏名：模擬 九郎
+所属・職名：市民課 主事
+休暇の種類：年次有給休暇
+休暇期間：2026年11月26日（木）から2026年11月27日（金）まで
+理由：家族の通院の付き添いのため。
+休暇中の連絡先：携帯電話（架空番号 090-0000-0000）
+
+受理印・人事課処理欄は記入しない。
+""",
+    "memo10_room_booking.txt": """会議室予約のメモ（架空町内会 子ども会）
+作成：2026年11月17日（火）
+
+申請日：2026年11月17日（火）
+団体名：架空町内会 子ども会
+代表者氏名：見本 十和子
+利用希望日：2026年12月3日（木）
+利用時間：18時00分から20時00分まで
+利用人数：18名
+利用目的：年末のクリスマス会の打合せと飾り付けの準備を行う。
+
+受付番号・使用料・許可印はセンターが記入する。
+""",
+})
 
 # ======================================================================= slot specs
 
@@ -1067,6 +1140,163 @@ def build_form5() -> bytes:
     return _finalise_xlsx(buf.getvalue())
 
 
+# ============================================================ extra everyday unmarked forms (form7–form10)
+
+
+def _simple_docx_form(title: str, header: str, number: str, addressee: str, lead: str, rows, office, notes) -> bytes:
+    """Unmarked .docx like form4: printed labels, empty value cells, one office-only area."""
+    doc = _new_document(title)
+    _header_footer(doc, header)
+    _para(doc, number, size=9, first=True)
+    _para(doc, title.split("（")[0], align="center", size=16, bold=True, gothic=True, before=4, after=6)
+    _para(doc, addressee, after=4)
+    _para(doc, lead, align="both", after=2)
+    _para(doc, "記", align="center", after=2)
+    widths = [36, 20, 54, 20, 40]
+    n = len(rows) + len(office) + 1
+    t = _table(doc, n, widths)
+    for r, (label, hint, height) in enumerate(rows):
+        _label(t.cell(r, 0).merge(t.cell(r, 1)), label, hint)
+        _vcenter(t.cell(r, 2).merge(t.cell(r, 4)))
+        _row_height(t.rows[r], height)
+    b = len(rows)
+    _banner(t, b, "事務処理欄（申請者は記入しないでください）")
+    for k, label in enumerate(office):
+        r = b + 1 + k
+        _label(t.cell(r, 0).merge(t.cell(r, 1)), label)
+        _vcenter(t.cell(r, 2).merge(t.cell(r, 4)))
+        _row_height(t.rows[r], 9)
+    _fix_widths(t, widths)
+    _para(doc, "（注意事項）", bold=True, gothic=True, size=9.5, before=6, after=1)
+    for k, note in enumerate(notes, start=1):
+        _para(doc, f"{k}　{note}", size=9, indent_mm=4, hanging_mm=4)
+    _para(doc, FICTION_NOTICE_JA, size=7.5, align="center", before=8)
+    return _docx_bytes(doc)
+
+
+def _simple_xlsx_form(title: str, sheet: str, number: str, lead: str, rows, office, notes) -> bytes:
+    """Unmarked .xlsx like form5: merged empty value cells next to labels, one office-only area."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.worksheet.page import PageMargins
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet
+    for col, w in {"A": 6, "B": 14, "C": 12, "D": 12, "E": 12, "F": 12, "G": 12, "H": 12}.items():
+        ws.column_dimensions[col].width = w
+    base, bold, small = Font(name="游ゴシック", size=10.5), Font(name="游ゴシック", size=10.5, bold=True), Font(name="游ゴシック", size=9)
+    thin, medium = Side(style="thin", color="000000"), Side(style="medium", color="000000")
+    label_fill, head_fill = PatternFill("solid", fgColor="F2F2F2"), PatternFill("solid", fgColor="DDEBF7")
+
+    def put(rng, value=None, font=base, h=None, wrap=False, fill=None):
+        first = rng.split(":")[0]
+        if ":" in rng:
+            ws.merge_cells(rng)
+        cell = ws[first]
+        if value is not None:
+            cell.value = value
+        cell.font = font
+        cell.alignment = Alignment(horizontal=h, vertical="center", wrap_text=wrap)
+        if fill is not None:
+            for row in ws[rng] if ":" in rng else [[cell]]:
+                for c in row:
+                    c.fill = fill
+
+    def grid(rng):
+        cells = ws[rng]
+        n_r, n_c = len(cells), len(cells[0])
+        for i, row in enumerate(cells):
+            for j, c in enumerate(row):
+                c.border = Border(left=medium if j == 0 else thin, right=medium if j == n_c - 1 else thin,
+                                  top=medium if i == 0 else thin, bottom=medium if i == n_r - 1 else thin)
+
+    put("A1:H1", title.split("（")[0], Font(name="游ゴシック", size=16, bold=True), h="center")
+    put("A2:H2", number, small, h="right")
+    put("A3:H3", lead, small, h="left")
+    ws.row_dimensions[1].height = 30
+    put("A4:H4", "1　申請者記入欄", bold, h="left", fill=head_fill)
+    r = 5
+    for label, height in rows:
+        put(f"A{r}:B{r}", label, bold, h="center", wrap=True, fill=label_fill)
+        put(f"C{r}:H{r}", None, h="left", wrap=True)
+        ws.row_dimensions[r].height = height
+        r += 1
+    grid(f"A5:H{r - 1}")
+    r += 1
+    put(f"A{r}:H{r}", "2　事務局記入欄（申請者は記入しないこと）", bold, h="left", fill=head_fill)
+    r += 1
+    start = r
+    put(f"A{r}:B{r + 1}", f"※事務局使用欄（{office}）", bold, h="center", wrap=True, fill=label_fill)
+    put(f"C{r}:H{r + 1}", None)
+    grid(f"A{start}:H{r + 1}")
+    r += 3
+    put(f"A{r}:H{r}", "（記入上の注意）", bold, h="left")
+    for k, note in enumerate(notes, start=1):
+        put(f"A{r + k}:H{r + k}", f"{k}　{note}", small, h="left")
+    last = r + len(notes) + 2
+    put(f"A{last}:H{last}", FICTION_NOTICE_JA, Font(name="游ゴシック", size=8, color="666666"), h="center")
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.page_setup.orientation = "portrait"
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_margins = PageMargins(left=0.6, right=0.6, top=0.7, bottom=0.7)
+    ws.print_area = f"A1:H{last}"
+    ws.oddFooter.center.text = "架空サンプル様式（Fictional sample form）"
+    wb.properties.creator = "Form-Guard Agent sample generator"
+    wb.properties.title = title
+    wb.properties.created = SAMPLE_TIMESTAMP
+    wb.properties.modified = SAMPLE_TIMESTAMP
+    buf = io.BytesIO()
+    wb.save(buf)
+    return _finalise_xlsx(buf.getvalue())
+
+
+def build_form7() -> bytes:
+    return _simple_docx_form(
+        "国内出張申請書（マーカーなし白紙様式）", "架空サンプル株式会社 総務部", "様式第3号（出張旅費規程第5条関係）",
+        "架空サンプル株式会社　代表取締役　殿", "　出張旅費規程第5条の規定により、下記のとおり国内出張を申請します。",
+        [("申請日", None, 9), ("申請者氏名", None, 9), ("所属部署", None, 9), ("出張先", None, 9),
+         ("出張期間", "（和暦で記入）", 10), ("用務内容", "（100字以内）", 20), ("概算旅費", "（単位：円）", 9)],
+        ["承認印（所属長）", "旅費精算番号"],
+        ["日付は和暦で記入すること。", "用務内容は100字以内で記入すること。", "事務処理欄は記入しないこと。",
+         "本様式の書式（罫線・欄の配置・注意事項の文言）は変更しないこと。"])
+
+
+def build_form8() -> bytes:
+    return _simple_xlsx_form(
+        "物品購入申請書（マーカーなし白紙様式）", "物品購入申請書", "様式C-1（架空学術機関 物品調達規程第7条関係）",
+        "架空学術機関長　様　物品調達規程第7条の規定により、下記のとおり物品の購入を申請します。",
+        [("申請日", 22), ("申請者氏名", 22), ("所属", 22), ("品名・数量\n（30字以内）", 30), ("購入予定金額\n（税込・円）", 26),
+         ("購入理由\n（80字以内）", 40), ("納品希望日", 22)],
+        "決裁印・予算科目・発注番号",
+        ["日付は和暦で記入すること。", "購入予定金額は税込の円単位で記入すること。", "※印の欄は事務局が記入するため、申請者は記入しないこと。",
+         "本様式の書式は変更しないこと。"])
+
+
+def build_form9() -> bytes:
+    return _simple_docx_form(
+        "休暇届（マーカーなし白紙様式）", "架空市役所 人事課", "様式第8号（職員の勤務時間・休暇等に関する規則第12条関係）",
+        "架空市長　殿", "　職員の勤務時間・休暇等に関する規則第12条の規定により、下記のとおり休暇を届け出ます。",
+        [("届出日", None, 9), ("氏名", None, 9), ("所属・職名", None, 9), ("休暇の種類", None, 9),
+         ("休暇期間", "（和暦で記入）", 10), ("理由", "（50字以内）", 16), ("休暇中の連絡先", None, 9)],
+        ["受理印（所属長）", "人事課処理欄"],
+        ["日付は和暦で記入すること。", "理由は50字以内で記入すること。", "事務処理欄は記入しないこと。",
+         "本様式の書式（罫線・欄の配置・注意事項の文言）は変更しないこと。"])
+
+
+def build_form10() -> bytes:
+    return _simple_xlsx_form(
+        "会議室予約申請書（マーカーなし白紙様式）", "会議室予約申請書", "様式D-3（架空市民交流センター 施設利用要領第3条関係）",
+        "架空市民交流センター長　様　施設利用要領第3条の規定により、下記のとおり会議室の利用を申請します。",
+        [("申請日", 22), ("団体名", 22), ("代表者氏名", 22), ("利用希望日", 22), ("利用時間", 22), ("利用人数", 22),
+         ("利用目的\n（50字以内）", 34)],
+        "受付番号・使用料・許可印",
+        ["日付は和暦で記入すること。", "利用人数は30名以内とすること。", "※印の欄は事務局が記入するため、申請者は記入しないこと。",
+         "本様式の書式は変更しないこと。"])
+
+
 # ================================================================ fixed PDF form (form6)
 #
 # One A4 page drawn like a PDF exported from a word processor: label cells shaded, a ruled table (outer border 1 pt,
@@ -1435,6 +1665,12 @@ UNMARKED_BUILDERS = {  # no slot spec: the cells to fill come from discovery + h
     "form4_unmarked_blank.docx": build_form4,
     "form5_unmarked_blank.xlsx": build_form5,
 }
+EXTRA_UNMARKED_BUILDERS = {
+    "form7_business_trip.docx": build_form7,
+    "form8_purchase_request.xlsx": build_form8,
+    "form9_leave_request.docx": build_form9,
+    "form10_room_booking.xlsx": build_form10,
+}
 PDF_BUILDERS = {  # fixed PDF form: a sidecar spec by page coordinates, and blank-box discovery finds the same boxes
     "form6_study_group_grant.pdf": build_form6,
 }
@@ -1468,7 +1704,7 @@ def generate_samples(samples_dir: Path | str | None = None, with_comparisons: bo
         put(blank / name, fn)
         spec = SPECS[Path(name).stem]
         put(blank / f"{Path(name).stem}.slots.json", lambda spec=spec: json.dumps(spec, ensure_ascii=False, indent=2) + "\n")
-    for name, fn in UNMARKED_BUILDERS.items():
+    for name, fn in {**UNMARKED_BUILDERS, **EXTRA_UNMARKED_BUILDERS}.items():
         put(blank / name, fn)
     for name, fn in PDF_BUILDERS.items():
         put(blank / name, fn)
@@ -1488,8 +1724,9 @@ def generate_samples(samples_dir: Path | str | None = None, with_comparisons: bo
 def ensure_samples(samples_dir: Path | str | None = None) -> Path:
     """Make sure the sample set exists; a missing file is created, nothing that exists is overwritten."""
     base = Path(samples_dir) if samples_dir else default_samples_dir()
-    needed = [base / "blank_forms" / d["form"] for d in DEMOS + UNMARKED_FORMS + PDF_FORMS] + \
-             [base / "memos" / d["memo"] for d in DEMOS + UNMARKED_FORMS + PDF_FORMS] + \
+    every = DEMOS + UNMARKED_FORMS + EXTRA_UNMARKED_FORMS + PDF_FORMS
+    needed = [base / "blank_forms" / d["form"] for d in every] + \
+             [base / "memos" / d["memo"] for d in every] + \
              [base / "broken_before" / d["naive"] for d in DEMOS + PDF_FORMS]
     if not all(p.exists() for p in needed):
         generate_samples(base, overwrite=False)
