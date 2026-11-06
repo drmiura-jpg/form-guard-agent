@@ -62,6 +62,7 @@ MAX_MEMO_CHARS = 60_000
 MAX_MCP_MESSAGE_BYTES = 10 * 1024 * 1024  # one JSON-RPC message (Content-Length body or newline-delimited line)
 MAX_HEADER_LINES = 32
 REVIEW_URL = "http://127.0.0.1:8000/?run_id={run_id}"
+START_URL = "http://127.0.0.1:8000/start?run_id={run_id}"  # guided page for first-time reviewers
 PARSE_ERROR, INVALID_REQUEST = -32700, -32600
 # never readable or writable through a tool, in any path component (case-insensitive)
 FORBIDDEN_PATH_PARTS = frozenset({".git", ".ssh", ".claude-hackathon"})
@@ -523,7 +524,7 @@ class FormGuardMCP:
             "approval_status": APPROVAL_STATUS, "run_id": run_id, "draft": r.filled_path.name,
             "filled_sha256": r.verified_sha256, "verification": rep.overall_status, "cell_selection": selection,
             "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "note": note,
-            "review_url": review_url, "web_handoff": handoff.name,
+            "review_url": review_url, "start_url": START_URL.format(run_id=run_id), "web_handoff": handoff.name,
         }
         (out_dir / "APPROVAL_STATUS.json").write_text(json.dumps(status, ensure_ascii=False, indent=2) + "\n",
                                                       encoding="utf-8", newline="\n")
@@ -540,7 +541,7 @@ class FormGuardMCP:
             "human_sign_off_required": True,
             "next_step": note,
             "run_id": run_id,
-            "review_url": review_url,
+            "review_url": review_url, "start_url": START_URL.format(run_id=run_id),
             "web_handoff": self._rel(handoff),
             "out_dir": self._rel(out_dir),
             "draft_path": self._rel(r.filled_path),

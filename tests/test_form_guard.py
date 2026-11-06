@@ -6092,13 +6092,44 @@ def test_r1_1449_audit_regressions(samples_dir, tmp_path, fake_client_factory):
 
 
 def test_extra_everyday_forms_are_discovered_filled_and_pass(api):
-    """form7–form10 (fictional everyday forms for /start): office-only cells locked, recommended cells filled, PASS."""
-    for demo in ("form7", "form8", "form9", "form10"):
+    """form7–form10 (fictional everyday forms for /start): the expected applicant cells are recommended with the memo's
+    values, every office-only candidate is locked and cannot be confirmed, and the draft passes."""
+    expected = {
+        "form7": {"申請日": "令和8年11月12日（木）", "申請者氏名": "見本 七海", "所属部署": "営業部 第二営業課",
+                  "出張先": "架空県架空市（架空産業展示会 会場）", "出張期間": "令和8年11月24日（火）～令和8年11月25日（水）",
+                  "用務内容": "架空産業展示会に出展し、新製品の説明と取引先3社との打合せを行う。", "概算旅費": "58,400円"},
+        "form8": {"申請日": "令和8年11月13日（金）", "申請者氏名": "架空 一郎", "所属": "材料工学研究室",
+                  "品名・数量": "精密電子天びん 1台", "購入予定金額": "162,800円",
+                  "購入理由": "既存の天びんが故障し、試料の重量測定ができないため更新する。", "納品希望日": "令和8年12月1日（火）"},
+        "form9": {"届出日": "令和8年11月16日（月）", "氏名": "模擬 九郎", "所属・職名": "市民課 主事", "休暇の種類": "年次有給休暇",
+                  "休暇期間": "令和8年11月26日（木）～令和8年11月27日（金）", "理由": "家族の通院の付き添いのため。",
+                  "休暇中の連絡先": "携帯電話（架空番号 090-0000-0000）"},
+        "form10": {"申請日": "令和8年11月17日（火）", "団体名": "架空町内会 子ども会", "代表者氏名": "見本 十和子",
+                   "利用希望日": "令和8年12月3日（木）", "利用時間": "18時00分から20時00分まで", "利用人数": "18名",
+                   "利用目的": "年末のクリスマス会の打合せと飾り付けの準備を行う。"},
+    }
+    for demo, values in expected.items():
         d = api.post("/api/discover/demo", json={"demo_id": demo, "mode": "demo"}).json()
-        assert sum(1 for c in d["candidates"] if c["recommended"]) == 7, demo
-        assert any(not c["recommended"] for c in d["candidates"]), demo  # office-only area is never recommended
+        rec = {c["label"] for c in d["candidates"] if c["recommended"]}
+        assert rec == set(values), demo
+        office = [c for c in d["candidates"] if not c["recommended"]]
+        assert office and all(c["office_only"] for c in office), demo
+        bad = api.post("/api/runs/from-discovery", json={"discovery_id": d["discovery_id"], "mode": "demo",
+                                                         "confirmed_targets": [office[0]["candidate_id"]]})
+        assert bad.status_code == 422, demo  # an office-only cell can never be confirmed
         r = api.post("/api/runs/from-discovery", json={"discovery_id": d["discovery_id"],
                                                        "confirmed_targets": "recommended", "mode": "demo"}).json()
         assert r["report"]["overall_status"] == "PASS" and not r["report"]["pending_slots"], demo
+        assert {m["slot_id"]: m["filled_value"] for m in r["mappings"]} == values, demo
         assert all(m["source_quote"] for m in r["mappings"]), demo
     assert 'value="form10"' in api.get("/start").text
+
+
+def test_start_page_explains_every_flag_and_category_and_loads_chat_drafts(api):
+    from form_guard.verifier import _FLAG_TEXT
+    js = api.get("/static/start.js").text
+    for flag in _FLAG_TEXT:
+        assert f"{flag}:" in js, flag  # every flag the verifier can raise has a plain-Japanese explanation
+    for cat in ("zip", "xml", "layout", "text", "grounding", "constraints", "application", "visual"):
+        assert f"  {cat}: [" in js, cat
+    assert 'get("run_id")' in js and "/api/runs/${encodeURIComponent(runId)}" in js

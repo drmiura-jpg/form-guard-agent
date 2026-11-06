@@ -35,6 +35,8 @@ function setBusy(on) {
   state.busy = on;
   $$("button").forEach((b) => { if (b.id !== "toStep2" || !on) b.disabled = on; });
   $("#sample").disabled = on; $("#file").disabled = on;
+  $$("#fields input[data-slot]").forEach((i) => { i.disabled = on; });
+  if (!on && state.fromChat) $("#runBtn").disabled = true;
   if (!on) $("#approveBtn").disabled = !(state.run && state.run.can_approve && state.run.report.overall_status === "PASS");
 }
 function go(n) {
@@ -124,6 +126,7 @@ $("#toStep3").addEventListener("click", async () => {
 
 // STEP 3 — fill (おまかせ: then self-check and jump to the human checks)
 async function runFill() {
+  if (state.fromChat || !state.discoveryId) return msg("#msg3", state.fromChat ? "材料を変えて記入し直すときは、元のチャットで依頼してください。" : "先に STEP 2 で書式を入れてください。", true);
   const memo = $("#memo").value.trim();
   if (!memo) return msg("#msg3", "材料の文章を貼り付けてください。", true);
   if (state.busy) return;
@@ -203,16 +206,20 @@ $("#saveEdits").addEventListener("click", async () => {
 // required checklist item (only the ticked ids are sent)
 const CATS = {
   zip: ["📦 ファイルが壊れていない", "書類ファイルの中身が欠けたり壊れたりしていないか"],
-  xml: ["🧩 ファイルの中の形が正しい", "Word・Excel が読める正しい形のままか"],
-  layout: ["📐 罫線・枠・書式が変わっていない", "表の枠、罫線、文字の大きさ、余白が白紙と同じか"],
+  xml: ["🧩 ファイルの中の形が正しい", "Word・Excel 用の正しい形のままか"],
+  layout: ["📐 罫線・枠・書式が変わっていない", "表の枠、罫線、文字の大きさ、余白の設定が白紙と同じか"],
   text: ["📝 印刷された文字が変わっていない", "注意書き・誓約文・項目名が1文字も変わっていないか"],
-  grounding: ["🔎 書いた内容が材料に書いてある", "AI が書いた値が、渡した材料の文章にそのまま書いてあるか（作り話をしていないか）"],
+  grounding: ["🔎 値の根拠が材料にある", "AI が書いた値の根拠（引用）が材料にそのまま見つかるか（和暦・金額の書き方は直すことがあります）。人が入力した値は対象外です"],
   constraints: ["📏 書き方のルールを守っている", "文字数の上限、和暦の日付、金額の書き方などのルール"],
-  application: ["💻 Word・Excel で開ける", "別の仕組みで開き直しても正しく読めるか"],
-  pdf: ["📄 PDF が壊れていない", "白紙の PDF はそのままで、記入分だけが上に重なっているか"],
-  visual: ["👀 見た目のずれがない", "記入欄の外の見た目が1ピクセルもずれていないか"],
+  application: ["💻 別の読み込み用プログラムで開き直せる", "別の仕組みで読み直しても正しく読めるか（Word・Excel の実際の表示は、ダウンロード後に人が確認します）"],
+  visual: ["👀 簡易表示で見た目のずれがない", "内蔵の簡易表示で、記入欄の外がずれていないか（実際の表示・印刷はダウンロード後に確認）"],
 };
-function catOf(c) { const k = (c.category || "").toLowerCase(); return CATS[k] ? k : (c.check_id || "").toLowerCase().startsWith("pdf") ? "pdf" : k; }
+const CATS_PDF = {
+  zip: ["📦 PDF が壊れていない", "白紙の PDF がそのまま先頭に残り、記入分だけが後ろに足されているか"],
+  xml: ["🧩 元のページの中身がそのまま", "白紙のページの描画がそのままで、記入は指定の枠の中だけか"],
+  application: ["💻 別の読み方でも開ける", "別の仕組みで PDF を読み直しても正しく読めるか（実際の表示はダウンロード後に確認）"],
+};
+function catOf(c) { return (c.category || c.check_id || "").toLowerCase(); }
 const svgImg = (svg, alt) => svg ? `<img alt="${esc(alt)}" src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}">` : "<p class='hint'>（画像なし）</p>";
 let previewView = "filled";
 function renderPreview() {
@@ -238,26 +245,41 @@ function plainPrompt(h, labels) {
 }
 const FLAG_JA = {
   wareki: "西暦を和暦に直して書きました", weekday_ok: "曜日が日付と合っているのを確認済み", weekday: "曜日を付け足しました",
+  halfwidth: "全角の英数字を半角に直しました", yen: "金額を「〇〇円」の書き方にそろえました（例：48万円→480,000円）",
+  order: "選んだ項目を様式の順に並べました", name: "氏名の後ろの役職・かっこ書きを外しました",
+  note: "値の後ろの注記（かっこ書き）を外しました", checkbox: "□ を ■ にして選びました", human: "人が入力した値です",
   year_inferred: "⚠️ 年が書いていなかったので AI が推定しました。年が正しいか見てください",
-  unsafe_condensation: "⚠️ 文字数に収めるため短くしました。大事な言葉が消えていないか見てください",
-  advance_notice: "⚠️ 期限（〇日前までに提出など）のルールに注意が必要です",
-  low_conf: "⚠️ AI の自信が低い欄です。特によく見てください", human: "人が入力した値です",
+  condensed: "⚠️ 文字数の上限に収めるため、材料の文を一部けずりました。大事な言葉が消えていないか見てください",
+  re_extracted: "⚠️ 様式のルール（上限・選択肢など）に合わなかったので、材料から別の値を選び直しました。材料と合っているか見てください",
+  re_anchored: "⚠️ 根拠の引用を材料の別の行に付け替えました。言葉が合っているか見てください",
+  unsafe_condensation: "⚠️ 短くすると大事な条件が消えるため、AI は書かずに人の判断に回しました",
+  advance_notice: "⚠️ 期限（〇日前までに提出など）のルールに日付が合っていません。日付を見てください",
+  low_conf: "⚠️ AI の自信が低い欄です。特によく見てください",
+  recovered_unverified: "⚠️ ファイルから読み取った値で、根拠は未確認です。材料と照らしてください",
+};
+const flagPill = (f) => {
+  const t = FLAG_JA[f] || `⚠️ 確認の印（${f}）`;
+  return `<span class="pill ${t.startsWith("⚠️") ? "warn" : "ok"}">${esc(t)}</span>`;
 };
 function prepareStep5() {
   const r = state.run, rep = r.report || {}, vis = r.visual || {};
   const items = (rep.hitl_checklist || []).filter((h) => h.required);
   const ok = rep.overall_status === "PASS" && r.can_approve;
   const checks = rep.checks || [], failed = checks.filter((c) => !c.passed);
-  const filledN = (r.mappings || []).filter((m) => m.filled_value).length;
+  const autoN = (r.mappings || []).filter((m) => m.status === "filled" && m.filled_value).length;
+  const humanN = (r.mappings || []).filter((m) => m.status === "human_entered" && m.filled_value).length;
+  const isPdf = (r.form || {}).file_type === "pdf";
   const compared = vis.boxes_compared != null ? `記入欄の外 ${vis.boxes_compared} か所を比べて、ずれ ${vis.drift_count ?? 0} か所` : "";
   $("#verdict").innerHTML = ok
-    ? `<div class="rp-verdict ok">✅ 書式は崩れていません。<br>AI は ${filledN} か所の欄だけに書きました。<small>機械の検査 ${checks.length} 項目すべて合格。${esc(compared)}。最後に下の確認項目をあなたが押せば完成です。</small></div>`
+    ? `<div class="rp-verdict ok">✅ 機械の検査にすべて合格しました。<br>記入したのは指定の欄だけです（AI ${autoN} 項目${humanN ? `・人が入力 ${humanN} 項目` : ""}）。<small>機械の検査 ${checks.length} 項目に合格。${esc(compared)}。内容と実際の表示・印刷は、あなたが確認してください。下の確認項目をすべて押すと完成です。</small></div>`
     : `<div class="rp-verdict ${failed.length ? "ng" : "warn"}">${failed.length ? `❌ 機械の検査で ${failed.length} 項目が不合格です` : "✏️ まだ入力待ちの欄があります"}<small>このままでは承認できません。「記入内容の修正に戻る」から直してください。</small></div>`;
   const groups = {};
   checks.forEach((c) => { const k = catOf(c); (groups[k] = groups[k] || []).push(c); });
-  if (vis.boxes_compared != null) groups.visual = [{ passed: (vis.drift_count ?? 0) === 0 && (vis.overflow_count ?? 0) === 0 }];
+  if (!groups.visual && typeof vis.identical_outside_slots === "boolean")  // never turns a server failure green
+    groups.visual = [{ passed: vis.identical_outside_slots && !(vis.overflow_count > 0), check_id: "VIS",
+                       details: vis.identical_outside_slots ? "" : `記入欄の外のずれ ${vis.drift_count ?? "?"} か所` }];
   $("#machineCards").innerHTML = Object.entries(groups).map(([k, list]) => {
-    const bad = list.filter((c) => !c.passed).length, [title, sub] = CATS[k] || [k, ""];
+    const bad = list.filter((c) => !c.passed).length, [title, sub] = (isPdf && CATS_PDF[k]) || CATS[k] || [k, ""];
     return `<div class="rp-card ${bad ? "ng" : "ok"}"><b>${bad ? "❌" : "✅"} ${esc(title)}</b><span>${esc(sub)}</span>
       ${bad ? `<br><span>不合格 ${bad} 件：${list.filter((c) => !c.passed).map((c) => esc(c.details || c.check_id)).join(" / ")}</span>` : ""}</div>`;
   }).join("");
@@ -265,7 +287,7 @@ function prepareStep5() {
   const labels = Object.fromEntries((r.slots || []).map((s) => [s.slot_id, s.label || s.slot_id]));
   $("#checklist").innerHTML = items.map((h) => {
     const att = (h.flags || []).length || h.importance === "high";
-    const flags = (h.flags || []).map((f) => `<span class="pill ${String(FLAG_JA[f] || "").startsWith("⚠️") ? "warn" : "ok"}">${esc(FLAG_JA[f] || f)}</span>`).join("");
+    const flags = (h.flags || []).map(flagPill).join("");
     const [title, text] = plainPrompt(h, labels);
     const value = h.kind === "field" ? `<span class="val">${esc(h.value || "（空欄）")}</span>` : "";
     const why = h.source_quote ? `<span class="why">材料に書いてあったこと：「${esc(h.source_quote)}」</span>` : "";
@@ -319,10 +341,18 @@ go(1);
 // load it and go straight to the human checks (STEP 4 when something is missing, otherwise STEP 5).
 (async () => {
   const runId = new URLSearchParams(location.search).get("run_id");
-  if (!runId || !/^\d{8}-\d{6}-[0-9a-f]{6}$/.test(runId)) return;
+  if (runId === null) return;
+  if (!/^\d{8}-\d{6}-[0-9a-f]{6}$/.test(runId)) {
+    $("#aiStatus").insertAdjacentHTML("beforeend", '<span class="pill ng">下書きリンクの形式が正しくありません。元のチャットからリンクをコピーし直してください。</span>');
+    return;
+  }
   setBusy(true);
   try {
     state.run = await api(`/api/runs/${encodeURIComponent(runId)}`);
+    state.fromChat = true;
+    $("#memo").value = ((state.run.memo || {}).text) || ""; $("#memo").readOnly = true; $("#memo").dataset.sample = "0";
+    $("#runBtn").disabled = true;
+    msg("#msg3", "この下書きは Claude とのチャットで作られました。材料を変えて記入し直すときは、元のチャットで依頼してください（欄ごとの修正は STEP 4 でできます）。");
     renderReview();
     [1, 2, 3].forEach(markAuto);
     const rep = state.run.report || {};
