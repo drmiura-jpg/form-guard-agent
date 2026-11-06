@@ -18,8 +18,8 @@ if ($saved -and (Read-Host "退避済みのキー（ANTHROPIC_API_KEY_SAVED・$(
 }
 if (-not $key -or -not $key.StartsWith("sk-ant-")) { throw "API キーの形式ではありません（sk-ant- で始まります）。" }
 $lines = @(
-    "# Form-Guard 専用（git-ignored）。Claude Code 本体はこのファイルを読まない。",
-    "ANTHROPIC_API_KEY=$key",
+    "# Form-Guard 専用（git-ignored）。ANTHROPIC_API_KEY ではなく FORM_GUARD_API_KEY を使うため Claude Code 本体の Max 定額枠に影響しない。",
+    "FORM_GUARD_API_KEY=$key",
     "FORM_GUARD_MODEL_TIER=auto"
 )
 [IO.File]::WriteAllLines($envPath, $lines, (New-Object Text.UTF8Encoding $false))

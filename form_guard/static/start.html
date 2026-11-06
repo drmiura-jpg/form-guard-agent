@@ -78,6 +78,29 @@
   .rp-final { display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin:18px 0 8px; }
   .rp-final input { max-width:360px; font-size:18px; padding:12px; }
   button.huge { font-size:22px; padding:16px 28px; border-radius:12px; }
+  .hero { position:relative; min-height:520px; color:#fff; overflow:hidden; display:flex; align-items:center; background:#0b1f4d; }
+  .hero-bg { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; opacity:.55; }
+  .hero::after { content:""; position:absolute; inset:0; background:linear-gradient(90deg, rgba(8,20,55,.92) 0%, rgba(8,20,55,.6) 55%, rgba(8,20,55,.15) 100%); }
+  .hero-in { position:relative; z-index:1; max-width:1100px; margin:0 auto; padding:56px 28px; width:100%; }
+  .hero-kicker { letter-spacing:.2em; font-size:14px; opacity:.85; margin:0 0 8px; text-transform:uppercase; }
+  .hero-h { font-size:46px; line-height:1.25; margin:0 0 16px; font-weight:800; }
+  .hero-h span { background:linear-gradient(90deg,#7dd3fc,#86efac); -webkit-background-clip:text; background-clip:text; color:transparent; }
+  .hero-p { font-size:18px; line-height:1.8; max-width:640px; opacity:.95; margin:0 0 24px; }
+  .hero-cta { display:flex; gap:12px; flex-wrap:wrap; }
+  .btn-cta { background:linear-gradient(90deg,#22c55e,#16a34a); color:#fff; font-weight:700; font-size:18px; padding:14px 26px; border-radius:999px; text-decoration:none; box-shadow:0 8px 24px rgba(34,197,94,.4); }
+  .btn-ghost { border:2px solid rgba(255,255,255,.7); color:#fff; font-size:17px; padding:12px 22px; border-radius:999px; text-decoration:none; }
+  .hero-badges { list-style:none; display:flex; gap:10px; flex-wrap:wrap; padding:0; margin:22px 0 0; }
+  .hero-badges li { background:rgba(255,255,255,.14); border:1px solid rgba(255,255,255,.25); padding:6px 12px; border-radius:999px; font-size:14px; }
+  .sec-h { text-align:center; font-size:28px; margin:0 0 20px; }
+  .howto { background:#fff; padding:44px 20px; border-bottom:1px solid var(--line); }
+  .how-grid { list-style:none; display:grid; grid-template-columns:repeat(5,1fr); gap:14px; max-width:1100px; margin:0 auto; padding:0; }
+  .how-grid li { text-align:center; background:#f6f8fc; border-radius:16px; padding:14px 10px 18px; }
+  .how-grid img { width:100%; max-width:170px; aspect-ratio:1; object-fit:cover; border-radius:14px; }
+  .how-grid b { display:block; font-size:17px; margin:8px 0 2px; } .how-grid span { font-size:13px; color:var(--sub); }
+  .video-sec { background:#0b1f4d; padding:44px 20px; color:#fff; }
+  .video-sec video { display:block; width:100%; max-width:960px; margin:0 auto; border-radius:14px; box-shadow:0 12px 40px rgba(0,0,0,.45); background:#000; }
+  #app { scroll-margin-top:10px; }
+  @media (max-width:820px) { .how-grid { grid-template-columns:repeat(2,1fr); } .hero-h { font-size:32px; } }
 </style>
 </head>
 <body>
@@ -85,7 +108,31 @@
   <h1>📝 Form-Guard かんたん5ステップ</h1>
   <a href="/">詳しい画面（審査・検証用）へ →</a>
 </header>
-<main>
+<section class="hero">
+  <img class="hero-bg" src="/static/media/hero.jpg" alt="">
+  <div class="hero-in">
+    <p class="hero-kicker">Form-Guard Agent</p>
+    <h1 class="hero-h">書類は、AIに書かせても<br><span>様式を崩さない。</span></h1>
+    <p class="hero-p">Word・Excel・PDF の指定様式に、AI が「書いていい欄だけ」を記入。<br>指定の欄以外が変わっていないかを機械で検査し、最後はあなたが目で確かめて承認します。</p>
+    <div class="hero-cta"><a class="btn-cta" href="#app">▶ いますぐ試す（無料・登録不要）</a><a class="btn-ghost" href="#video">🎬 3分で分かる動画</a></div>
+    <ul class="hero-badges"><li>✅ 機械の検査 21項目</li><li>🔒 事務局欄は書かない</li><li>🙋 最後は人が承認</li></ul>
+  </div>
+</section>
+<section class="howto">
+  <h2 class="sec-h">使い方は 5ステップ</h2>
+  <ol class="how-grid">
+    <li><img src="/static/media/step1.jpg" alt=""><b>1. AIとつなぐ</b><span>お試しなら設定ゼロ</span></li>
+    <li><img src="/static/media/step2.jpg" alt=""><b>2. 書式を入れる</b><span>白紙の様式をアップロード</span></li>
+    <li><img src="/static/media/step3.jpg" alt=""><b>3. 材料を渡す</b><span>メモやメールを貼るだけ</span></li>
+    <li><img src="/static/media/step4.jpg" alt=""><b>4. AIが記入</b><span>指定の欄だけを書く</span></li>
+    <li><img src="/static/media/step5.jpg" alt=""><b>5. 目でチェック</b><span>承認してダウンロード</span></li>
+  </ol>
+</section>
+<section class="video-sec" id="video" hidden>
+  <h2 class="sec-h">🎬 3分でわかる Form-Guard</h2>
+  <video id="demoVideo" controls preload="none" poster="/static/media/hero.jpg"></video>
+</section>
+<main id="app">
   <div id="banner"></div>
   <ol class="steps" id="steps">
     <li data-s="1"><b>STEP 1</b>AIとつなぐ</li>

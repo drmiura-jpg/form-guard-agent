@@ -4,7 +4,7 @@
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 const LOCAL = ["127.0.0.1", "localhost", "[::1]", "::1"];
-const state = { step: 1, run: null, discoveryId: null, discoveryKey: "", busy: false, seq: 0, modeTouched: false };
+const state = { step: 0, run: null, discoveryId: null, discoveryKey: "", busy: false, seq: 0, modeTouched: false };
 
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -40,10 +40,10 @@ function setBusy(on) {
   if (!on) $("#approveBtn").disabled = !(state.run && state.run.can_approve && state.run.report.overall_status === "PASS");
 }
 function go(n) {
-  state.step = n;
+  const prev = state.step; state.step = n;
   $$("section.card").forEach((c) => c.classList.toggle("on", +c.dataset.s === n));
   $$("#steps li").forEach((li) => { const s = +li.dataset.s; li.className = s === n ? "on" : s < n ? "done" : ""; });
-  window.scrollTo(0, 0);
+  if (n > 1 || prev > 1) $("#app").scrollIntoView({ block: "start" });
 }
 function markAuto(n) { $$("#steps li").forEach((li) => { if (+li.dataset.s === n) li.className = "auto"; }); }
 const mode = () => (document.querySelector("input[name=mode]:checked") || {}).value || "demo";
@@ -403,6 +403,11 @@ $("#approveBtn").addEventListener("click", async () => {
 });
 
 go(1);
+
+// demo video: shown only when the server has it (GET /media/demo.mp4 is not part of the repository)
+fetch("/media/demo.mp4", { headers: { Range: "bytes=0-0" }, credentials: "same-origin" }).then((r) => {
+  if (r.ok) { $("#demoVideo").src = "/media/demo.mp4"; $("#video").hidden = false; }
+}).catch(() => {});
 
 // Opened from a Claude chat (MCP form_guard_fill → /start?run_id=…): the AI already filled and verified the draft;
 // load it and go straight to the human checks (STEP 4 when something is missing, otherwise STEP 5).

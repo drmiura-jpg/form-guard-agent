@@ -138,7 +138,7 @@ def load_dotenv(path: Optional[Path] = None) -> None:
 def live_credentials_present() -> bool:
     if os.environ.get("FORM_GUARD_FORCE_DEMO") == "1":  # e.g. a temporary public tunnel: never spend API credit
         return False
-    return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+    return bool(os.environ.get("FORM_GUARD_API_KEY") or os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
 
 
 def resolve_mode(mode: str = "auto") -> str:
@@ -832,7 +832,8 @@ class ClaudeEngine:
                 import anthropic
             except ImportError as exc:  # pragma: no cover
                 raise LiveEngineError("the anthropic package is not installed") from exc
-            self._client = anthropic.Anthropic()
+            api_key = os.environ.get("FORM_GUARD_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+            self._client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
         return self._client
 
     def _request(self, model: str, thread: list[dict[str, Any]], system: str,

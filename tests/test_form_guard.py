@@ -6133,3 +6133,16 @@ def test_start_page_explains_every_flag_and_category_and_loads_chat_drafts(api):
     for cat in ("zip", "xml", "layout", "text", "grounding", "constraints", "application", "visual"):
         assert f"  {cat}: [" in js, cat
     assert 'get("run_id")' in js and "/api/runs/${encodeURIComponent(runId)}" in js
+
+
+def test_start_page_media_and_optional_demo_video(api, monkeypatch, tmp_path):
+    page = api.get("/start").text
+    for name in ("hero", "step1", "step2", "step3", "step4", "step5"):
+        assert f"/static/media/{name}.jpg" in page and api.get(f"/static/media/{name}.jpg").status_code == 200
+    monkeypatch.setenv("FORM_GUARD_DEMO_VIDEO", str(tmp_path / "missing.mp4"))
+    assert api.get("/media/demo.mp4").status_code == 404  # the page then keeps the player hidden
+    video = tmp_path / "demo.mp4"
+    video.write_bytes(b"\x00" * 64)
+    monkeypatch.setenv("FORM_GUARD_DEMO_VIDEO", str(video))
+    r = api.get("/media/demo.mp4", headers={"Range": "bytes=0-0"})
+    assert r.status_code == 206 and r.headers["content-type"] == "video/mp4"

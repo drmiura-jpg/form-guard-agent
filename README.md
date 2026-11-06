@@ -16,7 +16,7 @@ Built for **Built with Claude: Japan 2026** (development started Monday, 2026-11
 | **① インパクト（潜在的インパクト）**<br>Potential Impact | **30%** | 行政・大学・施設の指定様式（`.docx` / `.xlsx` / 固定 `.pdf`）で、罫線1本・結合セル1つの崩れによる差し戻し（押印・決裁の取り直しや再提出の手戻り）を防ぎ、非エンジニアでもWeb画面で各値の原文根拠を確かめてから承認できる（導入はPython 3.10以上・APIキー無しでも全工程が動く） | [トップ画面 `/` 上部バナー](http://127.0.0.1:8000/)（[画面例：視覚比較](docs/screenshots/01_visual_diff.png)） · [ハッカソン後の継続利用場面 ↓](#why-this-matters--who-keeps-using-it-after-the-hackathon) |
 | **② デモ（デモの完成度）**<br>Demo & Presentation | **25%** | 作り直し版（失敗再現データ・7項目不合格）との視覚比較、マーカーなし白紙からの4段階空欄自動発見、原文引用ハイライトと推測拒否（法人番号は人の入力待ち） | [`/#tour=1`（視覚比較）](http://127.0.0.1:8000/#tour=1)（[画面例：視覚比較](docs/screenshots/01_visual_diff.png)） · [`/#tour=2`（空欄自動発見）](http://127.0.0.1:8000/#tour=2)（[画面例：空欄発見](docs/screenshots/06_unmarked_discovery.png)） · [`/#tour=3`（原文根拠・推測拒否）](http://127.0.0.1:8000/#tour=3)（[画面例：原文根拠・デモ1](docs/screenshots/02_fields_and_sources.png)） · [3分動画台本](docs/DEMO_VIDEO_SCRIPT_JA.md) |
 | **③ Claudeの活用（Claude Code中心の開発・使い分け）**<br>Creative Use of Claude | **25%** | 欄ごとの3段モデル振り分け（Haiku 4.5 / Sonnet 5 / Opus 5.5・実API疎通確認済み）＋404フォールバック連鎖、2段フック（`PreToolUse` / `PostToolUse`）、`Edit`/`Write`ツール無しの4サブエージェント（うち3種はフック付き`Bash`を使用）、Skills 6種、追加のMCP SDK不要の5ツール MCP（本体の依存パッケージは必要）、公募ポータル [`/portal`](http://127.0.0.1:8000/portal) 連携 | [`/#tour=4`（「Claude Code 連携 · Architecture」タブ）](http://127.0.0.1:8000/#tour=4)（[画面例：Claude Code 連携（6デモ・固定PDF対応・フック・MCP・サブエージェント）](docs/screenshots/07_claude_code_architecture.png)） · [BUILT_WITH_CLAUDE_CODE.md](docs/BUILT_WITH_CLAUDE_CODE.md) |
-| **④ 深さと実行力（実装の深さと実行力）**<br>Depth & Execution | **20%** | 7区分21項目＋`VIS-01`（指定欄以外のずれ `0 px`）の決定論的検査、版（`revision`）と `SHA-256` に結び付いた人間承認ロック、実機 Word/Excel 16.0・実API 3階層ルーティング検証、276件の自動テスト（APIキー不要で再現可） | [`/#tour=5`（21項目構造証明＆人間承認ロック）](http://127.0.0.1:8000/#tour=5)（[画面例：21項目構造検査](docs/screenshots/03_structural_audit.png)・[画面例：人間承認ゲート（デモ1承認完了・SHA-256受領印）](docs/screenshots/04_human_approval.png)） · [試行錯誤の記録](docs/BUILT_WITH_CLAUDE_CODE.md#5-iterating-with-claude-code) · [実機検証記録](#verified-on-real-machines-2026-11-03火) · [自動テスト (`tests/test_form_guard.py`)](tests/test_form_guard.py) |
+| **④ 深さと実行力（実装の深さと実行力）**<br>Depth & Execution | **20%** | 7区分21項目＋`VIS-01`（指定欄以外のずれ `0 px`）の決定論的検査、版（`revision`）と `SHA-256` に結び付いた人間承認ロック、実機 Word/Excel 16.0・実API 3階層ルーティング検証、277件の自動テスト（APIキー不要で再現可） | [`/#tour=5`（21項目構造証明＆人間承認ロック）](http://127.0.0.1:8000/#tour=5)（[画面例：21項目構造検査](docs/screenshots/03_structural_audit.png)・[画面例：人間承認ゲート（デモ1承認完了・SHA-256受領印）](docs/screenshots/04_human_approval.png)） · [試行錯誤の記録](docs/BUILT_WITH_CLAUDE_CODE.md#5-iterating-with-claude-code) · [実機検証記録](#verified-on-real-machines-2026-11-03火) · [自動テスト (`tests/test_form_guard.py`)](tests/test_form_guard.py) |
 
 ---
 
@@ -109,7 +109,7 @@ pip install -r requirements.txt
 python -m form_guard.cli --all-demos     # runs the 3 marked fictional demos -> output/index.html
 python -m form_guard.cli --serve         # web UI on http://127.0.0.1:8000 (all 6 demos + grant portal: /portal)
 #   guided 5-step page for first-time users: http://127.0.0.1:8000/start
-pytest -v                                # 276 tests
+pytest -v                                # 277 tests
 ```
 
 Requires Python 3.10+. Without `ANTHROPIC_API_KEY` everything runs on the deterministic **offline demo engine**, so the

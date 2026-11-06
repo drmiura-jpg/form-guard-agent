@@ -585,6 +585,16 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
     def index():
         return FileResponse(STATIC_DIR / "index.html", media_type="text/html; charset=utf-8")
 
+    @app.get("/media/demo.mp4")
+    def demo_video():
+        """The 3-minute demo video for the guided page (not in the repository): FORM_GUARD_DEMO_VIDEO or
+        ../demo_video_output/FormGuard_Agent_Demo_175s_Mail.mp4. 404 when absent (the page then hides the player)."""
+        default = Path(app.state.project_root).parent / "demo_video_output" / "FormGuard_Agent_Demo_175s_Mail.mp4"
+        path = Path(os.environ.get("FORM_GUARD_DEMO_VIDEO") or default)
+        if not path.is_file():
+            raise HTTPException(404, "demo video not available")
+        return FileResponse(path, media_type="video/mp4")
+
     @app.get("/start", response_class=HTMLResponse)
     def start():
         """Guided 5-step page: connect AI → upload form → paste material → review → approve & download."""
