@@ -1726,6 +1726,7 @@ def ensure_samples(samples_dir: Path | str | None = None) -> Path:
     base = Path(samples_dir) if samples_dir else default_samples_dir()
     every = DEMOS + UNMARKED_FORMS + EXTRA_UNMARKED_FORMS + PDF_FORMS
     needed = [base / "blank_forms" / d["form"] for d in every] + \
+             [base / "blank_forms" / f"{stem}.slots.json" for stem in SPECS] + \
              [base / "memos" / d["memo"] for d in every] + \
              [base / "broken_before" / d["naive"] for d in DEMOS + PDF_FORMS]
     if not all(p.exists() for p in needed):

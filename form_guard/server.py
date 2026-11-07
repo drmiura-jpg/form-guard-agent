@@ -81,6 +81,7 @@ from .models import FieldMapping
 from .pipeline import HANDOFF_NAME, HandoffError, PipelineResult, load_handoff_draft, new_run_id, run_pipeline
 from .samples import (
     DEMOS,
+    EXTRA_UNMARKED_FORMS,
     PDF_FORMS,
     UNMARKED_FORMS,
     demo_by_id,
@@ -439,8 +440,8 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
     app.state.client = client
     app.state.samples_dir = samples_dir
     app.state.project_root = Path(project_root or PROJECT_ROOT)  # where .claude/ and .mcp.json live
-    app.state.import_roots = [Path(p).resolve() for p in (import_roots if import_roots is not None
-                                                          else default_import_roots(app.state.project_root))]
+    default_roots = [] if os.environ.get("FORM_GUARD_FORCE_DEMO") == "1" else default_import_roots(app.state.project_root)
+    app.state.import_roots = [Path(p).resolve() for p in (import_roots if import_roots is not None else default_roots)]
     app.state.workflow = None  # measured once per process (GET /api/claude-suite)
     workflow_lock = threading.Lock()
 
@@ -593,7 +594,7 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
         path = Path(os.environ.get("FORM_GUARD_DEMO_VIDEO") or default)
         if not path.is_file():
             raise HTTPException(404, "demo video not available")
-        return FileResponse(path, media_type="video/mp4")
+        return FileResponse(path, media_type="video/mp4", headers={"Cache-Control": "no-cache"})
 
     @app.get("/start", response_class=HTMLResponse)
     def start():
@@ -766,6 +767,44 @@ def create_app(run_root: Optional[Path] = None, samples_dir: Optional[Path] = No
                     "note": "measured on this machine with the offline engine (no network); the manual columns are "
                             "counted from the files, not a timed study of a person"}
         return {**suite, "workflow": app.state.workflow}
+
+    # ------------------------------------------------ 架空の Gmail 受信箱デモ (fictional Gmail inbox showcase for /start)
+    DEMO_GMAIL_INBOX = (
+        {"mail_id": "mail5", "demo_id": "form10", "from_name": "架空市民交流センター 予約窓口",
+         "from_addr": "booking@example.jp", "received_at": "2026年11月17日（火）14:20（架空の日時）",
+         "subject": "【12月3日（木）ご予約分】会議室予約申請書（Excel）のご提出について",
+         "lead": "架空町内会 子ども会 見本様、12月3日（木）18:00〜20:00の会議室予約申請書（Excel）を添付いたします。受付番号・使用料・許可印はセンターで記入します。記入に使う内容（事前にいただいた内容）は下記のとおりです。"},
+        {"mail_id": "mail4", "demo_id": "form9", "from_name": "市民課 庶務係（架空市役所）",
+         "from_addr": "shomu@example.jp", "received_at": "2026年11月16日（月）08:50（架空の日時）",
+         "subject": "【様式送付】11月26日（木）〜11月27日（金）の年次有給休暇届（Word）",
+         "lead": "模擬主事、ご連絡いただいた11月26日（木）〜11月27日（金）の休暇届の白紙様式（Word）を添付します。受理印・人事課処理欄は空欄のままご提出ください。記入に使う内容（事前にいただいた内容）は下記のとおりです。"},
+        {"mail_id": "mail2", "demo_id": "form8", "from_name": "研究支援室 会計担当（架空学術機関）",
+         "from_addr": "kaikei@example.jp", "received_at": "2026年11月13日（金）11:30（架空の日時）",
+         "subject": "【要提出】精密電子天びん更新の物品購入申請書（Excel）",
+         "lead": "架空先生、故障した天びんの更新について添付の物品購入申請書（Excel）にご記入をお願いします。決裁印・予算科目・発注番号は会計課で記入します。記入に使う内容（事前にいただいた内容）は下記のとおりです。"},
+        {"mail_id": "mail1", "demo_id": "form7", "from_name": "営業部 総務担当（架空サンプル株式会社）",
+         "from_addr": "soumu@example.jp", "received_at": "2026年11月12日（木）09:15（架空の日時）",
+         "subject": "【11月24日（火）〜11月25日（水）の展示会】国内出張申請書のご提出をお願いします",
+         "lead": "見本主任、11月24日（火）〜11月25日（水）の架空産業展示会の出張申請書（添付Word）をご記入のうえご返送ください。承認印と旅費精算番号は総務部で記入します。記入に使う内容（事前にいただいた内容）は下記のとおりです。"},
+        {"mail_id": "mail3", "demo_id": "form6", "from_name": "次世代AI・分散システム研究会 事務局（架空）",
+         "from_addr": "grant-office@example.jp", "received_at": "2026年11月3日（火）10:00（架空の日時）",
+         "subject": "【公募様式】令和8年度 第2回 研究助成申請書（固定PDF・様式第6号）の送付",
+         "lead": "見本先生、第2回研究助成の指定様式（固定PDF）をお送りします。上限は50万円、共同研究先との合意状況（□合意済み／□協議中）にチェックを入れてご提出ください。記入に使う内容（事前にいただいた内容）は下記のとおりです。"},
+    )
+
+    @app.get("/api/gmail-inbox")
+    def gmail_inbox():
+        """Fictional Gmail inbox messages with attached blank forms for the guided /start page."""
+        base = samples()
+        by_id = {u["id"]: (u, unmarked_paths(u, base)) for u in UNMARKED_FORMS + EXTRA_UNMARKED_FORMS}
+        for f in PDF_FORMS:
+            by_id[f["id"]] = (f, pdf_paths(f, base))
+        items = []
+        for m in DEMO_GMAIL_INBOX:
+            u, p = by_id[m["demo_id"]]
+            items.append({**m, "title": u["title"], "org": u["org"], "file_type": u["file_type"],
+                          "attachment": p["form"].name, "memo_text": read_memo(p["memo"])})
+        return {"fictional": True, "messages": items}
 
     # ------------------------------------------------ 架空学術振興ポータル (fictional grant / study-group portal)
     portal_lock = threading.Lock()

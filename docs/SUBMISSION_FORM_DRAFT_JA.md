@@ -1,6 +1,6 @@
 # Built with Claude: Japan 2026 — 提出フォーム記入文案
 
-作成日：2026-11-03（火）／更新日：2026-11-05（木）
+作成日：2026-11-03（火）／更新日：2026-11-07（土）
 公式提出締切：**2026-11-08（日）20:00 JST**（提出後も 2026-11-08（日）20:00 JST より前ならプラットフォーム上で更新可、20:00 JST 以降は変更不可）
 ※本ファイルはイベント提出フォーム各欄への記入用テキスト案（文字数別バリエーション）をまとめた補助資料です。プロジェクトの仕様・使い方の正本は [README.md](../README.md) および [BUILT_WITH_CLAUDE_CODE.md](BUILT_WITH_CLAUDE_CODE.md) をご参照ください。
 
@@ -36,8 +36,8 @@
   `「様式を変えないで」が鉄則の日本の申請業務で、Word・Excel・固定PDFの元の様式は一切触らず指定欄だけを原文根拠つきでピンポイント記入し、欄外の書式不変を21項目検査と視覚比較で確かめるAI`
 - **日本語（140字以内・137字）**：
   `研究費や行政申請のWord・Excel・固定PDF様式の指定欄だけをバイト単位で記入。Haiku/Sonnet/Opus 5.5の3階層で原文引用つきの値を作り、21項目の構造検査で欄外の不変を確認。根拠の無い値は推測で埋めず、人の承認までWebダウンロードをロックします。`
-- **英語（120 chars / 116 chars）**：
-  `Pinpoint Word/Excel/PDF form filler with source quotes, 21 structural checks, 0 px non-target drift, and human gate.`
+- **英語（120 chars / 115 chars）**：
+  `Pinpoint Word/Excel/PDF form filler with source quotes, 21 structural checks, built-in layout diff, and human gate.`
 - **英語（240 chars / 224 chars）**：
   `Rewrites only designated fields in official Word, Excel, and fixed-PDF forms while checking for zero layout drift outside target cells via 21 deterministic checks, source grounding, 3-tier Claude routing, and human sign-off.`
 
@@ -46,12 +46,14 @@
 - **公開 GitHub リポジトリ URL**：
   `https://github.com/drmiura-jpg/form-guard-agent`
 - **3分間のデモ動画 URL**：
-  `＜収録・アップロード後に Loom（Anyone with the link can view）または提出用の YouTube アカウント（既存の個人活動用チャンネルは流用しない）の限定公開（Unlisted）の URL を記入＞`
-  - **動画公開設定の確認項目**：
+  `＜アップロード後に Loom（Anyone with the link can view）または提出用の YouTube アカウント（既存の個人活動用チャンネルは流用しない）の限定公開（Unlisted）の URL を記入＞`
+  - **公開設定・提出前の確認項目**：
+    - [ ] GitHub リポジトリを Public に切り替え、シークレットウィンドウ（未ログイン状態）で `README.md` と `LICENSE` が開けることを確認した（全コミット履歴の秘密情報検査済み）。
+    - [ ] デモ動画アップロード後、本ファイルの3箇所（§1-④・§5日本語・§5英語）を同一の閲覧URLに置換した。
     - [ ] Loom の場合は「**Anyone with the link can view**」、YouTube の場合は提出用のアカウント（既存の個人活動用チャンネルは流用しない）の「**限定公開（Unlisted）**」に設定した（投稿前にチャンネル名・アイコン・説明欄・投稿者プロフィールの公開表示を確認。「非公開（Private）」は再生不可）。
     - [ ] シークレットウィンドウ（未ログイン状態）で URL を開き、最初から最後まで音声つきで再生できることを確かめた。
-    - [ ] 動画の長さが **3分（180秒）以内**（台本設計・実尺とも 175.00秒＝2分55秒）であることを確かめた。
-    - [ ] 合成音声および Step 5 説明用まとめ図（`s5_4_autoadapt_showcase.png`）で引用した公的公開白紙様式3点の出典・利用条件・大会条件との整合を最終確認した（出典表記は `README.md` および `docs/DEMO_VIDEO_SCRIPT_JA.md` に記載済み：①デモ動画の日本語ナレーション音声は作成者本人の承諾のもと本人の声から ElevenLabs `https://elevenlabs.io/` の `eleven_v4` で生成し外部BGM・効果音は不使用、②Step 5 まとめ図の3様式はいずれも各機関が一般公開している白紙様式［`A08` 厚生労働省「第3種特別加入保険料申告内訳名簿」配布元 `https://www.mhlw.go.jp/stf/seisakunitsuite/bunya/koyou_roudou/roudoukijun/roudouhoken.html`、`L13` 日本政策金融公庫「事業承継計画書」配布元 `https://www.jfc.go.jp/n/service/dl_kokumin.html`、`L39` 法務局「取下書（書類補正による登記申請取下げ・様式）」配布元 `https://houmukyoku.moj.go.jp/homu/minji79.html`］に合成ダミー値をオフラインで仮記入した構造検証プレビュー）。
+    - [ ] 動画の長さが **3分（180秒）以内**（V6 フルHD提出版 `FormGuard_Agent_Demo_175s_1080p.mp4`：実尺 `175.00秒`・`19.08 MiB / 20.01 MB [20,007,852 bytes]`・SHA-256 `192b369383b4b033fb216dafc0416f5616e9d114ad5a609c00c8e48e50b89f78`、または2026-11-08（日）収録の生声版）であることを確かめた。
+    - [ ] 映像・スライド・まとめ図（`s5_4_autoadapt_showcase.png`）に映る様式はすべて自作の架空様式（`form1`〜`form10`）のみとし、第三者の外部様式画像は提出動画に含めないことを確認した（外部BGM・効果音は不使用）。
 
 ---
 
@@ -76,15 +78,14 @@
 
 ---
 
-### B. 日本語・短縮版（文字数制限が厳しい欄向け・箇条書き・バッククォート・改行除き 524字／改行除き 532字／そのまま 534字）
+### B. 日本語・短縮版（公式指定「500字以内」遵守版・そのまま 461字／改行除き 460字）
 
-- 開発者自身も倫理申請などで何度も差し戻されて困り、AIで試してもうまくいかず「もうAIを使うのはやめようか」と思った実体験から開発しました。日本の大学・自治体・施設の申請業務では、指定された Word・Excel・固定PDF 様式の罫線や結合セル、計算式が崩れると差し戻し（押印・決裁の取り直しや再提出の手戻り）の原因になり、文書全体を作り直す方法ではどこが変わったか分からず安全に使えませんでした。
-- Form-Guard Agent は、元の様式は一切触らずに指定欄だけをピンポイントで書き換え（対応する固定PDFは元バイト不変の増分更新）、7区分・21項目の構造検査と視覚検査（Word/Excelの内蔵配置比較・固定PDFの欄外画素比較でずれ `0 px`、最終的な実機表示は人が確認）で欄外の不変を確かめます。
-- マーカーの無い白紙様式でも申請者欄と事務局専用欄を4段階で自動仕分けして誤記入をロックし、AI抽出値に原文引用ハイライトを付与（年の補完は推定表示）。メモに無い事実は推測で埋めず人の入力待ちに残し、人が最終確認するまでダウンロードを解錠しません。Web UI・CLI・Claude Code MCP で現場の定型様式業務に活用できます。
+開発者自身が倫理申請等で何度も差し戻され、「もうAIを使うのはやめようか」と思った実体験から開発しました。大学・自治体・施設の申請業務では、指定されたWord・Excel・固定PDF様式の罫線や結合セル、計算式が崩れると差し戻し（押印・決裁の取り直しや再提出）の原因になります。従来の文書全体を再生成する方式では、どこが変わったか分からずそのまま使うには壁がありました。
+Form-Guard Agentは、元の白紙様式は一切触らず指定欄の文字だけをピンポイントで書き換え、7区分・21項目の構造検査と内蔵の配置比較（付属様式でずれ0px・実機表示は人が確認）で欄外を検査します。マーカーのない白紙様式でも申請者欄と事務局専用欄を4段階で自動仕分けして誤記入をロックし、AI抽出値には元メモの原文引用スパンを紐づけます（年の補完は推定表示）。メモにない事実は推測で埋めず人の入力待ちに残し、人が最終確認するまでダウンロードを解錠しません。Web・CLI・Claude Code MCPで、現場の定型様式業務に活用できます。
 
 ---
 
-### C. 英語版（English Overview — 箇条書き・太字・斜体・バッククォート・改行除き 2,378 chars／改行除き 2,448 chars／そのまま 2,457 chars）
+### C. 英語版（English Overview — 箇条書き・太字・斜体・バッククォート・改行除き 2,408 chars／改行除き 2,478 chars／そのまま 2,487 chars）
 
 **Problem & Target Users (Born from Firsthand Experience):**
 - I repeatedly experienced frustrating administrative rejections (差し戻し) on ethics review and institutional forms; when I tried using AI to help, it did not work as I had hoped, to the point where I almost gave up on using AI for paperwork altogether. Form-Guard Agent was born from that firsthand frustration and the conviction that preserving the original template while filling only designated fields can genuinely make application workflows much easier.
@@ -92,7 +93,7 @@
 - One broken border or altered clause can trigger administrative rejection (差し戻し), requiring internal seals/approvals to be re-obtained and the form to be re-submitted. Regenerating a complete form can alter borders, merged cells, or formulas and introduce unstated numbers, making it unsafe for non-engineer staff. (The comparison file in the demo uses scripted simulated regeneration failures to illustrate these structural checks.)
 
 **Solution:**
-- Form-Guard Agent performs **byte-range pinpoint replacement** only on designated fields (and byte-preserving incremental overlay on supported fixed PDFs with embedded Unicode CID fonts; see `README.md` Limitations), backed by **21 deterministic structural checks + `VIS-01` visual verification**:
+- Form-Guard Agent performs **byte-range pinpoint replacement** only on designated fields (and byte-preserving incremental overlay on supported fixed PDFs that provide a Unicode-encoded CID font in the page resources; see `README.md` Limitations), backed by **21 deterministic structural checks + `VIS-01` visual verification**:
 - **1. Visual & Structural Checks:** Visual checks compare built-in layout geometry for Word/Excel and pixels outside designated boxes for supported PDFs (`0 px` drift in the built-in checks; native display and printing require final human review, and production adoption requires per-template field and display verification).
 - **2. 4-Stage Blank-Cell Discovery** on unmarked forms (`form4` Word, `form5` Excel, `form6` PDF), separating `applicant_fillable` cells from locked `office_only` cells and Excel formulas.
 - **3. Verbatim Source Grounding (no guessed facts) & Human Gate:** AI-extracted values carry source quotes; inferred years are flagged for review (`year_inferred`), unstated facts stay `needs_human_input`, and reviewer-entered values are recorded as human attestations. The application holds unsafe deletions during its own length repair, while pre-condensed model output is reviewed against the full source.
@@ -150,7 +151,33 @@
 
 | 審査基準（配点） | 公式チェック項目（要約） | Form-Guard Agent の実装と定量エビデンス |
 | :--- | :--- | :--- |
-| **1. インパクト (30%)** | ・日本の具体的な現場から出発しているか<br>・テーマ1「足りないもの」／テーマ2「阻んでいた壁」を捉えているか<br>・誰がどんな場面でどれくらい困っているか具体的か<br>・ハッカソン後も使い続けられるか | ・研究費変更届（Word）・自治体補助金申請（Word）・月次設備点検（Excel）・白紙2様式・固定PDF助成金申請の計6様式で実証<br>・付属Word/Excel 5様式（41欄中40欄記入・848字）をオフラインで計測：XMLタグ 2,119・定型文 171・結合セル 124・罫線 650 を、計測スクリプトの表で 120〜246 ms・Web保存測定で 119〜379 ms（0.4秒未満）、デモ動画収録時の画面実測（`seg18`）で 361〜1,234 ms（約0.4〜1.2秒）で照合（固定PDF・API応答・人の確認時間は含まない。`form1` ライブAPI記録は各段階合計約29.63秒）<br>・Web UI / CLI / `.mcp.json` で継続利用可能（実務導入時は様式ごとの欄指定と表示確認が必要。固定PDFはページ内にUnicode CIDフォントを持つPDFが対象） |
-| **2. デモ (25%)** | ・冒頭で「誰の、どんな課題を、どう解決するか」が明確か<br>・前提知識のない人でも実際の操作で価値が分かるか<br>・最後まで見たくなる動画か | ・冒頭35秒（0〜25秒で開発者の実体験・社会的意義と現場課題、25〜35秒の `#tour=1` で比較）において、様式ごと作り直した場合の失敗を再現した比較用の模擬ファイル（結合セル19→0・罫線定義9→0・A4→レター・7項目不合格）と Form-Guard 版（21/21合格・内蔵配置比較のずれ `0 px`）を Before/After スライダーで比較<br>・Web画面上部の5ステップ審査員ガイドツアー（`#tour=1`〜`#tour=5`）と専門用語噛み砕きテロップで非エンジニアにも直感的に伝達 |
+| **1. インパクト (30%)** | ・日本の具体的な現場から出発しているか<br>・テーマ1の場合：その世界に身を置いてきた人だからこそ見えた「足りないもの」を捉えているか<br>・テーマ2の場合：届いていなかった具体的な人を阻んでいた壁を取り除いているか<br>・誰がどんな場面でどれくらい困っているか具体的か<br>・ハッカソン後も使い続けられるか | ・研究費変更届（Word）・自治体補助金申請（Word）・月次設備点検（Excel）・白紙2様式・固定PDF助成金申請の計6様式で実証<br>・付属Word/Excel 5様式（41欄中40欄記入・848字）をオフラインで計測：XMLタグ 2,119・定型文 171・結合セル 124・罫線 650 を、計測スクリプトの表で 120〜246 ms・Web保存測定で 119〜379 ms（0.4秒未満）、デモ動画収録時の画面実測（`seg18`）で 361〜1,234 ms（約0.4〜1.2秒）で照合（固定PDF・API応答・人の確認時間は含まない。`form1` ライブAPI記録は各段階合計約29.63秒）<br>・Web UI / CLI / `.mcp.json` で継続利用可能（実務導入時は様式ごとの欄指定と表示確認が必要。固定PDFはページ内にUnicode CIDフォントを持つPDFが対象） |
+| **2. デモ (25%)** | ・冒頭で「誰の、どんな課題を、どう解決するか」が明確か<br>・前提知識のない人でも実際の操作で価値が分かるか<br>・最後まで見たくなる動画か | ・175秒・全19カット構成（Step 1: 0:00–0:35 原体験と課題解決／Step 2: 0:35–1:10 原文引用と推測ゼロ／Step 3: 1:10–1:45 白紙空欄4段階発見／Step 4: 1:45–2:19 Claude 3階層＆Claude Code拡張／Step 5: 2:19–2:55 21項目検査・人間承認・公開190件検証）において、様式ごと作り直した場合の失敗を再現した比較用の模擬ファイル（結合セル19→0・罫線定義9→0・A4→レター・7項目不合格）と Form-Guard 版（21/21合格・付属デモの内蔵配置比較でずれ `0 px`）を対比<br>・自作架空様式のみを使用し、日本語ナレーションと操作画面の同期で非エンジニアにも直感的に伝達 |
 | **3. Claudeの活用 (25%)** | ・基本的な使い方を超えた創造的活用か<br>・Claude Code を開発の中心に据えているか<br>・モデルや機能（Skills、サブエージェント、MCP、フック等）を目的に応じて使い分けているか | ・欄別3モデル自動振り分け（Haiku 4.5 / Sonnet 5 / Opus 5.5：ライブAPI `form1` で3モデルの初回提案応答と `21/21 PASS` を確認）＋上限超過等の決定論的再抽出と Opus 自己修正設計（オフラインデモとモックAPIテストで確認）<br>・2段階フック（`PreToolUse` 白紙保護＋`PostToolUse` 構文・import検査）、`Edit`/`Write` 無しの4サブエージェント（うち3種はフック付き `Bash`）、6 Skills、5ツール MCP＋Web承認引き継ぎ |
-| **4. 深さと実行力 (20%)** | ・試行錯誤を重ねて磨き上げ、課題にじっくり向き合った跡が見えるか<br>・設計と実装が丁寧か<br>・困っている人が安心してそのまま使える形か | ・`.venv` 環境で **全272件の `pytest` 合格（`272 passed, 0 skipped`）**、オフラインプログラム **45試行（`45/45 ok`・2026-11-04（水）にコミット `282fb0c` で再検証済み）**、ヘッドレス Edge 実ブラウザ **16試行（`16/16 ok`・コンソールエラー0・2026-11-04（水）にコミット `282fb0c` で再検証済み）**<br>・付属Word/Excel 5様式について実機 Microsoft Word 16.0 / Excel 16.0 での開閉・ページ数・計算式再計算（`COUNTIF` / `SUM`）確認済み<br>・マーカーの無い白紙様式（表や対応段落の空欄を持つ `.docx` / `.xlsx`。固定PDFでの自動適応は未検証）に対応するゼロ設定の自動適応モード（`--auto-adapt`：空欄自動発見＋`VIS-01` セルはみ出し `drift_outside_slots` / `grown_slots` 検出時の `max_chars` 自動縮小［比率 `0.60〜0.65`・最小 `1`・最大3ラウンド］＋適応時の `<form>.adapted.slots.json` 保存）を実装し、公開実ファイル計190件（3段階間のURL・SHA-256重複0件）の3段階限定試験（オフライン・合成ダミーメモによる記入試験：①公開100ファイルで完走63件中58件が21項目合格［隔離環境での修正後63/63合格・空欄0件16・旧バイナリ等21件安全拒否］、②融資・信用保証・登記40様式で39/40件が21項目＋`VIS-01` 合格［図形のみの1件は空欄候補0件］、③①②と重複しない別ジャンルの新規公開50様式の `--auto-adapt` 検証で50/50件が21項目＋`VIS-01` 検査通過［191欄記入・69欄安全保留・`PASS` 4様式・入力待ち46様式］）でも構造改変 0件・`GRD-01` 違反 0件を検証済み |
+| **4. 深さと実行力 (20%)** | ・試行錯誤を重ねて磨き上げ、課題にじっくり向き合った跡が見えるか<br>・設計と実装が丁寧か<br>・困っている人が安心してそのまま使える形か | ・`.venv` 環境で **全277件の `pytest` 合格（`277 passed, 0 skipped`・2026-11-07（土）検証ログ `output/pytest_run_20261107_2205.log` 保存済み）**、オフラインプログラム **45試行（`45/45 ok`・2026-11-04（水）にコミット `282fb0c` で再検証済み）**、ヘッドレス Edge 実ブラウザ **16試行（`16/16 ok`・コンソールエラー0・2026-11-04（水）にコミット `282fb0c` で再検証済み）**<br>・付属Word/Excel 5様式について実機 Microsoft Word 16.0 / Excel 16.0 での開閉・ページ数・計算式再計算（`COUNTIF` / `SUM`）確認済み<br>・マーカーの無い白紙様式（表や対応段落の空欄を持つ `.docx` / `.xlsx`。固定PDFでの自動適応は未検証）に対応するゼロ設定の自動適応モード（`--auto-adapt`：空欄自動発見＋`VIS-01` セルはみ出し `drift_outside_slots` / `grown_slots` 検出時の `max_chars` 自動縮小［比率 `0.60〜0.65`・最小 `1`・最大3ラウンド］＋適応時の `<form>.adapted.slots.json` 保存）を実装し、公開実ファイル計190件（3段階間のURL・SHA-256重複0件）の3段階限定試験（オフライン・合成ダミーメモによる記入試験：①公開100ファイルで完走63件中58件が21項目合格［隔離環境での修正後63/63合格・空欄0件16・旧バイナリ等21件安全拒否］、②融資・信用保証・登記40様式で39/40件が21項目＋`VIS-01` 合格［図形のみの1件は空欄候補0件］、③①②と重複しない別ジャンルの新規公開50様式の `--auto-adapt` 検証で50/50件が21項目＋`VIS-01` 検査通過［191欄記入・69欄安全保留・`PASS` 4様式・入力待ち46様式］）でも構造改変 0件・`GRD-01` 違反 0件を検証済み（2026-11-04（水）実施・全190件のURLとSHA-256および検査結果は `docs/PUBLIC_BENCHMARK_190_MANIFEST.json`、`docs/BUILT_WITH_CLAUDE_CODE.md` 第5節-7、`docs/DEMO_VIDEO_SCRIPT_JA.md` 第3節に明記） |
+
+
+## 5. 審査用アクセス情報 (Judging & Review Access)
+
+- **公開 GitHub リポジトリ**: `https://github.com/drmiura-jpg/form-guard-agent`
+- **デモ動画 (YouTube / Loom / MP4)**: 3分以内（`FormGuard_Agent_Demo_175s_1080p.mp4`：実尺 `175.00秒`・`19.08 MiB / 20.01 MB [20,007,852 bytes]`・SHA-256 `192b369383b4b033fb216dafc0416f5616e9d114ad5a609c00c8e48e50b89f78`、自作架空様式のみ使用。台本と絵コンテは `docs/DEMO_VIDEO_SCRIPT_JA.md`。※本人実録ワイプ版 `FormGuard_Agent_FINAL_Presenter_Demo_175s.mp4`［台本 `docs/PRESENTER_WIPE_FULL_SCRIPT_JA.md`］を提出する場合は、カメラ映像合成後の実尺・バイト数・SHA-256・閲覧URLに更新して提出し、旧動画はPowerPoint内の参考動画として区別する）
+  - **デモ動画 閲覧 URL**: `＜アップロード後に Loom（Anyone with the link can view）または提出用 YouTube アカウントの限定公開（Unlisted）URL を記入＞`
+- **ローカル即時検証（APIキー不要・オフライン再現手順）**: Python 3.10 以上の環境で `python -m venv .venv` → `.venv\Scripts\activate`（macOS/Linux は `source .venv/bin/activate`）→ `pip install -r requirements.txt` を実行後、以下のコマンドで即座に再現できます：
+  1. `python -m form_guard.cli --all-demos --mode demo`：マーカーあり架空デモ3様式（`form1`〜`form3`）のオフラインピンポイント記入と21項目検査（`output/index.html` 生成）
+  2. `python -m form_guard.cli --serve`（環境にAPIキーがある場合も完全オフラインに固定するときは `FORM_GUARD_FORCE_DEMO=1` を設定）：ローカル Web UI（`http://127.0.0.1:8000` で全6デモ＋公募ポータル `/portal`、かんたん5ステップ画面 `http://127.0.0.1:8000/start` でマーカーなし白紙7様式 `form4`〜`form10`）のオフライン試行
+  3. `pytest -v`：全277件の自動テスト（`277 passed, 0 skipped`）の実行
+- **審査用アカウント / 認証条件**: 審査用のオフラインデモ（`--mode demo` または APIキー未設定時の `--mode auto`）は外部の資格情報や有料アカウント不要でローカル（`127.0.0.1`）で動作し、ルール式の仮記入・21項目検査・人間承認手順を一通り確認できます。ライブAPIモード（`--mode live`）の実行には `ANTHROPIC_API_KEY`（または `FORM_GUARD_API_KEY`）、Claude Code 連携（`.mcp.json`・2段階フック・サブエージェント・Skills）の利用には Claude Code 実行環境と設定の有効化が必要です（料金・認証条件は各利用契約に従います）。
+- **English Judging Access Summary**:
+  - **Repository**: `https://github.com/drmiura-jpg/form-guard-agent`
+  - **Demo Video**: Under the 3-minute limit (`FormGuard_Agent_Demo_175s_1080p.mp4`: `175.00 s`, `19.08 MiB / 20.01 MB [20,007,852 bytes]`, SHA-256 `192b369383b4b033fb216dafc0416f5616e9d114ad5a609c00c8e48e50b89f78`, using only self-authored fictional templates; script in `docs/DEMO_VIDEO_SCRIPT_JA.md`; if submitting the live presenter wipe edition `FormGuard_Agent_FINAL_Presenter_Demo_175s.mp4` [`docs/PRESENTER_WIPE_FULL_SCRIPT_JA.md`], update duration, byte size, SHA-256, and viewing URL after final camera merge). Viewing URL: `<Unlisted YouTube or Loom URL to be filled after upload>`
+  - **Offline Reproduction (No API Key Required)**: Run `python -m venv .venv`, activate it, run `pip install -r requirements.txt`, then run `python -m form_guard.cli --all-demos --mode demo` (3 marked demos offline), `python -m form_guard.cli --serve` (set `FORM_GUARD_FORCE_DEMO=1` to force offline even if an API key is present in the environment; opens `http://127.0.0.1:8000` for 6 demos + `/portal`, and `/start` for 7 unmarked forms `form4`–`form10`), and `pytest -v` (`277 passed, 0 skipped`). Live API calls require `ANTHROPIC_API_KEY` / `FORM_GUARD_API_KEY`, and Claude Code integration requires an active Claude Code environment.
+
+---
+
+## 6. Claude Code を使った開発の感想（必須項目⑥・非公開アンケート欄および自由記入欄の下書き）
+
+### ① Claude Code を使って開発してみた感想（運営メール必須項目⑥）
+アプリのコード・テスト・サンプル生成・Claude Code 拡張資産の構築に Claude Code（Opus 5.5 / Sonnet 5 / Haiku 4.5）を中心として活用しました。特に印象深かったのは、単なるコード生成にとどまらず、Skills（6種）・ファイル編集ツールを持たないサブエージェント（4種）・前後2段階フック（`PreToolUse` / `PostToolUse`）・5ツール MCP サーバーといった拡張機能を組み合わせることで、全277件の自動テストや7区分・21項目の構造検査器を短期間で一貫して構築できた点です。書き込み前フック（`PreToolUse`）で `samples/blank_forms/` の白紙様式への認識可能な変更操作や秘密情報の混入を遮断し、書き込み後フック（`PostToolUse`）で構文・import・JSON 検査を自動実行する仕組みを整えたことで、開発作業自体も安全に進められました。OOXML のバイト範囲置換や結合セル・計算式の保護といった細かい制約にじっくり向き合い、検証器の指摘から自己修正（Adaptive Thinking）を回す設計を形にできたのは Claude Code ならではだと感じています。
+
+### ② 自由記入欄 / 審査員への補足メッセージ（欄がある場合）
+日本の研究機関・自治体・施設管理の現場では、毎月多くの「指定様式書類」の作成に追われ、罫線や結合セル、計算式の崩れによる差し戻しが手戻りを生んでいます。Form-Guard Agent は、私自身が倫理申請などの書類作成で何度も差し戻されて困り「もうAIを使うのはやめようか」と思った実体験から、「元の白紙様式は一切触らずに指定欄だけをピンポイントで書き換え、欄外が変わっていないことを21項目で検査し、最終判断は人が行う」という現実的な解として開発しました。オフラインデモ（APIキー不要）で手元の環境でもすぐにお試しいただけます。

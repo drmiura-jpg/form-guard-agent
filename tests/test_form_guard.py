@@ -4311,6 +4311,10 @@ def test_r1_audit2_a7_ensure_samples_only_fills_in_missing_files(tmp_path):
     assert set(after) == set(before)  # the deleted file came back, nothing else was added
     assert [k for k in before if after[k] != before[k]] == []  # before the fix every form and memo was regenerated
     assert after[missing.relative_to(base)] == NAIVE_BUILDERS[DEMOS[1]["naive"]]()
+    missing_spec = base / "blank_forms" / "form1_research_plan_change.slots.json"
+    missing_spec.unlink()
+    assert ensure_samples(base) == base
+    assert missing_spec.exists() and missing_spec.read_bytes() == before[missing_spec.relative_to(base)]
     assert generate_samples(base, with_comparisons=False, overwrite=False) == {}  # nothing is missing any more
     generate_samples(base, with_comparisons=False)  # an explicit --generate-samples still rebuilds everything
     assert form.read_bytes() == BUILDERS[form.name]() and memo.read_text(encoding="utf-8") == MEMOS[memo.name]
@@ -6144,6 +6148,16 @@ def test_start_page_media_and_optional_demo_video(api, monkeypatch, tmp_path):
     assert "id=\"videoCta\" href=\"#video\" hidden" in page and "$(\"#videoCta\").hidden = false" in js
     assert "id=\"modeDemo\" checked" in page and "API 従量課金" in page
     assert "if (state.fromChat && n < 4) n = 4;" in js
+    assert 'id="openGmailStep2"' in page and 'id="openGmailStep3"' in page and 'id="gmailModal"' in page
+    inbox = api.get("/api/gmail-inbox").json()
+    assert inbox["fictional"] is True and [m["demo_id"] for m in inbox["messages"]] == ["form10", "form9", "form8", "form7", "form6"]
+    assert all(m["from_addr"].endswith("@example.jp") and m["attachment"] and m["memo_text"] for m in inbox["messages"])
+    assert "📄 本文の続き（記入に使う内容）" in js and "closeGmailModal" in js
+    assert "hero-grid" in page and "source-grid" in page and "mail-item-row" in page
+    assert 'let previewView = "both"' in js and 'class="rp-tab on" data-view="both"' in page
+    assert "この下書きは Claude Code のチャットで作られました" in js
+    assert (ROOT / ".codex" / "config.toml").is_file() and "[mcp_servers.form_guard]" in (ROOT / ".codex" / "config.toml").read_text(encoding="utf-8")
+    assert (ROOT / "AGENTS.md").is_file() and (ROOT / "docs" / "CODEX_ANTIGRAVITY_GMAIL_MANUAL_JA.md").is_file()
     monkeypatch.setenv("FORM_GUARD_DEMO_VIDEO", str(tmp_path / "missing.mp4"))
     assert api.get("/media/demo.mp4").status_code == 404  # the page then keeps the player hidden
     video = tmp_path / "demo.mp4"
@@ -6169,6 +6183,33 @@ def test_start_page_media_and_optional_demo_video(api, monkeypatch, tmp_path):
     live_res = api.post("/api/runs/from-discovery", json={"discovery_id": d["discovery_id"],
                                                           "confirmed_targets": "recommended", "mode": "live"})
     assert live_res.status_code == 422
+
+    # R1-A1 (Gmail/Codex audit): FORM_GUARD_FORCE_DEMO=1 sets default import_roots=[] so MCP drafts are not exposed
+    from fastapi.testclient import TestClient
+    from form_guard.server import create_app
+    from form_guard.mcp_server import FormGuardMCP
+    mcp = FormGuardMCP(root=ROOT)
+    mcp.out_root = tmp_path / "output" / "mcp_runs"
+    disc7 = mcp.tool_discover({"form_path": "samples/blank_forms/form7_business_trip.docx", "mode": "demo"})
+    rec7 = [c["candidate_id"] for c in disc7["candidates"] if c["recommended"]]
+    fill7 = mcp.tool_fill({
+        "form_path": "samples/blank_forms/form7_business_trip.docx",
+        "memo_path": "samples/memos/memo7_business_trip.txt",
+        "discovery": disc7, "confirmed_ids": rec7, "mode": "demo"})
+    rid7 = fill7["run_id"]
+    monkeypatch.setenv("FORM_GUARD_MCP_ROOT", str(tmp_path))
+    monkeypatch.setenv("FORM_GUARD_FORCE_DEMO", "1")
+    pub_app = create_app(run_root=tmp_path / "pub_runs", project_root=tmp_path)
+    assert pub_app.state.import_roots == []
+    pub_client = TestClient(pub_app)
+    assert pub_client.get(f"/api/runs/{rid7}").status_code == 404
+    assert pub_client.post("/api/runs/import", json={"run_id": rid7}).status_code == 404
+    monkeypatch.delenv("FORM_GUARD_FORCE_DEMO", raising=False)
+    local_app = create_app(run_root=tmp_path / "local_runs", project_root=tmp_path)
+    assert len(local_app.state.import_roots) >= 1
+    local_client = TestClient(local_app)
+    assert local_client.get(f"/api/runs/{rid7}").status_code == 200
+    monkeypatch.delenv("FORM_GUARD_MCP_ROOT", raising=False)
 
     # R1-O2: ClaudeEngine().client loads FORM_GUARD_API_KEY from .env in a fresh process
     monkeypatch.delenv("FORM_GUARD_FORCE_DEMO", raising=False)

@@ -107,8 +107,8 @@ python -m venv .venv
 .venv\Scripts\activate            # Windows cmd  (PowerShell: .venv\Scripts\Activate.ps1 · macOS/Linux: source .venv/bin/activate)
 pip install -r requirements.txt
 
-python -m form_guard.cli --all-demos     # runs the 3 marked fictional demos -> output/index.html
-python -m form_guard.cli --serve         # web UI on http://127.0.0.1:8000 (all 6 demos + grant portal: /portal)
+python -m form_guard.cli --all-demos --mode demo  # runs the 3 marked fictional demos offline -> output/index.html
+python -m form_guard.cli --serve                  # web UI on http://127.0.0.1:8000 (all 6 demos + grant portal: /portal; set FORM_GUARD_FORCE_DEMO=1 to force offline)
 #   guided 5-step page for first-time users: http://127.0.0.1:8000/start
 pytest -v                                # 277 tests
 ```
@@ -124,7 +124,7 @@ The web UI is Japanese first (`日本語 / EN` toggle in the top bar):
 - The **🎬 審査員向け 90秒ガイドツアー / Judge Quick Walkthrough** bar jumps straight to the five proof points: ① visual diff against a naive regeneration, ② blank-cell discovery on an unmarked form, ③ verbatim grounding and no guessing (`483万6千円 → 4,836,000円`, the printed cap, the missing `法人番号`), ④ Claude usage — per-field model routing and the Claude Code suite, ⑤ the 21-check audit and the human approval lock. A **なぜ Form-Guard か？（解決する現場課題）** banner at the top states the problem in three lines.
 - The left rail lists all six demos: **デモ1–デモ5** (Word / Excel) and **デモ6**, a fixed PDF (badge **固定PDF・空欄自動検出**, see [Fixed PDF forms](#fixed-pdf-forms-phase-4)) — three marked forms and the two **unmarked blank forms** — デモ4 (form4 `.docx`) and デモ5 (form5 `.xlsx`), badged **空欄自動検出**.
 - One click on デモ4 / デモ5 runs the 4-stage blank-cell discovery *and* an auto-preview fill of the recommended applicant cells, so the discovery table and the filled result are on screen together; **✅ 検出した空欄を承認して外科的差込を実行** turns the reviewer's own selection into the run that can be signed off (the auto-preview itself can never be approved). With **ゼロ設定の自動適応モード** checked by default, uploading an unmarked Word/Excel form via **▶ Run pipeline** automatically selects applicant cells and fills them; to inspect and confirm candidate cells before filling (or for fixed PDFs), click **🔍 Discover blank cells** (or uncheck auto-adaptation). Final human sign-off is required in either flow.
-- Each field in Fields & sources carries a model-tier badge (`Opus 5.5` / `Sonnet 5` / `Haiku 4.5`, or `Offline Rule` plus the live plan). Deep links for recordings: `/#tour=1` … `/#tour=5`, `/#demo=form4` (or `/#unmarked=form4`), `/#pdf=form6`, `/#demo=form2&tab=hitl`, `/#view=claude`, `/#lang=en`, and the grant portal `/portal` (top bar: **🌐 公募様式ポータル (/portal)**). The 3-minute demo video (Japanese narration, 175 s; narration synthesized from the author's own voice with permission via ElevenLabs `https://elevenlabs.io/`, with no external BGM or sound effects; Step 5 summary diagram previews 3 publicly distributed blank templates tested offline with synthetic dummy values: `A08` MHLW `https://www.mhlw.go.jp/stf/seisakunitsuite/bunya/koyou_roudou/roudoukijun/roudouhoken.html`, `L13` JFC `https://www.jfc.go.jp/n/service/dl_kokumin.html`, and `L39` Legal Affairs Bureau `https://houmukyoku.moj.go.jp/homu/minji79.html`) walks through these deep links step by step: [docs/DEMO_VIDEO_SCRIPT_JA.md](docs/DEMO_VIDEO_SCRIPT_JA.md).
+- Each field in Fields & sources carries a model-tier badge (`Opus 5.5` / `Sonnet 5` / `Haiku 4.5`, or `Offline Rule` plus the live plan). Deep links for recordings: `/#tour=1` … `/#tour=5`, `/#demo=form4` (or `/#unmarked=form4`), `/#pdf=form6`, `/#demo=form2&tab=hitl`, `/#view=claude`, `/#lang=en`, and the grant portal `/portal` (top bar: **🌐 公募様式ポータル (/portal)**). The 3-minute demo video (Japanese narration, 175 s; narration synthesized from the author's own voice with permission via ElevenLabs `https://elevenlabs.io/`, with no external BGM, sound effects, or third-party form images; Step 5 summary diagram previews 3 bundled self-authored fictional unmarked forms `form4` / `form7` / `form5` alongside the numeric summary of the 190-file public benchmark recorded in [docs/PUBLIC_BENCHMARK_190_MANIFEST.json](docs/PUBLIC_BENCHMARK_190_MANIFEST.json)) walks through these deep links step by step: [docs/DEMO_VIDEO_SCRIPT_JA.md](docs/DEMO_VIDEO_SCRIPT_JA.md).
 
 ## Live Claude mode
 
@@ -190,7 +190,7 @@ How Claude is used at runtime (`form_guard/mapper.py`):
   (`usage.live_attempt_failed`), never "no model was called".
 - The memo is treated as data, never as instructions (prompt-injection guard in the system prompt).
 
-The whole project — code, tests, sample generators and docs — was written with **Claude Code** during the hackathon.
+The application code, test suite, sample generators, and Claude Code extension suite were built with **Claude Code** during the hackathon.
 
 ## Claude Code integration: skills, subagents, hooks, MCP
 
@@ -615,8 +615,8 @@ Form-Guard Agent は次の流れで、**指定欄だけ**を書き換えます�
 python -m venv .venv
 .venv\Scripts\activate            # Windows cmd（PowerShell は .venv\Scripts\Activate.ps1、macOS/Linux は source .venv/bin/activate）
 pip install -r requirements.txt
-python -m form_guard.cli --all-demos     # マーカーあり架空デモ3件を実行 → output/index.html
-python -m form_guard.cli --serve         # Web画面 http://127.0.0.1:8000（全6デモ＋公募ポータル /portal）
+python -m form_guard.cli --all-demos --mode demo  # マーカーあり架空デモ3件をオフライン実行 → output/index.html
+python -m form_guard.cli --serve                  # Web画面 http://127.0.0.1:8000（全6デモ＋公募ポータル /portal。完全オフライン固定は FORM_GUARD_FORCE_DEMO=1）
 #   はじめての方向け かんたん5ステップ画面: http://127.0.0.1:8000/start（一時公開は scripts/share_tunnel.ps1 が合言葉入りリンクを表示）
 pytest -v
 ```
@@ -625,7 +625,7 @@ pytest -v
 - フック（`python scripts/hook_guard.py …`）と MCP サーバー（`python -m form_guard.mcp_server`）は `PATH` 上の `python` で動きます。フックは標準ライブラリだけで動き（Python 3.9 以上なら可）、import 検査には常に `.venv` を優先して使います（`FORM_GUARD_HOOK_PYTHON` で指定も可）。MCP サーバーは依存パッケージが無い場合 `.venv` で自動的に起動し直します。`python` が見つからないとフックがエラー（処理は止まりません）になるので、`.venv` を有効にして Claude Code を起動し直してください。
 
 - Web 画面は日本語が既定です（右上で EN に切替）。上部の「🎬 審査員向け 90秒ガイドツアー」の①〜⑤から、①生成AIの作り直し版との視覚比較、②マーカーなし白紙からの空欄発見、③原文根拠のハイライトと推測拒否（483万6千円→4,836,000円、印刷された上限、法人番号は人の入力待ち）、④Claude のモデル使い分けと Claude Code 連携、⑤21項目の構造検査と人間承認ロック、の各画面へ直接移動できます。
-- 3分デモ動画の台本と絵コンテ（日本語ナレーション・175秒。デモ動画のナレーション音声は作成者本人の承諾のもと本人の声から ElevenLabs `https://elevenlabs.io/` で音声合成し、外部のBGM・効果音は不使用。Step 5 の説明用まとめ図では各機関が一般公開している白紙様式3点［`A08` 厚生労働省 `https://www.mhlw.go.jp/stf/seisakunitsuite/bunya/koyou_roudou/roudoukijun/roudouhoken.html`、`L13` 日本政策金融公庫 `https://www.jfc.go.jp/n/service/dl_kokumin.html`、`L39` 法務局 `https://houmukyoku.moj.go.jp/homu/minji79.html`］に合成ダミー値をオフラインで仮記入した構造検証プレビューを掲載）は [docs/DEMO_VIDEO_SCRIPT_JA.md](docs/DEMO_VIDEO_SCRIPT_JA.md) にあり、このガイドツアー（`#tour=1`〜`#tour=5`）に沿って画面をたどります。
+- 3分デモ動画の台本と絵コンテ（日本語ナレーション・175秒。デモ動画のナレーション音声は作成者本人の承諾のもと本人の声から ElevenLabs `https://elevenlabs.io/` で音声合成し、外部のBGM・効果音および第三者の外部様式画像は不使用。Step 5 の説明用まとめ図では同梱の自作架空様式3点 `form4`・`form7`・`form5` の白紙プレビューと公開190件限定試験の数値サマリーを掲載し、190件のURL・SHA-256・検査結果一覧は [docs/PUBLIC_BENCHMARK_190_MANIFEST.json](docs/PUBLIC_BENCHMARK_190_MANIFEST.json) に収録）は [docs/DEMO_VIDEO_SCRIPT_JA.md](docs/DEMO_VIDEO_SCRIPT_JA.md) にあり、このガイドツアー（`#tour=1`〜`#tour=5`）に沿って画面をたどります。
 
 - `FORM_GUARD_API_KEY`（推奨：`pwsh scripts/setup_api_key.ps1` で `.env` に保存・Claude Code 本体の Max 定額枠と分離）または `ANTHROPIC_API_KEY` を設定すると、`--mode auto` / `--mode live` で Claude を使います（通信しないオフライン実行を固定したいときは `--mode demo` または `FORM_GUARD_FORCE_DEMO=1` を指定します。詳しい手順は [docs/CLAUDE_CODE_MANUAL_JA.md](docs/CLAUDE_CODE_MANUAL_JA.md)）。既定の `--model-tier auto` では、定型の欄（和暦日付・期間・桁数・書式・選択肢）と空欄ラベルの分類を `claude-haiku-4-5-20251001`、通常の文章・金額・氏名を `claude-sonnet-5`、長文の要約と検証器に差し戻された後の自己修正を `claude-opus-5-5` が担当します（`--model-tier opus|sonnet|haiku` で固定も可）。
 - 構造化出力（JSON スキーマ）、adaptive thinking（要約表示）と effort 指定は、`model_capabilities()` の既知モデル表にあるモデルにだけ送ります（表に無いファミリーや将来のバージョンには何も付けません）。モデル別に送信パラメータを切り替えます。確認済みなのはモックによるリクエスト形式で、実APIでの利用可否・対応機能はアカウント権限に依存します。2026-11-03（火）には実APIでの3階層ルーティング実行（ローカルの `.gitignore` 対象 `output/live_smoke_form1/audit_log.json`、run `20261103-164113-f83bad`、コール別明細表は [docs/BUILT_WITH_CLAUDE_CODE.md](docs/BUILT_WITH_CLAUDE_CODE.md) の第6節に掲載）も確認済みです。どの欄をどのモデルが担当したかは監査ログとレポートに残ります。

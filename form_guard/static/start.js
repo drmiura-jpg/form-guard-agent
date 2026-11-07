@@ -36,7 +36,7 @@ function setBusy(on) {
   $$("button").forEach((b) => { if (b.id !== "toStep2" || !on) b.disabled = on; });
   $("#sample").disabled = on; $("#file").disabled = on;
   $$("#fields input[data-slot]").forEach((i) => { i.disabled = on; });
-  if (!on && state.fromChat) { $("#runBtn").disabled = true; $("#makeTemplate").disabled = true; }
+  if (!on && state.fromChat) { $("#runBtn").disabled = true; $("#makeTemplate").disabled = true; if ($("#openGmailStep2")) $("#openGmailStep2").disabled = true; if ($("#openGmailStep3")) $("#openGmailStep3").disabled = true; }
   if (!on) $("#approveBtn").disabled = !(state.run && state.run.can_approve && state.run.report.overall_status === "PASS");
 }
 function go(n) {
@@ -198,6 +198,97 @@ $("#toStep3").addEventListener("click", async () => {
   finally { setBusy(false); }
 });
 
+// Fictional Gmail demo inbox modal (STEP 2 & STEP 3)
+function closeGmailModal(restoreFocus = true) {
+  const modal = $("#gmailModal");
+  if (!modal || modal.hidden) return;
+  modal.hidden = true;
+  if (restoreFocus && state.gmailTrigger && typeof state.gmailTrigger.focus === "function") {
+    state.gmailTrigger.focus();
+  }
+}
+async function openGmailInbox(ev) {
+  if (state.busy || state.fromChat) return;
+  state.gmailTrigger = (ev && ev.currentTarget) || document.activeElement;
+  try {
+    if (!state.gmailMessages) {
+      const res = await api("/api/gmail-inbox");
+      state.gmailMessages = res.messages || [];
+    }
+    $("#gmailList").innerHTML = state.gmailMessages.map((m) => `
+      <li class="mail-item">
+        <div class="mail-item-row">
+          <div class="mail-item-left">
+            <b>📧 ${esc(m.subject)}</b>
+            <div class="mail-meta">差出人：${esc(m.from_name)} &lt;${esc(m.from_addr)}&gt; ・ 受信：${esc(m.received_at)}</div>
+            <div class="mail-meta">📎 添付様式：<code>${esc(m.attachment)}</code>（${esc(m.title)}）</div>
+            <div class="mail-lead">${esc(m.lead)}</div>
+          </div>
+          <div class="mail-item-right">
+            <details open><summary style="font-weight:700;cursor:pointer;color:var(--accent)">📄 本文の続き（記入に使う内容）</summary><pre style="white-space:pre-wrap;margin:6px 0;font-size:12.5px;line-height:1.45">${esc(m.memo_text)}</pre></details>
+            <button type="button" class="primary" data-gmail-demo="${esc(m.demo_id)}" style="width:100%">📥 このメールと添付様式を取り込む →</button>
+          </div>
+        </div>
+      </li>`).join("");
+    $$("#gmailList button[data-gmail-demo]").forEach((b) => b.addEventListener("click", () => pickGmailMessage(b.dataset.gmailDemo)));
+    $("#gmailModal").hidden = false;
+    const firstBtn = $("#closeGmailModal") || $("#gmailList button[data-gmail-demo]");
+    if (firstBtn) firstBtn.focus();
+  } catch (e) {
+    msg(state.step === 3 ? "#msg3" : "#msg2", "デモ受信箱を開けませんでした：" + e.message, true);
+  }
+}
+async function pickGmailMessage(demoId) {
+  closeGmailModal(false);
+  if (state.busy || state.fromChat) return;
+  const box = state.step === 3 ? "#msg3" : "#msg2";
+  if (memoEl().value.trim() && memoEl().dataset.sample !== "1" && !isUntouchedTemplate() &&
+      !confirm("いまのメモを、選んだメールの内容に置き換えますか？（書いた内容は消えます）")) {
+    if (state.gmailTrigger && typeof state.gmailTrigger.focus === "function") state.gmailTrigger.focus();
+    return;
+  }
+  if (!ensureLiveConfirmed()) return;
+  const selected = (state.gmailMessages || []).find((x) => x.demo_id === demoId);
+  const my = ++state.seq, m = mode(), key = `sample:${demoId}:${m}`;
+  msg(box, "📧 メールの添付様式と本文を取り込んで、記入欄を探しています…");
+  setBusy(true);
+  try {
+    const d = await api("/api/discover/demo", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ demo_id: demoId, mode: m }),
+    });
+    if (my !== state.seq) return;
+    $("#srcSample").checked = true;
+    $("#sample").value = demoId;
+    state.discoveryId = d.discovery_id; state.discoveryKey = key; state.candidates = d.candidates || []; resetRun();
+    memoEl().value = (selected && selected.memo_text) || d.memo_text || "";
+    clearTemplateState();
+    Object.assign(memoEl().dataset, { sample: "1", memoFor: key });
+    state.memoWarning = "";
+    msg("#msg2", `「${d.title}」を読み込みました。記入欄の候補 ${d.candidates.length} か所。`);
+    go(3);
+    msg("#msg3", "📧 デモ受信箱から、添付様式と本文の記入内容（下の欄）を取り込みました。AI はこの欄にあることだけを書きます。");
+    if (auto() && $("#memo").value.trim()) { setBusy(false); await runFill(); return; }
+  } catch (e) { msg(box, "取り込めませんでした：" + e.message, true); }
+  finally { setBusy(false); }
+}
+["#openGmailStep2", "#openGmailStep3"].forEach((id) => { if ($(id)) $(id).addEventListener("click", openGmailInbox); });
+if ($("#closeGmailModal")) $("#closeGmailModal").addEventListener("click", () => closeGmailModal(true));
+if ($("#gmailModal")) {
+  $("#gmailModal").addEventListener("click", (e) => { if (e.target.id === "gmailModal") closeGmailModal(true); });
+  document.addEventListener("keydown", (e) => {
+    const modal = $("#gmailModal");
+    if (!modal || modal.hidden) return;
+    if (e.key === "Escape") { e.preventDefault(); closeGmailModal(true); return; }
+    if (e.key === "Tab") {
+      const focusables = [...modal.querySelectorAll("button:not([disabled]), summary, [href], [tabindex]:not([tabindex='-1'])")];
+      if (!focusables.length) return;
+      const first = focusables[0], last = focusables[focusables.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
+  });
+}
+
 // STEP 3 — fill (おまかせ: then self-check and jump to the human checks)
 async function runFill() {
   if (state.fromChat || !state.discoveryId) return msg("#msg3", state.fromChat ? "材料を変えて記入し直すときは、元のチャットで依頼してください。" : "先に STEP 2 で書式を入れてください。", true);
@@ -297,11 +388,11 @@ const CATS_PDF = {
 };
 function catOf(c) { return (c.category || c.check_id || "").toLowerCase(); }
 const svgImg = (svg, alt) => svg ? `<img alt="${esc(alt)}" src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}">` : "<p class='hint'>（画像なし）</p>";
-let previewView = "filled";
+let previewView = "both";
 function renderPreview() {
   const pv = (state.run && state.run.previews) || {};
-  const blank = `<figure><figcaption>記入前（白紙）</figcaption>${svgImg(pv.blank, "記入前")}</figure>`;
-  const filled = `<figure><figcaption>記入後（AI が書いたもの）</figcaption>${svgImg(pv.filled, "記入後")}</figure>`;
+  const blank = `<figure><figcaption>📄 記入前（白紙）</figcaption>${svgImg(pv.blank, "記入前")}</figure>`;
+  const filled = `<figure><figcaption>✅ 記入後（AI が書いたもの）</figcaption>${svgImg(pv.filled, "記入後")}</figure>`;
   $("#preview").innerHTML = previewView === "both" ? blank + filled : previewView === "blank" ? blank : filled;
   $$(".rp-tab").forEach((b) => b.classList.toggle("on", b.dataset.view === previewView));
 }
@@ -347,8 +438,8 @@ function prepareStep5() {
   const isPdf = (r.form || {}).file_type === "pdf";
   const compared = vis.boxes_compared != null ? `記入欄の外 ${vis.boxes_compared} か所を比べて、ずれ ${vis.drift_count ?? 0} か所` : "";
   $("#verdict").innerHTML = ok
-    ? `<div class="rp-verdict ok">✅ 機械の検査にすべて合格しました。<br>記入したのは指定の欄だけです（AI ${autoN} 項目${humanN ? `・人が入力 ${humanN} 項目` : ""}）。<small>機械の検査 ${checks.length} 項目に合格。${esc(compared)}。内容と実際の表示・印刷は、あなたが確認してください。下の確認項目をすべて押すと完成です。</small></div>`
-    : `<div class="rp-verdict ${failed.length ? "ng" : "warn"}">${failed.length ? `❌ 機械の検査で ${failed.length} 項目が不合格です` : "✏️ まだ入力待ちの欄があります"}<small>このままでは承認できません。「記入内容の修正に戻る」から直してください。</small></div>`;
+    ? `<div class="rp-verdict ok"><div class="rp-verdict-main">✅ 機械の検査にすべて合格しました。<br>記入したのは指定の欄だけです（AI ${autoN} 項目${humanN ? `・人が入力 ${humanN} 項目` : ""}）。<small>機械の検査 ${checks.length} 項目に合格。${esc(compared)}。内容と実際の表示・印刷は、あなたが確認してください。下の確認項目をすべて押すと完成です。</small></div><div class="verdict-stats"><div class="v-stat"><strong>${checks.length}/${checks.length}</strong><span>機械検査合格</span></div><div class="v-stat"><strong>${vis.drift_count ?? 0} か所</strong><span>指定欄外のずれ</span></div><div class="v-stat"><strong>${autoN + humanN} 欄</strong><span>記入した項目</span></div></div></div>`
+    : `<div class="rp-verdict ${failed.length ? "ng" : "warn"}"><div class="rp-verdict-main">${failed.length ? `❌ 機械の検査で ${failed.length} 項目が不合格です` : "✏️ まだ入力待ちの欄があります"}<small>このままでは承認できません。「記入内容の修正に戻る」から直してください。</small></div></div>`;
   const groups = {};
   checks.forEach((c) => { const k = catOf(c); (groups[k] = groups[k] || []).push(c); });
   if (!groups.visual && typeof vis.identical_outside_slots === "boolean")  // never turns a server failure green
@@ -435,11 +526,11 @@ fetch("/media/demo.mp4", { headers: { Range: "bytes=0-0" }, credentials: "same-o
     if ($("#newStartLink")) $("#newStartLink").hidden = false;
     $("#memo").value = ((state.run.memo || {}).text) || ""; $("#memo").readOnly = true; $("#memo").dataset.sample = "0";
     $("#runBtn").disabled = true; $("#makeTemplate").disabled = true;
-    msg("#msg3", "この下書きは Claude とのチャットで作られました。材料を変えて記入し直すときは、元のチャットで依頼してください（欄ごとの修正は STEP 4 でできます）。");
+    msg("#msg3", "この下書きは Claude Code のチャットで作られました。材料を変えて記入し直すときは、元のチャットで依頼してください（欄ごとの修正は STEP 4 でできます）。");
     renderReview();
     [1, 2, 3].forEach(markAuto);
     const rep = state.run.report || {};
-    $("#progress").textContent = "🤖 Claude がチャットから記入・自己チェックした下書きを読み込みました。";
+    $("#progress").textContent = "🤖 Claude Code がチャットから記入・自己チェックした下書きを読み込みました。";
     if (!(rep.pending_slots || []).length && rep.overall_status === "PASS" && state.run.can_approve) { prepareStep5(); go(5); }
     else go(4);
     [1, 2, 3].forEach(markAuto);

@@ -1,0 +1,14 @@
+# Form-Guard Agent — Codex Project MCP Configuration
+# When starting `codex` in C:\hackathon\form-guard-agent (with the project marked trusted),
+# this registers the `form_guard` stdio MCP server.
+
+[mcp_servers.form_guard]
+command = "python"
+args = ["-m", "form_guard.mcp_server"]
+startup_timeout_sec = 60.0
+
+[mcp_servers.form_guard.env]
+PYTHONUTF8 = "1"
+PYTHONIOENCODING = "utf-8"
+FORM_GUARD_MCP_ROOT = "C:/hackathon/form-guard-agent"
+PYTHONPATH = "C:/hackathon/form-guard-agent"
