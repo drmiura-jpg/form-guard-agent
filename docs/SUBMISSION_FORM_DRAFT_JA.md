@@ -1,6 +1,6 @@
 # Built with Claude: Japan 2026 — 提出フォーム記入文案
 
-作成日：2026-11-03（火）／更新日：2026-11-07（土）
+作成日：2026-11-03（火）／更新日：2026-11-08（日）
 公式提出締切：**2026-11-08（日）20:00 JST**（提出後も 2026-11-08（日）20:00 JST より前ならプラットフォーム上で更新可、20:00 JST 以降は変更不可）
 ※本ファイルはイベント提出フォーム各欄への記入用テキスト案（文字数別バリエーション）をまとめた補助資料です。プロジェクトの仕様・使い方の正本は [README.md](../README.md) および [BUILT_WITH_CLAUDE_CODE.md](BUILT_WITH_CLAUDE_CODE.md) をご参照ください。
 
@@ -52,7 +52,7 @@
     - [ ] デモ動画アップロード後、本ファイルの3箇所（§1-④・§5日本語・§5英語）を同一の閲覧URLに置換した。
     - [ ] Loom の場合は「**Anyone with the link can view**」、YouTube の場合は提出用のアカウント（既存の個人活動用チャンネルは流用しない）の「**限定公開（Unlisted）**」に設定した（投稿前にチャンネル名・アイコン・説明欄・投稿者プロフィールの公開表示を確認。「非公開（Private）」は再生不可）。
     - [ ] シークレットウィンドウ（未ログイン状態）で URL を開き、最初から最後まで音声つきで再生できることを確かめた。
-    - [ ] 動画の長さが **3分（180秒）以内**（V6 フルHD提出版 `FormGuard_Agent_Demo_175s_1080p.mp4`：実尺 `175.00秒`・`19.08 MiB / 20.01 MB [20,007,852 bytes]`・SHA-256 `192b369383b4b033fb216dafc0416f5616e9d114ad5a609c00c8e48e50b89f78`、または2026-11-08（日）収録の生声版）であることを確かめた。
+    - [ ] 動画の長さが **3分（180秒）以内**（V6 フルHD提出版 `FormGuard_Agent_Demo_175s_1080p.mp4`：実尺 `175.00秒`・`19.08 MiB / 20.01 MB [20,007,852 bytes]`・SHA-256 `192b369383b4b033fb216dafc0416f5616e9d114ad5a609c00c8e48e50b89f78`、または2026-11-08（日）収録の3枚・170秒生声PowerPoint版［台本 `docs/PRESENTATION_SPEECH_170S_JA.md`・スライド `docs/FormGuard_Agent_Pitch_Deck_170s_3Slides_16x9.pptx` から書き出したMP4。提出時は本行および §5 日本語・英語の実尺・バイト数・SHA-256・閲覧URLを書き出し後のMP4の値に更新］）であることを確かめた。
     - [ ] 映像・スライド・まとめ図（`s5_4_autoadapt_showcase.png`）に映る様式はすべて自作の架空様式（`form1`〜`form10`）のみとし、第三者の外部様式画像は提出動画に含めないことを確認した（外部BGM・効果音は不使用）。
 
 ---
@@ -78,10 +78,11 @@
 
 ---
 
-### B. 日本語・短縮版（公式指定「500字以内」遵守版・そのまま 461字／改行除き 460字）
+### B. 日本語・短縮版（2026-11-08（日）公式指定「500字以内＋冒頭『このプロジェクトは、〔誰〕の〔課題〕を〔どう変える〕〔形〕です。』」完全準拠版・そのまま 421字／改行除き 419字・冒頭一文 148字）
 
-開発者自身が倫理申請等で何度も差し戻され、「もうAIを使うのはやめようか」と思った実体験から開発しました。大学・自治体・施設の申請業務では、指定されたWord・Excel・固定PDF様式の罫線や結合セル、計算式が崩れると差し戻し（押印・決裁の取り直しや再提出）の原因になります。従来の文書全体を再生成する方式では、どこが変わったか分からずそのまま使うには壁がありました。
-Form-Guard Agentは、元の白紙様式は一切触らず指定欄の文字だけをピンポイントで書き換え、7区分・21項目の構造検査と内蔵の配置比較（付属様式でずれ0px・実機表示は人が確認）で欄外を検査します。マーカーのない白紙様式でも申請者欄と事務局専用欄を4段階で自動仕分けして誤記入をロックし、AI抽出値には元メモの原文引用スパンを紐づけます（年の補完は推定表示）。メモにない事実は推測で埋めず人の入力待ちに残し、人が最終確認するまでダウンロードを解錠しません。Web・CLI・Claude Code MCPで、現場の定型様式業務に活用できます。
+このプロジェクトは、大学・自治体・医療現場などの申請業務で「指定様式の罫線や計算式が崩れると差し戻されるためAIを使えない」と困っている担当者・研究者の課題を、元の白紙様式は一切触らず指定欄だけをピンポイントで書き換え、欄外の不変を自動検査して人が最終承認する形に変える書類記入エージェントです。
+開発者自身が倫理申請等で何度も差し戻され「もうAIを使うのはやめようか」と思った実体験から開発しました。7区分・21項目の構造検査と内蔵の配置比較（付属様式でずれ0px・実機表示は人が確認）で欄外を検査し、目印のない白紙様式でも申請者欄と事務局専用欄を4段階で自動仕分けして誤記入をロックします。
+AI抽出値には元メモの原文引用スパンを紐づけ（年の補完は推定表示）、メモにない事実は推測で埋めず人の入力待ちに残し、人が最終確認するまでダウンロードを解錠しません。Web・CLI・Claude Code MCPで現場の定型様式業務に活用できます。
 
 ---
 
@@ -160,7 +161,7 @@ Form-Guard Agentは、元の白紙様式は一切触らず指定欄の文字だ�
 ## 5. 審査用アクセス情報 (Judging & Review Access)
 
 - **公開 GitHub リポジトリ**: `https://github.com/drmiura-jpg/form-guard-agent`
-- **デモ動画 (YouTube / Loom / MP4)**: 3分以内（`FormGuard_Agent_Demo_175s_1080p.mp4`：実尺 `175.00秒`・`19.08 MiB / 20.01 MB [20,007,852 bytes]`・SHA-256 `192b369383b4b033fb216dafc0416f5616e9d114ad5a609c00c8e48e50b89f78`、自作架空様式のみ使用。台本と絵コンテは `docs/DEMO_VIDEO_SCRIPT_JA.md`。※本人実録ワイプ版 `FormGuard_Agent_FINAL_Presenter_Demo_175s.mp4`［台本 `docs/PRESENTER_WIPE_FULL_SCRIPT_JA.md`］を提出する場合は、カメラ映像合成後の実尺・バイト数・SHA-256・閲覧URLに更新して提出し、旧動画はPowerPoint内の参考動画として区別する）
+- **デモ動画 (YouTube / Loom / MP4)**: 3分以内（`FormGuard_Agent_Demo_175s_1080p.mp4`：実尺 `175.00秒`・`19.08 MiB / 20.01 MB [20,007,852 bytes]`・SHA-256 `192b369383b4b033fb216dafc0416f5616e9d114ad5a609c00c8e48e50b89f78`、自作架空様式のみ使用。台本と絵コンテは `docs/DEMO_VIDEO_SCRIPT_JA.md`。※2026-11-08（日）作成の1クリック進行14枚版［台本 `docs/PRESENTER_WIPE_FULL_SCRIPT_JA.md`・スライド `FormGuard_Agent_ClickStep_Pitch_Deck_16x9.pptx`、全14枚・60段階クリック表示収録］で提出する場合は、カメラ合成後の `FormGuard_Agent_FINAL_Presenter_Demo_175s.mp4` または生成済みの `FormGuard_Agent_Presenter_Wipe_Demo_175s.mp4`［実尺 `175.00秒`・`8,736,316 bytes`・SHA-256 `5b7151d7cfcbcb5dc5f1afc5a88916bcd66ad83ac28cac0db490ffa887cbd840`］／`FormGuard_Agent_Clean_Slide_Deck_175s.mp4`［実尺 `175.00秒`・`8,201,191 bytes`・SHA-256 `4f1246ea417464b8bd72f8e89ca689cee74a530ea2961b2a1438e5b91285ba8c`］の実測値・閲覧URLに更新して提出する）
   - **デモ動画 閲覧 URL**: `＜アップロード後に Loom（Anyone with the link can view）または提出用 YouTube アカウントの限定公開（Unlisted）URL を記入＞`
 - **ローカル即時検証（APIキー不要・オフライン再現手順）**: Python 3.10 以上の環境で `python -m venv .venv` → `.venv\Scripts\activate`（macOS/Linux は `source .venv/bin/activate`）→ `pip install -r requirements.txt` を実行後、以下のコマンドで即座に再現できます：
   1. `python -m form_guard.cli --all-demos --mode demo`：マーカーあり架空デモ3様式（`form1`〜`form3`）のオフラインピンポイント記入と21項目検査（`output/index.html` 生成）
@@ -169,7 +170,7 @@ Form-Guard Agentは、元の白紙様式は一切触らず指定欄の文字だ�
 - **審査用アカウント / 認証条件**: 審査用のオフラインデモ（`--mode demo` または APIキー未設定時の `--mode auto`）は外部の資格情報や有料アカウント不要でローカル（`127.0.0.1`）で動作し、ルール式の仮記入・21項目検査・人間承認手順を一通り確認できます。ライブAPIモード（`--mode live`）の実行には `ANTHROPIC_API_KEY`（または `FORM_GUARD_API_KEY`）、Claude Code 連携（`.mcp.json`・2段階フック・サブエージェント・Skills）の利用には Claude Code 実行環境と設定の有効化が必要です（料金・認証条件は各利用契約に従います）。
 - **English Judging Access Summary**:
   - **Repository**: `https://github.com/drmiura-jpg/form-guard-agent`
-  - **Demo Video**: Under the 3-minute limit (`FormGuard_Agent_Demo_175s_1080p.mp4`: `175.00 s`, `19.08 MiB / 20.01 MB [20,007,852 bytes]`, SHA-256 `192b369383b4b033fb216dafc0416f5616e9d114ad5a609c00c8e48e50b89f78`, using only self-authored fictional templates; script in `docs/DEMO_VIDEO_SCRIPT_JA.md`; if submitting the live presenter wipe edition `FormGuard_Agent_FINAL_Presenter_Demo_175s.mp4` [`docs/PRESENTER_WIPE_FULL_SCRIPT_JA.md`], update duration, byte size, SHA-256, and viewing URL after final camera merge). Viewing URL: `<Unlisted YouTube or Loom URL to be filled after upload>`
+  - **Demo Video**: Under the 3-minute limit (`FormGuard_Agent_Demo_175s_1080p.mp4`: `175.00 s`, `19.08 MiB / 20.01 MB [20,007,852 bytes]`, SHA-256 `192b369383b4b033fb216dafc0416f5616e9d114ad5a609c00c8e48e50b89f78`, using only self-authored fictional templates; script in `docs/DEMO_VIDEO_SCRIPT_JA.md`; if submitting the 14-slide 60-click-step edition [`docs/PRESENTER_WIPE_FULL_SCRIPT_JA.md`], update duration, byte size, SHA-256, and viewing URL to the merged `FormGuard_Agent_FINAL_Presenter_Demo_175s.mp4` or `FormGuard_Agent_Presenter_Wipe_Demo_175s.mp4` [`175.00 s`, `8,736,316 bytes`, SHA-256 `5b7151d7cfcbcb5dc5f1afc5a88916bcd66ad83ac28cac0db490ffa887cbd840`] / `FormGuard_Agent_Clean_Slide_Deck_175s.mp4` [`175.00 s`, `8,201,191 bytes`, SHA-256 `4f1246ea417464b8bd72f8e89ca689cee74a530ea2961b2a1438e5b91285ba8c`]). Viewing URL: `<Unlisted YouTube or Loom URL to be filled after upload>`
   - **Offline Reproduction (No API Key Required)**: Run `python -m venv .venv`, activate it, run `pip install -r requirements.txt`, then run `python -m form_guard.cli --all-demos --mode demo` (3 marked demos offline), `python -m form_guard.cli --serve` (set `FORM_GUARD_FORCE_DEMO=1` to force offline even if an API key is present in the environment; opens `http://127.0.0.1:8000` for 6 demos + `/portal`, and `/start` for 7 unmarked forms `form4`–`form10`), and `pytest -v` (`277 passed, 0 skipped`). Live API calls require `ANTHROPIC_API_KEY` / `FORM_GUARD_API_KEY`, and Claude Code integration requires an active Claude Code environment.
 
 ---

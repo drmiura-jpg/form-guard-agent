@@ -243,11 +243,16 @@ def explicit_aliases(slot: FormSlot) -> list[str]:
 # formats whose 「label：value」 lines under two names of one field state one fact (compared by DemoEngine._conflict)
 CROSS_ALIAS_FORMATS = ("wareki_date", "date", "wareki_period", "yen", "digits", "pattern")
 
+# blanks within one memo line (\s without \n): a 「label：」 line with nothing but blanks after the colon states no
+# value, so the next line (often the next 「label：value」 line) is never read as its value
+_LINE_SPACE = r"[^\S\n]*"
+
 
 def _label_line_re(alias: str) -> re.Pattern[str]:
-    """A memo line 「alias：value」 (also 「・alias（注）：value」), value in group ``v``."""
-    return re.compile(rf"(?:^|[\s・\-\*●■◆○〇▶【\[（(])\s*{re.escape(alias)}\s*(?:[（(][^）)\n]*[）)])?\s*[:：]\s*"
-                      rf"(?P<v>[^\n]+?)\s*$", re.M)
+    """A memo line 「alias：value」 (also 「・alias（注）：value」), value in group ``v``; an empty 「alias：」 line
+    does not match."""
+    return re.compile(rf"(?:^|[\s・\-\*●■◆○〇▶【\[（(]){_LINE_SPACE}{re.escape(alias)}{_LINE_SPACE}(?:[（(][^）)\n]*[）)])?"
+                      rf"{_LINE_SPACE}[:：]{_LINE_SPACE}(?P<v>\S[^\n]*?)\s*$", re.M)
 
 
 def _subsequence_cover(alias: str, key: str) -> float:
@@ -322,18 +327,21 @@ class DemoEngine:
                 regions.append((m.start("v"), m.end("v"), f"「{alias}：」 line", 0.93))
             if regions:
                 return regions
+        kv = re.compile(rf"^[ \t]*(?:[・\-\*●■◆○〇▶]{_LINE_SPACE})?(?P<k>[^\s:：（(]{{2,20}}){_LINE_SPACE}(?:[（(][^）)\n]*[）)])?"
+                        rf"{_LINE_SPACE}[:：]{_LINE_SPACE}(?P<v>\S[^\n]*?)\s*$", re.M)
         lines = memo.split("\n")
         starts = line_starts(memo)
         for alias in aliases:
             for i, line in enumerate(lines):
                 if HEADING_RE.match(line) and alias in line:
+                    colon_head = line.rstrip().endswith((":", "："))
                     body = []
                     for j in range(i + 1, len(lines)):
                         if not lines[j].strip():
                             if body:
                                 break
                             continue
-                        if HEADING_RE.match(lines[j]):
+                        if HEADING_RE.match(lines[j]) or (colon_head and kv.match(lines[j])):
                             break
                         body.append(j)
                     if body:
@@ -342,7 +350,6 @@ class DemoEngine:
                         regions.append((s, e, f"section 「{line.strip()[:20]}」", 0.86))
             if regions:
                 return regions
-        kv = re.compile(r"^[ \t]*(?:[・\-\*●■◆○〇▶]\s*)?(?P<k>[^\s:：（(]{2,20})\s*(?:[（(][^）)\n]*[）)])?\s*[:：]\s*(?P<v>[^\n]+?)\s*$", re.M)
         best: Optional[tuple[float, int, int, str]] = None
         for m in kv.finditer(memo):
             for alias in aliases:

@@ -4791,6 +4791,7 @@ def test_playtest_r1_a3_contradicting_lines_under_two_labels_or_with_two_weekday
                     required_format="person_name")
     m = map_fields([name], "申請者氏名：見本 太郎\n担当：\n・氏名：架空 花子\n", DemoEngine()).mappings[0]
     assert m.status == "filled" and m.filled_value == "見本 太郎" and not m.errors
+    _check_empty_label_line_never_takes_the_next_line_as_its_value()
 
 
 def test_playtest_r1_a4_dates_before_showa_are_refused_cleanly_in_wareki_fields(api):
@@ -6224,3 +6225,29 @@ def test_start_page_media_and_optional_demo_video(api, monkeypatch, tmp_path):
     eng = ClaudeEngine()
     assert eng.client == {"key": "sk-ant-from-dotenv"} and seen_keys == ["sk-ant-from-dotenv"]
     monkeypatch.delenv("FORM_GUARD_API_KEY", raising=False)
+
+
+def _check_empty_label_line_never_takes_the_next_line_as_its_value():
+    """A 「label：」 line with nothing but blanks after the colon states no value. The label-line and fuzzy label
+    patterns used to match across the line break: 担当者 was filled with the next line 「所属：情報学部」, 提出日 with the
+    変更日 line's date, and a field stated on a later line got that line including its label text."""
+    contact, dept = _text_slot("担当者"), _text_slot("所属")
+    blank = lambda m: m.status == "needs_human_input" and not m.filled_value and not m.suggested_value
+    for memo in ("担当者：\n所属：情報学部\n", "担当者：　 \n所属：情報学部\n",
+                 "● 担当者：\n所属：情報学部\n", "担当者名：\n所属部署：情報学部\n"):  # heading-bullet & fuzzy label match
+        maps = {m.slot_id: m for m in map_fields([contact, dept], memo, DemoEngine()).mappings}
+        assert blank(maps["担当者"]), (memo, maps["担当者"].filled_value)
+        assert maps["所属"].status == "filled" and maps["所属"].filled_value == "情報学部", memo  # keeps its own line
+    for memo in ("担当者：\n担当者：見本 太郎\n", "担当者：　\n所属：情報学部\n担当者：見本 太郎\n"):
+        m = map_fields([contact], memo, DemoEngine()).mappings[0]  # the line that does state the field is used
+        assert m.status == "filled" and m.filled_value == "見本 太郎", (memo, m.filled_value)
+    m = map_fields([_text_slot("提出日", fmt="wareki_date")], "提出日：\n変更日：2026年11月2日（月）\n", DemoEngine()).mappings[0]
+    assert blank(m), m.filled_value
+    # nor is the next line's date a second statement of the field that conflicts with the one the memo gives
+    slot = FormSlot(slot_id="提出日", label="提出日", location_path="test", file_type="docx", current_text="",
+                    required_format="wareki_date", aliases=["申請日"])
+    m = map_fields([slot], "申請日：2026/11/2\n提出日：\n期限：2026/11/30\n", DemoEngine()).mappings[0]
+    assert m.status == "filled" and m.filled_value == "令和8年11月2日（月）" and not m.errors, m.errors
+    reason = _text_slot("変更理由")
+    m_sec = map_fields([reason], "● 変更理由：\n機材納入日の変更に伴い日程を改める。\n", DemoEngine()).mappings[0]
+    assert m_sec.status == "filled" and m_sec.filled_value == "機材納入日の変更に伴い日程を改める。", m_sec.filled_value
