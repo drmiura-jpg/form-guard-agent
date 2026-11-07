@@ -255,6 +255,33 @@ def _label_line_re(alias: str) -> re.Pattern[str]:
                       rf"{_LINE_SPACE}[:：]{_LINE_SPACE}(?P<v>\S[^\n]*?)\s*$", re.M)
 
 
+def _empty_label_re(alias: str) -> re.Pattern[str]:
+    """An empty 「alias：」 line (also 「・alias（注）：」): the field's value is on the lines below it."""
+    return re.compile(rf"^{_LINE_SPACE}(?:[・\-\*●■◆○〇▶]{_LINE_SPACE})?{re.escape(alias)}{_LINE_SPACE}(?:[（(][^）)\n]*[）)])?{_LINE_SPACE}[:：]{_LINE_SPACE}$")
+
+
+# one memo line 「key：value」 (any key; the value may be empty) …
+_FIELD_LINE_RE = re.compile(rf"^{_LINE_SPACE}(?:[・\-\*●■◆○〇▶]{_LINE_SPACE})?(?P<k>[^\n:：（(]+?){_LINE_SPACE}(?:[（(][^）)\n]*[）)])?{_LINE_SPACE}[:：]{_LINE_SPACE}(?P<v>[^\n]*?)\s*$")
+# … whose key reads as part of a sentence (「理由は次のとおり：…」) rather than as a field label
+_PROSE_CLAUSE_RE = re.compile(r"(?:とおり|通り|以下|下記|次の|ため|なり|なった|した|して|おり|ます|です|[、。])")
+
+
+def _names_another_field(line: str, known_aliases: set[str] = frozenset()) -> bool:
+    """Does this line start another field (「所属：情報学部」「課：庶務」「所属：」) instead of continuing a section body?
+
+    A time (13:00), a URL (https://…) or a sentence with a colon in it is body text; a key that is one of the form's
+    field names always starts another field."""
+    m = _FIELD_LINE_RE.match(line)
+    if not m:
+        return False
+    k, v = m.group("k").strip(), m.group("v").strip()
+    if not k or re.fullmatch(r"[0-9０-９]+", k) or v.startswith("//"):
+        return False
+    if k in known_aliases:
+        return True
+    return not bool(_PROSE_CLAUSE_RE.search(k))
+
+
 def _subsequence_cover(alias: str, key: str) -> float:
     """Share of the key covered by the alias read as an in-order subsequence (照明設備 ⊂ 照明・電気設備)."""
     if not alias or not key or alias[0] != key[0]:
@@ -331,17 +358,19 @@ class DemoEngine:
                         rf"{_LINE_SPACE}[:：]{_LINE_SPACE}(?P<v>\S[^\n]*?)\s*$", re.M)
         lines = memo.split("\n")
         starts = line_starts(memo)
+        known_aliases = {a for s in all_slots for a in slot_aliases(s, all_slots)}
         for alias in aliases:
             for i, line in enumerate(lines):
-                if HEADING_RE.match(line) and alias in line:
-                    colon_head = line.rstrip().endswith((":", "："))
+                empty_label = bool(_empty_label_re(alias).match(line))
+                if (HEADING_RE.match(line) or empty_label) and alias in line:
+                    colon_head = empty_label or line.rstrip().endswith((":", "："))
                     body = []
                     for j in range(i + 1, len(lines)):
                         if not lines[j].strip():
                             if body:
                                 break
                             continue
-                        if HEADING_RE.match(lines[j]) or (colon_head and kv.match(lines[j])):
+                        if HEADING_RE.match(lines[j]) or (colon_head and _names_another_field(lines[j], known_aliases)):
                             break
                         body.append(j)
                     if body:

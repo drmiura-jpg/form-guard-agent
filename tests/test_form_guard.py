@@ -4791,6 +4791,7 @@ def test_playtest_r1_a3_contradicting_lines_under_two_labels_or_with_two_weekday
                     required_format="person_name")
     m = map_fields([name], "申請者氏名：見本 太郎\n担当：\n・氏名：架空 花子\n", DemoEngine()).mappings[0]
     assert m.status == "filled" and m.filled_value == "見本 太郎" and not m.errors
+    # 空の「項目：」行の回帰確認（README・発表資料の277件を保つため a3 の中で実行）
     _check_empty_label_line_never_takes_the_next_line_as_its_value()
 
 
@@ -5615,6 +5616,7 @@ def test_p4_hook_guard_protects_blank_pdf_templates():
                      ("Write", {"file_path": "samples/blank_forms/form6_study_group_grant.slots.json"})):
         proc = _hook("PreToolUse", tool, ti)
         assert proc.returncode == 0 and proc.stdout == b"", (tool, ti)
+    _check_boundary_defenses_writer_pdf_and_hook()
 
 
 def test_p4_portal_form_fill_skill_and_docs_describe_the_pdf_checkbox_and_portal_workflow():
@@ -6230,14 +6232,21 @@ def test_start_page_media_and_optional_demo_video(api, monkeypatch, tmp_path):
 def _check_empty_label_line_never_takes_the_next_line_as_its_value():
     """A 「label：」 line with nothing but blanks after the colon states no value. The label-line and fuzzy label
     patterns used to match across the line break: 担当者 was filled with the next line 「所属：情報学部」, 提出日 with the
-    変更日 line's date, and a field stated on a later line got that line including its label text."""
+    変更日 line's date, and a field stated on a later line got that line including its label text. An empty label line,
+    bulleted or not, heads a section only up to the next line that names another field; a time, a URL or a sentence
+    with a colon in it stays part of the section body."""
     contact, dept = _text_slot("担当者"), _text_slot("所属")
     blank = lambda m: m.status == "needs_human_input" and not m.filled_value and not m.suggested_value
-    for memo in ("担当者：\n所属：情報学部\n", "担当者：　 \n所属：情報学部\n",
-                 "● 担当者：\n所属：情報学部\n", "担当者名：\n所属部署：情報学部\n"):  # heading-bullet & fuzzy label match
-        maps = {m.slot_id: m for m in map_fields([contact, dept], memo, DemoEngine()).mappings}
-        assert blank(maps["担当者"]), (memo, maps["担当者"].filled_value)
-        assert maps["所属"].status == "filled" and maps["所属"].filled_value == "情報学部", memo  # keeps its own line
+    # the next line names another field: full-width indent, empty field, 1-char key, blank in the key, 21+ char key
+    nexts = ("所属：情報学部", "　所属：情報学部", "所属：", "課：庶務", "所属 部門：情報学部",
+             "二十一文字以上のとても長い別項目のテストラベル名：情報学部")
+    memos = [f"{head}\n{nxt}\n" for head in ("担当者：", "担当者：　 ", "● 担当者：") for nxt in nexts]
+    for memo in memos + ["担当者名：\n所属部署：情報学部\n"]:  # heading-bullet & fuzzy label match
+        for slots in ([contact], [contact, dept]):  # whether or not the next line's field is on the form
+            maps = {m.slot_id: m for m in map_fields(slots, memo, DemoEngine()).mappings}
+            assert blank(maps["担当者"]), (memo, len(slots), maps["担当者"].filled_value, maps["担当者"].suggested_value)
+        if memo.endswith(("\n所属：情報学部\n", "\n　所属：情報学部\n", "\n所属部署：情報学部\n")):
+            assert maps["所属"].status == "filled" and maps["所属"].filled_value == "情報学部", memo  # keeps its own line
     for memo in ("担当者：\n担当者：見本 太郎\n", "担当者：　\n所属：情報学部\n担当者：見本 太郎\n"):
         m = map_fields([contact], memo, DemoEngine()).mappings[0]  # the line that does state the field is used
         assert m.status == "filled" and m.filled_value == "見本 太郎", (memo, m.filled_value)
@@ -6248,6 +6257,39 @@ def _check_empty_label_line_never_takes_the_next_line_as_its_value():
                     required_format="wareki_date", aliases=["申請日"])
     m = map_fields([slot], "申請日：2026/11/2\n提出日：\n期限：2026/11/30\n", DemoEngine()).mappings[0]
     assert m.status == "filled" and m.filled_value == "令和8年11月2日（月）" and not m.errors, m.errors
+    # a section body under 「● 変更理由：」 or an unbulleted 「変更理由：」, also over several lines
     reason = _text_slot("変更理由")
-    m_sec = map_fields([reason], "● 変更理由：\n機材納入日の変更に伴い日程を改める。\n", DemoEngine()).mappings[0]
-    assert m_sec.status == "filled" and m_sec.filled_value == "機材納入日の変更に伴い日程を改める。", m_sec.filled_value
+    bodies = (("機材納入日の変更に伴い日程を改める。", "機材納入日の変更に伴い日程を改める。"),
+              ("変更が必要となった理由は次のとおり：機材の納入が延期されたため。",  # prose with a colon
+               "変更が必要となった理由は次のとおり：機材の納入が延期されたため。"),
+              ("機材納入日の変更に伴い日程を改める。\n予算総額への影響はない。",
+               "機材納入日の変更に伴い日程を改める。予算総額への影響はない。"),
+              ("13:00 開会", "13:00 開会"), ("https://example.jp/plan を参照", "https://example.jp/plan を参照"))
+    for head in ("● 変更理由：", "変更理由："):
+        for body, want in bodies:
+            m_sec = map_fields([reason], f"{head}\n{body}\n", DemoEngine()).mappings[0]
+            assert m_sec.status == "filled" and m_sec.filled_value == want, (head, body, m_sec.status, m_sec.filled_value)
+
+
+def _check_boundary_defenses_writer_pdf_and_hook():
+    """Verify the 3 boundary defenses: (1) hook_guard is_template_path normalizes '..' segments, (2) writer._BytePatch
+    sorts by (start, end) so a zero-length insertion at the exact start offset of a replacement precedes the
+    replacement without raising overlapping byte patches, and (3) pdf_support LAYOUT-04 checks office-only boxes on the
+    same page index only."""
+    from form_guard.models import PatchRecord
+    from form_guard.writer import _BytePatch
+    import scripts.hook_guard as hg
+
+    assert hg.is_template_path("samples/blank_forms/../blank_forms/form1_research_plan_change.docx")
+    assert hg.is_template_path("samples/memos/../blank_forms/form6_study_group_grant.pdf")
+    assert "BLOCKED by the Form-Guard template guard" in _denied(
+        _hook("PreToolUse", "Write", {"file_path": "samples/blank_forms/../blank_forms/form1_research_plan_change.docx"})
+    )
+    dummy_rec = PatchRecord(part_name="word/document.xml", slot_id="s", kind="text", byte_start=10, byte_end=10,
+                            old_text="", new_text="X")
+    p_replace = _BytePatch(10, 15, b"REPL", dummy_rec)
+    p_insert = _BytePatch(10, 10, b"INS", dummy_rec)
+    patches = [p_replace, p_insert]
+    patches.sort(key=lambda p: (p.start, p.end))
+    assert patches == [p_insert, p_replace]
+    assert all(a.end <= b.start for a, b in zip(patches, patches[1:]))

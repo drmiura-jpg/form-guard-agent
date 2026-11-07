@@ -28,9 +28,11 @@ output/
 # Personal Claude Code settings (the shared project settings are .claude/settings.json)
 .claude/settings.local.json
 
-# OS / editor noise
+# OS / editor / backup noise
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
 ~$*
+*.bak
+*.bak-*
