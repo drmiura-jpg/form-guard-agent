@@ -256,7 +256,7 @@ _GLOB_RE = re.compile(r"[*?\[]")
 
 
 def is_template_path(path: str) -> bool:
-    p = path.replace("\\", "/")
+    p = posixpath.normpath(path.replace("\\", "/"))
     return bool(re.search(r"(?:^|/)samples/+blank_forms/+[^/]+$", p, re.I)) and p.lower().endswith(TEMPLATE_EXTS)
 
 
@@ -633,7 +633,9 @@ def _shell_command_violation(command: str, payload: Optional[dict] = None) -> Tu
 def template_violation(tool: str, tool_input: dict, payload: Optional[dict] = None) -> Tuple[Optional[str], str]:
     if tool in WRITE_TOOLS:
         target = str(tool_input.get("file_path") or tool_input.get("notebook_path") or "")
-        if target and is_template_path(target):
+        cwd = Path(os.path.abspath(str((payload or {}).get("cwd") or os.getcwd())))
+        if target and (is_template_path(target) or (
+                payload is not None and "template" in _reaches(target, cwd, _project_roots(payload), resolve_ancestors=False))):
             return f"{tool} tool", target
     elif tool in SHELL_TOOLS:
         why, segment = _shell_command_violation(str(tool_input.get("command") or ""), payload)

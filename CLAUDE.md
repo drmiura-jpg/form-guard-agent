@@ -21,9 +21,9 @@ This file defines the project goal, non-negotiable safety boundaries, repository
 
 ## 2. Claude Code Extensibility Suite / 同梱の Claude Code 拡張構成
 
-- **Skills (`.claude/skills/*/SKILL.md` — 6 skills / スキル6種)**:
-  - `form-scan`, `surgical-fill`, `structural-audit`, `form-fill-verify`, `visual-diff-audit`, `portal-form-fill`
-  - 様式スキャン・空欄発見、原文引用に基づく外科的差込、21項目＋`VIS-01`構造監査、一括記入・検証、視覚差分監査、公募ポータル（`/portal`）連携の定型手順を提供する。
+- **Skills & Slash Command (`.claude/skills/*/SKILL.md` — 6 skills & `.claude/commands/fill-form.md` / スキル6種＆スラッシュコマンド)**:
+  - `form-scan`, `surgical-fill`, `structural-audit`, `form-fill-verify`, `visual-diff-audit`, `portal-form-fill`, plus `/fill-form <form> <memo>` (`.claude/commands/fill-form.md`)
+  - 様式スキャン・空欄発見、原文引用に基づく外科的差込、21項目＋`VIS-01`構造監査、一括記入・検証、視覚差分監査、公募ポータル（`/portal`）連携の定型手順と、1行で一気通貫実行する `/fill-form` コマンドを提供する。
 - **Subagents (`.claude/agents/*.md` — 4 subagents without `Edit`/`Write` tools; `memo-extractor` has only `Read, Grep, Glob`, the other three also have `Bash` for verification commands and are not technically read-only — their `Bash` is guided by prompt instructions and checked by the `PreToolUse` hook, which stops a shell write to `samples/blank_forms/`)**:
   - `memo-extractor` (`sonnet` · `Read, Grep, Glob`): Extracts verbatim memo quotes blind before seeing form slots.（欄を見る前にメモの事実を原文引用で抽出・`Read, Grep, Glob` のみ）
   - `field-mapper` (`claude-opus-5-5` · `Read, Glob, Grep, Bash`): Proposes slot values under printed form rules.（印刷ルールに沿って欄の値を提案）
@@ -51,7 +51,7 @@ This file defines the project goal, non-negotiable safety boundaries, repository
 
 ```bash
 # Run the full automated test suite (works offline without an API key)
-# 自動テスト全272件を実行（APIキー不要・オフラインで動作）
+# 自動テスト全277件を実行（APIキー不要・オフラインで動作）
 python -m pytest -q
 
 # Run the 3 marked fictional demos (form1–form3) offline -> output/index.html

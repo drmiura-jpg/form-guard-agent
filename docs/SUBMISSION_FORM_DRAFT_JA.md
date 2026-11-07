@@ -104,7 +104,7 @@ AI抽出値には元メモの原文引用スパンを紐づけ（年の補完は
 ## 3. Claude および Claude Code の活用に関する質問
 （How You Used Claude & Claude Code — 審査基準「Claudeの活用 25%」対応）
 
-### A. 日本語・標準版（箇条書き・太字・バッククォート・改行除き 2,232字／改行除き 2,420字／そのまま 2,437字）
+### A. 日本語・標準版（箇条書き・太字・バッククォート・改行除き 2,488字／改行除き 2,682字／そのまま 2,702字）
 
 **1. 欄の性質に応じた Claude 3モデルの目的別ルーティングと自己修正設計（アプリ中核）**
 1つの様式の中でも欄ごとに求められる能力が異なるため、`--model-tier auto` で3階層モデルを自動振り分けしています：
@@ -125,6 +125,9 @@ AI抽出値には元メモの原文引用スパンを紐づけ（年の補完は
 - **④ 追加のMCP SDK不要の5ツール MCP サーバー（アプリ本体の依存パッケージは必要；`form_guard/mcp_server.py`・`.mcp.json`）とブラウザ引き継ぎ**：
   `form_guard_list_demos`・`form_guard_scan`・`form_guard_discover_blank_cells`・`form_guard_fill`・`form_guard_verify` を標準入出力 JSON-RPC 2.0 で公開し、**Claude in Chrome** や Claude Code（`portal-form-fill` スキル）から読み取れる模擬公募ポータル（`/portal`）も用意しました。MCPには承認ツールを設けず未承認下書き（`UNAPPROVED_DRAFT_REQUIRES_HUMAN_SIGN_OFF`）と `review_url`（`http://127.0.0.1:8000/?run_id=...`）のみを返し、同じ SHA-256 のまま Web 画面で人が承認する運用です（HTTP API は確認者名・必須チェック項目・版・ハッシュを検査しますが、操作主体が人間かは判定しません）。
 
+**3. なぜ Claude Code 無しでは実現できなかったか（確率的AIと決定論的検査の役割分担）**
+- ソフトウェアエンジニアではない現場の実務者が、7日間の会期中に OOXML のバイト範囲置換、標準ライブラリによる固定PDF増分更新、7区分21項目の構造検査器、全277件の自動テストを一貫して構築できたのは Claude Code があってこそです。同時に「自由文メモからの原文引用つき提案は Claude に任せ、様式の不変検査と合否判定は LLM を使わない決定論的コードで行う」という境界を守っています。
+
 ---
 
 ### B. 日本語・短縮版（文字数制限が厳しい欄向け・箇条書き・バッククォート・改行除き 540字／改行除き 570字／そのまま 571字）
@@ -134,7 +137,7 @@ AI抽出値には元メモの原文引用スパンを紐づけ（年の補完は
 
 ---
 
-### C. 英語版（How You Used Claude & Claude Code — 箇条書き・太字・バッククォート・改行除き 1,912 chars／改行除き 2,040 chars／そのまま 2,048 chars）
+### C. 英語版（How You Used Claude & Claude Code — 箇条書き・太字・バッククォート・改行除き 2,263 chars／改行除き 2,397 chars／そのまま 2,406 chars）
 
 **1. Purpose-Driven 3-Tier Claude Routing & Self-Correction (`--model-tier auto`):**
 - **`claude-haiku-4-5-20251001`** handles date/era normalization, IDs, enum selection, and blank-cell classification.
@@ -145,6 +148,7 @@ AI抽出値には元メモの原文引用スパンを紐づけ（年の補完は
 - **2-Stage Guard Hooks (`scripts/hook_guard.py`)**: `PreToolUse` inspects configured tool calls before disk write (`exit 2` + `deny`) for recognizable `samples/blank_forms/` mutations and scans file-edit payloads for API keys, personal paths, and non-example e-mails (and shell commands for key patterns); `PostToolUse` runs on `Write`/`Edit`/`MultiEdit` to check `py_compile`, import smoke tests, and JSON/BOM validation (failing open on internal hook errors).
 - **4 Subagents without `Edit`/`Write` tools**: `memo-extractor` (Sonnet, `Read/Grep/Glob` only: blind span extraction), `field-mapper` (`claude-opus-5-5`: rule-aware mapping), `structure-auditor` (Sonnet: structural audit), and `form-auditor` (Opus: independent verification & sign-off checklist); the latter three use hook-guarded `Bash`.
 - **6 Skills (`form-scan`, `surgical-fill`, `structural-audit`, `form-fill-verify`, `visual-diff-audit`, `portal-form-fill`) & 5-Tool stdio MCP Server with no additional MCP SDK dependency (application dependencies required; `form_guard/mcp_server.py`)**: MCP omits any approval tool and returns `review_url` (`/?run_id=...`) so a reviewer signs off in the Web UI against the revision and SHA-256 hash.
+- **What Claude Code Made Possible:** Built in 7 days by a non-engineer domain practitioner using Claude Code to implement byte-range OOXML surgery, pure-Python PDF incremental update, 21 deterministic checks, and 277 tests — while keeping a strict boundary where Claude proposes grounded values and deterministic LLM-free code decides structural pass/fail.
 
 ---
 

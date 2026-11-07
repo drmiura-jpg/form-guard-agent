@@ -206,7 +206,7 @@ def patch_part(idx: PartIndex, values: dict[str, str], file_type: str,
     for cidx, (slot_id, offsets) in (checkbox_targets or {}).items():
         patches += _checkbox_patches(idx, idx.containers[cidx], slot_id, offsets)
 
-    patches.sort(key=lambda p: p.start)
+    patches.sort(key=lambda p: (p.start, p.end))
     for a, b in zip(patches, patches[1:]):
         if a.end > b.start:
             raise UnsupportedXMLError(f"{idx.part_name}: overlapping byte patches")

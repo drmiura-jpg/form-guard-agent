@@ -17,10 +17,10 @@ python -m form_guard.cli --scan <form> --json                         # structur
 python -m form_guard.cli --scan <form> --slot-spec <form>.slots.json  # explicit spec (auto-detected next to the form)
 ```
 
-No form at hand? The five fictional, non-medical demos are listed by the MCP tool `form_guard_list_demos`:
+No form at hand? The six fictional, non-medical built-in demos are listed by the MCP tool `form_guard_list_demos`:
 `samples/blank_forms/form1_research_plan_change.docx`, `form2_municipal_equipment_subsidy.docx`,
-`form3_facility_safety_inspection.xlsx` (marked) and `form4_unmarked_blank.docx`, `form5_unmarked_blank.xlsx`
-(unmarked). Through MCP: `form_guard_scan {form_path, slot_spec_path?}` returns the same JSON as `--json`.
+`form3_facility_safety_inspection.xlsx` (marked), `form4_unmarked_blank.docx`, `form5_unmarked_blank.xlsx`
+(unmarked Word/Excel) and `form6_study_group_grant.pdf` (fixed PDF). Through MCP: `form_guard_scan {form_path, slot_spec_path?}` returns the same JSON as `--json`.
 
 | Kind | On the form | Notes |
 |---|---|---|

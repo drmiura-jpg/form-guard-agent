@@ -1298,6 +1298,8 @@ def verify_pdf(scan, filled_path: Union[str, Path], mappings: Optional[list[Fiel
                     break
             written_text.setdefault(sid, []).append(r)
         for c, kw in office:
+            if c.page != p.index:
+                continue
             for r in overlay_runs(fp):
                 if any(_overlap(_glyph_box(gl), c.rect) for gl in r.glyphs):
                     office_hits.append(f"page {p.index + 1}: overlay text inside the office-only box "
