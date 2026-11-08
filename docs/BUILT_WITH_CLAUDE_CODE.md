@@ -223,8 +223,7 @@ without any AI regeneration, re-verified it against the blank form and left it u
 - The blank and filled copies of all five forms (form1–form5) were opened through COM automation in real Microsoft Word 16.0 and Excel 16.0: 0 warnings, exact page counts preserved (1 page → 1 page for form1, form2 and form4), clean PDF export, and Excel recalculated the formulas to the expected values — form3 `D13 =COUNTIF($F$8:$F$12,"良")` → 3, `F13 =COUNTIF($F$8:$F$12,"要注意")` → 1, `H13 =COUNTIF($F$8:$F$12,"要是正")` → 1; form5 `E16 =SUM(E13:E15)` → 17.
 - This complements APP-01 (an independent OOXML library opens every file) and the built-in previews, which are close to, but not identical with, Word/Excel rendering.
 
-The 3-minute Japanese demo video follows [DEMO_VIDEO_SCRIPT_JA.md](DEMO_VIDEO_SCRIPT_JA.md): 175 seconds, one step per
-guided-tour deep link `#tour=1` … `#tour=5` of the web UI.
+The submitted Japanese demo video ([https://youtu.be/4MvCEiBFhgU](https://youtu.be/4MvCEiBFhgU), 2 min 44 s) records one real run: `/fill-form` in Claude Code → review and sign-off on `/start` → the approved `.docx` opened in Microsoft Word (the fill runs in offline demo mode). The earlier 175-second storyboard, one step per guided-tour deep link `#tour=1` … `#tour=5` of the web UI, is kept in [DEMO_VIDEO_SCRIPT_JA.md](DEMO_VIDEO_SCRIPT_JA.md).
 
 ---
 
@@ -383,5 +382,4 @@ cp932 環境での stdio 経由の MCP サーバー、2 段のフックを対象
 - form1〜form5 の白紙と記入済みを COM 経由で実機の Word 16.0・Excel 16.0 で開き、警告 0、ページ数不変（form1・form2・form4 は 1 ページ → 1 ページ）、PDF への出力、計算式の再計算が期待値と一致すること（form3：`D13 =COUNTIF($F$8:$F$12,"良")` → 3、`F13 =COUNTIF($F$8:$F$12,"要注意")` → 1、`H13 =COUNTIF($F$8:$F$12,"要是正")` → 1、form5：`E16 =SUM(E13:E15)` → 17）を確認しました。
 - 独立した OOXML ライブラリで開けることを確かめる APP-01 と、Word/Excel の描画に近いものの同一ではない内蔵プレビューを補う確認です。
 
-3分のデモ動画（日本語ナレーション・175秒）は [DEMO_VIDEO_SCRIPT_JA.md](DEMO_VIDEO_SCRIPT_JA.md) の台本と絵コンテに沿って、
-Web 画面のガイドツアー `#tour=1`〜`#tour=5` を順にたどります。
+提出したデモ動画（[https://youtu.be/4MvCEiBFhgU](https://youtu.be/4MvCEiBFhgU)、日本語ナレーション・2分44秒）は、Claude Code の `/fill-form` → `/start` での確認と承認 → 承認した `.docx` を Microsoft Word で開く、までの実際の操作の録画です（記入はお試しモード）。Web 画面のガイドツアー `#tour=1`〜`#tour=5` を順にたどる175秒版の台本と絵コンテは [DEMO_VIDEO_SCRIPT_JA.md](DEMO_VIDEO_SCRIPT_JA.md) にあります。
