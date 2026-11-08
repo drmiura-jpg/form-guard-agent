@@ -1,5 +1,7 @@
 # Keep text files LF everywhere so memo line numbers and byte offsets are stable across platforms.
 * text=auto eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
 *.docx binary
 *.xlsx binary
 *.png binary

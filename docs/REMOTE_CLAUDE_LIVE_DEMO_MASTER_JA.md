@@ -1,14 +1,14 @@
-# Built with Claude: Japan 2026 — リモートPC完全引き継ぎ＆「デモ＞プレゼン」Guardrailsライブ実演・3分動画設計書
+# Built with Claude: Japan 2026 — 別PC完全引き継ぎ＆「デモ＞プレゼン」Guardrailsライブ実演・3分動画設計書
 
 作成日：2026-11-08（日）
 公式提出締切：**2026-11-08（日）20:00 JST（時間厳守）**
 
 ---
 
-## 0. このファイルの目的（リモートPCのClaudeアプリ／Claude Codeにそのまま読ませる用）
+## 0. このファイルの目的（別PCのClaudeアプリ／Claude Codeにそのまま読ませる用）
 
-- **1枚でハッカソン全状況を共有**：手元PCのプロジェクトノートとローカル開発フォルダ（`C:\hackathon\form-guard-agent`）にある現在地・審査基準・Form-Guard Agent の全仕様を集約しています（仕様・手順の正本は [README.md](../README.md)・[BUILT_WITH_CLAUDE_CODE.md](BUILT_WITH_CLAUDE_CODE.md)・[SUBMISSION_FORM_DRAFT_JA.md](SUBMISSION_FORM_DRAFT_JA.md) を参照）。
-- **Obsidian 非接続でも即実演可能**：リモートPCの Claude デスクトップアプリ（Claude Desktop）または Claude Code にこの `.md` ファイルを渡せば、**「いま何を作っていて、どの Guardrails（安全機構）をどう実演し、3分動画のどこにライブ録画を入れるか」** の要点を把握したうえで即座に実演を進められます。
+- **1枚でハッカソン全状況を共有**：開発環境のドキュメントとローカルフォルダ（`C:\hackathon\form-guard-agent`）にある現在地・審査基準・Form-Guard Agent の全仕様を集約しています（仕様・手順の正本は [README.md](../README.md)・[BUILT_WITH_CLAUDE_CODE.md](BUILT_WITH_CLAUDE_CODE.md)・[SUBMISSION_FORM_DRAFT_JA.md](SUBMISSION_FORM_DRAFT_JA.md) を参照）。
+- **単体ファイルで即実演可能**：別PCの Claude デスクトップアプリ（Claude Desktop）または Claude Code にこの `.md` ファイルを渡せば、**「いま何を作っていて、どの Guardrails（安全機構）をどう実演し、3分動画のどこにライブ録画を入れるか」** の要点を把握したうえで即座に実演を進められます。
 
 ---
 
@@ -21,7 +21,7 @@
   1. **GitHub リポジトリは Public（公開）** に設定すること
   2. **デモ動画は 3分（180秒）以内** かつ誰でも閲覧可能（YouTube 限定公開 または Loom `Anyone with the link can view`）にすること
   3. **「デモ ＞ プレゼン。スライドではなく、実際に使っている姿を見たい。」**
-  4. **概要欄は 500字以内** ＋ 冒頭は一文で **『このプロジェクトは、〔誰〕の〔課題〕を〔どう変える〕〔形〕です。』** と書くこと（そのまま421字・改行除き419字・冒頭一文148字の準拠版を `docs/SUBMISSION_FORM_DRAFT_JA.md` 第2節-B に準備済み）
+  4. **概要欄は 500字以内** ＋ 冒頭は一文で **『このプロジェクトは、〔誰〕の〔課題〕を〔どう変える〕〔形〕です。』** と書くこと（提出済みの概要は改行込み461字・改行除き457字・冒頭一文146字：`docs/SUBMISSION_FORM_DRAFT_JA.md` の `#4` 推奨案 4-B）
   5. 審査員用のアプリケーションリンクがあればログイン情報・再現手順を記載すること
 - **審査基準（4区分・計100%）**：
   1. **インパクト（30%）**：日本の具体的な現場課題から出発しているか、誰がどんな場面で困っているか、ハッカソン後も使い続けられるか
@@ -30,16 +30,16 @@
   4. **深さと実行力（20%）**：試行錯誤を重ねて磨き上げたか、困っている人が安心してそのまま使える形（Guardrails・検査・人間承認）に仕上がっているか
 
 ### 1-2. プロダクト「Form-Guard Agent」の完成状況（現在地）
-- **公式冒頭定型文（概要欄1文目・148字）**：
-  - このプロジェクトは、大学・自治体・医療現場などの申請業務で「指定様式の罫線や計算式が崩れると差し戻されるためAIを使えない」と困っている担当者・研究者の課題を、元の白紙様式は一切触らず指定欄だけをピンポイントで書き換え、欄外の不変を自動検査して人が最終承認する形に変える書類記入エージェントです。
+- **提出した概要の1文目（146字）**：
+  - このプロジェクトは、行政・大学・施設の指定様式（Word・Excel・固定PDF）を扱う担当者の「AIで下書きすると罫線や結合セル・定型文まで壊れて差し戻される」課題を、指定欄だけを書き換え21項目＋視覚比較で構造不変と原文根拠を確かめてから人間が承認する形に変える書類記入エージェントです。
 - **実装・検証済みの状態**：
   - 対応形式：Word（`.docx`）、Excel（`.xlsx`）、固定レイアウト PDF（`.pdf`）の付属デモ全10様式（`form1`〜`form10`、すべて自作の架空様式・架空メモ）
   - 自動テスト：`.venv` で **`pytest` 全277件合格（277 passed, 0 skipped）**、オフラインプログラム45試行＋実ブラウザ16試行すべて合格、公開実ファイル計190件の3段階限定構造試験（合成ダミーメモによるオフライン検査で構造改変0件・詳細は `docs/PUBLIC_BENCHMARK_190_MANIFEST.json`）まで完了
-  - 動画の現状：既存の175.00秒ベース動画（`FormGuard_Agent_Demo_175s_1080p.mp4`）と2026-11-07（土）仮編集版（`FormGuard_Chat_Demo_175s_REVIEW.mp4`）あり。**ここに「Claude アプリ／Claude Code で実際に Guardrails を使って対話→ピンポイント記入→検査→ブラウザ人間承認を行うライブ録画」を組み込んで完成させるのが今回のゴールです。**
+  - 動画の現状：完成・限定公開済みの2分44秒（`163.967秒`・1080p）デモ動画（`https://youtu.be/4MvCEiBFhgU`）および既存の175.00秒ベース動画あり。**「Claude アプリ／Claude Code で実際に Guardrails を使って対話→ピンポイント記入→検査→ブラウザ人間承認→実機Word確認を行うライブ録画」の全体設計と再現手順を本ファイルにまとめています。**
 
 ---
 
-## 2. リモートPCへローカルフォルダを渡す構成と最短セットアップ手順
+## 2. 別PCへローカルフォルダを渡す構成と最短セットアップ手順
 
 - **前提環境**：Windows ＋ **Python 3.10 以上**（`python --version` で確認）＋ Claude Desktop（または Claude Code）
 - **軽量版（推奨・約1.3 MB）**：`form-guard-agent-slim-code-only.zip`
@@ -47,17 +47,17 @@
 - **完全版（約43.7 MB）**：`form-guard-agent-remote-demo-pack.zip`
   - 含まれるもの：上記に加え、全スクリーンショットやスライド一式も含むフルパッケージ
 
-### リモートPCでのセットアップ＆起動手順
+### 別PCでのセットアップ＆起動手順
 
-- **手順1**：リモートPCで `git clone https://github.com/drmiura-jpg/form-guard-agent.git C:\hackathon\form-guard-agent`（または ZIP を **`C:\hackathon\form-guard-agent`** に解凍）します。
+- **手順1**：別PCで `git clone https://github.com/drmiura-jpg/form-guard-agent.git C:\hackathon\form-guard-agent`（または ZIP を **`C:\hackathon\form-guard-agent`** に解凍）します。
 - **手順2**：PowerShell を開いて以下のコマンドを実行すると、Python 仮想環境（`.venv`）構築・パッケージ導入・Claude Desktop の MCP 設定統合（`-ConfigureClaudeDesktop` 指定時のみ・既存設定のバックアップ付き）・ローカル Web サーバー（`http://127.0.0.1:8000`、`-AllowLive` 指定で MCP 下書きのブラウザ取り込み有効）の起動とヘルスチェック（`/api/health`・`/start`）確認まで自動で進みます（途中で `[NG]` が出た場合は表示された理由を解消して再実行します）。
 
 ```powershell
 cd C:\hackathon\form-guard-agent
 # 録画PCでブラウザ側（/#tour=1 や /#tour=3）が誤って有料APIを呼ばないよう、シェル環境変数のキーと FORM_GUARD_FORCE_DEMO をクリア
 Remove-Item Env:FORM_GUARD_API_KEY, Env:ANTHROPIC_API_KEY, Env:ANTHROPIC_AUTH_TOKEN, Env:FORM_GUARD_FORCE_DEMO -ErrorAction SilentlyContinue
-# 既存の Form-Guard サーバーが動いていれば停止（別アプリは止めない）
-Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'form_guard\.cli.*--serve' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+# ポート8000を待受中の本リポジトリ .venv\Scripts\python.exe のみ停止（別アプリ・別リポジトリは止めない）
+$expPy = [IO.Path]::GetFullPath('.\.venv\Scripts\python.exe'); Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction Ignore | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { $w = Get-CimInstance Win32_Process -Filter ('ProcessId = ' + $_) -ErrorAction Ignore; if ($w -and $w.CommandLine -and ($w.CommandLine.IndexOf($expPy, [StringComparison]::OrdinalIgnoreCase) -ge 0)) { Stop-Process -Id $_ -Force } }
 # Claude Desktop 設定登録 (-ConfigureClaudeDesktop) ＆ MCP 下書きのブラウザ取り込み有効 (-AllowLive) で起動
 powershell -ExecutionPolicy Bypass -File .\scripts\setup_remote_demo.ps1 -ConfigureClaudeDesktop -AllowLive
 ```
@@ -65,9 +65,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\setup_remote_demo.ps1 -Config
 
 ---
 
-## 3. リモートPCの「Claude デスクトップアプリ」＆「Claude Code」への接続設計
+## 3. 別PCの「Claude デスクトップアプリ」＆「Claude Code」への接続設計
 
-リモートPCの **Claude デスクトップアプリ（Claude Desktop）** でも、アプリ内・ターミナルの **Claude Code** でも、両方から Form-Guard の MCP ツール（5個）を呼び出せます。
+別PCの **Claude デスクトップアプリ（Claude Desktop）** でも、アプリ内・ターミナルの **Claude Code** でも、両方から Form-Guard の MCP ツール（5個）を呼び出せます。
 
 ### 3-1. Claude デスクトップアプリ（Claude Desktop）に MCP を繋ぐ設定
 - 上記の `setup_remote_demo.ps1 -ConfigureClaudeDesktop` を実行すると（`-ConfigureClaudeDesktop` 指定時のみ）、`%APPDATA%\Claude\claude_desktop_config.json`（既存ファイルは `.bak-日時` に自動退避、破損JSON時は上書きせず停止）に以下の設定が書き込まれます。
@@ -97,7 +97,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\setup_remote_demo.ps1 -Config
 
 ### 3-2. Claude Code（CLI または Desktop 内 Claude Code タブ）で動かす場合
 - **重要（動作先と仮想環境）**：MCP 5ツールは Claude Desktop の通常チャットでも Claude Code でも同様に動きますが、`.claude/settings.json` の2段階フック（`PreToolUse` / `PostToolUse`）は **Claude Code 固有の機能** です。
-- CLI の Claude Code で実演する場合は、`.mcp.json` とフック（`python scripts/hook_guard.py`）が依存導入済みの `.venv` を使うよう、必ず同じ PowerShell 内で `.\.venv\Scripts\activate` を実行してから `claude` を起動し、初回起動時にフォルダの信頼と `.mcp.json` の承認を済ませておきます。
+- CLI の Claude Code で実演する場合は、リポジトリ直下で `claude`（または `scripts\launch_clean_demo.cmd --remote`）を起動します。`.mcp.json` の `python` に依存が無くても、MCP サーバーが `.venv` で起動し直します（`form_guard/mcp_server.py:781-807`）。初回起動時にフォルダの信頼と `.mcp.json` の承認を済ませておきます。
 
 ---
 
@@ -157,7 +157,7 @@ Form-Guard Agent が備える5つの安全機構のうち、**今回の3ター�
 ```
 
 **【画面で見せるポイント（43秒枠：1:05–1:48）】**
-- Claude が `form_guard_fill` と `form_guard_verify` を連続実行します（手元PCでの実機検証済み出力：西暦が **和暦「令和8年11月28日（土）」**・出張期間が **「令和8年12月3日（木）～令和8年12月4日（金）」** に正規化され、用務内容 **59字（上限100字以内）** を含む7欄すべてが `filled`・入力待ち `0件` になります）。
+- Claude が `form_guard_fill` と `form_guard_verify` を連続実行します（開発環境での実機検証済み出力：西暦が **和暦「令和8年11月28日（土）」**・出張期間が **「令和8年12月3日（木）～令和8年12月4日（金）」** に正規化され、用務内容 **59字（上限100字以内）** を含む7欄すべてが `filled`・入力待ち `0件` になります）。
 - **7区分・21項目の構造検査すべて合格（21/21 PASS）**、内蔵プレビュー配置比較での指定欄外のずれ **`0 px`**、`c08・c09` は空欄のまま保護されます。
 - ステータスが **`UNAPPROVED_DRAFT_REQUIRES_HUMAN_SIGN_OFF`（未承認下書き・人の確認待ち）** となり、`http://127.0.0.1:8000/start?run_id=...` のリンクが出力されます。
 
@@ -189,6 +189,6 @@ Form-Guard Agent が備える5つの安全機構のうち、**今回の3ター�
 ## 7. 録画前のチェックリスト（撮り直し防止のために）
 
 - [ ] **本番前に10秒のテスト録画・再生確認をしたか**：OBS Studio（画面キャプチャ）等で10秒だけ録画して再生し、左のClaude画面・右のブラウザ画面の文字がはっきり読めるか、マイク音声（または後付けナレーション）がクリアに入っているかを確認する。
-- [ ] **個人情報・個人パスが映っていないか**：ターミナルのプロンプトは `C:\hackathon\form-guard-agent>` に固定されているか、ブラウザのブックマークバーや個人アカウントアイコンは隠れているか。
+- [ ] **個人情報・個人パスが映っていないか**：ターミナルや Claude Code の起動画面に、ユーザー名入りのパスが映らない場所（`C:\hackathon\form-guard-agent` など）に置いたか、ブラウザのブックマークバーや個人アカウントアイコンは隠れているか。
 - [ ] **架空データのみか**：画面に映る様式・メモ・名前（`見本 七海`・`山田 太郎`）はすべて架空データになっているか。
 - [ ] **動画尺が 180秒（3分00秒）以内か**：公式上限の 180.0秒を超えないよう、170〜175秒で収める。
