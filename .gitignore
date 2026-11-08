@@ -18,6 +18,7 @@ htmlcov/
 # Secrets — never commit API keys
 .env
 .env.*
+!.env.example
 
 # Generated pipeline outputs (re-create with: python -m form_guard.cli --all-demos)
 output/
