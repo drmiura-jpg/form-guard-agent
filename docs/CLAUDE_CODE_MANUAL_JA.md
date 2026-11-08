@@ -16,7 +16,7 @@ Claude Code に日本語で頼むだけで、**様式の空欄探し → 記入 
 
 > 💡 API キーは `.env`（GitHub に上がらない設定ファイル）に `FORM_GUARD_API_KEY` として保存され、**Form-Guard の Web 画面と MCP サーバーだけ**が使います（`ANTHROPIC_API_KEY` は書き換えないため、Claude Code 本体は Max 定額枠のままです。念のため Claude Code 起動後に `/status` で Max 表示か確認できます）。
 > 💰 **費用の区分**:
-> - **お試しモード（`mode="demo"`・MCP の既定／Web 画面は「自動 / Auto」が既定で API キー未設定時は 0円、キー設定後に通信しない場合は「オフライン（デモエンジン）」を選択）**: API 通信なし・追加の従量課金は **0円**（Claude Code のチャット自体は Max 定額枠内）。
+> - **お試しモード（`mode="demo"`・MCP の既定／Web 画面トップ `/` は「自動 / Auto」が既定で API キー未設定時は 0円、キー設定後に通信させないときは「オフライン（キー不要）」を選択／かんたん画面 `/start` は「お試しモード」が既定）**: API 通信なし・追加の従量課金は **0円**（Claude Code のチャット自体は Max 定額枠内）。
 > - **本番の AI モード（`mode="live"`）**: Form-Guard が Anthropic API（自動振り分け：Haiku 4.5／Sonnet 5／Opus 5.5）を呼ぶため、**API の従量クレジットを消費**します（費用はモデル・文章量・呼び出し回数や再試行回数で決まり、この手順での実費は未計測です。最新の単価は Anthropic の公式料金案内を確認し、実行前に Anthropic Console の Spend Limit で利用上限を設定しておくと安心です）。
 
 > ⚠️ チャットに貼った文章は Claude（Anthropic）に送られます。患者さんの情報・個人情報・未公開の資料は貼らないでください。

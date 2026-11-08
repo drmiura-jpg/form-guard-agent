@@ -1,7 +1,7 @@
 ---
 name: form-scan
-description: "Read-only inspection of a blank Word (.docx) or Excel (.xlsx) form with Form-Guard before any mapping or editing: lists every fillable slot ({{markers}}, [記入欄: …] markers, empty cells designated by coordinates in <form>.slots.json) with its location and the rules printed on the form (character limits, 和暦 dates, digit counts and ID patterns, yen caps and rounding, drop-down options), and — for an unmarked blank form without markers — runs the 4-stage blank-cell discovery (applicant fields vs office-only cells) for human confirmation. Use when asked what a form contains or requires, before filling a new form, or when a fill reports a missing or unexpected slot."
-argument-hint: "<form.docx|form.xlsx> [slot-spec.json]"
+description: "Read-only inspection of a blank Word (.docx), Excel (.xlsx) or fixed PDF (.pdf) form with Form-Guard before any mapping or editing: lists every fillable slot ({{markers}}, [記入欄: …] markers, empty cells or ruled PDF boxes designated by coordinates in <form>.slots.json) with its location and the rules printed on the form (character limits, 和暦 dates, digit counts and ID patterns, yen caps and rounding, drop-down or checkbox options), and — for an unmarked blank form or fixed PDF without markers — runs the 4-stage blank-cell discovery (applicant fields vs office-only cells) for human confirmation. Use when asked what a form contains or requires, before filling a new form, or when a fill reports a missing or unexpected slot."
+argument-hint: "<form.docx|form.xlsx|form.pdf> [slot-spec.json]"
 ---
 
 # Form scan — look before you write
@@ -26,7 +26,7 @@ No form at hand? The six fictional, non-medical built-in demos are listed by the
 |---|---|---|
 | braces | `{{研究課題番号}}` | may be split across Word runs (spell-check, bookmarks) — handled |
 | kinyuran | `[記入欄: 法人番号]` | |
-| empty cell | nothing printed; `<form>.slots.json` → Word `{"targets": [{"slot_id": "担当者連絡先", "table": 1, "row": 8, "col": 1}]}`, Excel `{"slot_id": "申請日", "sheet": 0, "cell": "C5"}` | for official forms that must not be edited; the cell must really be empty |
+| empty cell | nothing printed; `<form>.slots.json` → Word `{"targets": [{"slot_id": "担当者連絡先", "table": 1, "row": 8, "col": 1}]}`, Excel `{"slot_id": "申請日", "sheet": 0, "cell": "C5"}`, PDF `{"slot_id": "申請日", "page": 0, "rect": [172.9, 697.8, 345.8, 720.5]}` (`page` is 0-based) | for official forms that must not be edited; the cell or box must really be empty |
 
 | Printed on the form | Becomes |
 |---|---|

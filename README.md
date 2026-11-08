@@ -297,7 +297,7 @@ then place text boxes by hand in a PDF editor, box by box. Form-Guard does that 
 original PDF is untouched.
 
 ```bash
-python -m form_guard.cli --discover-blanks samples/blank_forms/form6_study_group_grant.pdf --out-dir output
+python -m form_guard.cli --discover-blanks samples/blank_forms/form6_study_group_grant.pdf --mode demo --out-dir output
 python -m form_guard.cli --form samples/blank_forms/form6_study_group_grant.pdf \
     --memo samples/memos/memo6_study_group_grant.txt --out-dir output/form6 --mode demo     # uses the sidecar .slots.json
 ```
@@ -656,7 +656,7 @@ python -m form_guard.cli --form samples/blank_forms/form4_unmarked_blank.docx --
 1 つずつ手で置いて記入しています。Form-Guard はその配置を自動で行い、元の PDF が変わっていないことを検査します。
 
 ```bash
-python -m form_guard.cli --discover-blanks samples/blank_forms/form6_study_group_grant.pdf --out-dir output
+python -m form_guard.cli --discover-blanks samples/blank_forms/form6_study_group_grant.pdf --mode demo --out-dir output
 python -m form_guard.cli --form samples/blank_forms/form6_study_group_grant.pdf \
     --memo samples/memos/memo6_study_group_grant.txt --out-dir output/form6 --mode demo
 ```

@@ -196,9 +196,9 @@ iteration and, in Phase 3, to drive the web UI end to end in a headless browser 
 Beyond the offline suite, three checks were run on real software on 2026-11-03（火）.
 
 **Live Anthropic API 3-tier routing (`--mode live --model-tier auto`).**
-- On `form1_research_plan_change.docx` (run `20261103-164113-f83bad`, `created_at: 2026-11-03（火）07:41:13 UTC / 16:41:13 JST`, `filled_sha256: 2198043e2f70c66a2b36a71c4e0c653ffd6a1e8d88740af44d3f9f8356c2a2bc`, recorded locally in git-ignored `output/live_smoke_form1/audit_log.json`), all three tiers answered on the first attempt (`requests: 3`, `input_tokens: 2529` uncached input tokens reported by the Messages API after prompt-cache hits, `output_tokens: 2569`, `model_fallbacks: []`, `escalations: []`, `rounds: 0`), passing 21/21 deterministic checks with `0 px` layout drift:
+- On `form1_research_plan_change.docx` (run `20261103-164113-f83bad`, `created_at: 2026-11-03（火）07:41:13 UTC / 16:41:13 JST`, `filled_sha256: 2198043e2f70c66a2b36a71c4e0c653ffd6a1e8d88740af44d3f9f8356c2a2bc`, recorded locally in git-ignored `output/live_smoke_form1/audit_log.json`), all three tiers answered on the first attempt (`requests: 3`, `input_tokens: 2529` — the Messages API's `usage.input_tokens`, where prompt-cache reads and writes are counted separately; this run's log records `cache_read_input_tokens: 0`, `output_tokens: 2569`, `model_fallbacks: []`, `escalations: []`, `rounds: 0`), passing 21/21 deterministic checks with `0 px` layout drift:
 
-| Call | Tier | `requested_model` / `served_model` | Target slots | `effort` / `thinking` | `stop_reason` | Tokens (uncached `in` / `out`) | API-returned thinking summary |
+| Call | Tier | `requested_model` / `served_model` | Target slots | `effort` / `thinking` | `stop_reason` | Tokens (`input_tokens` / `output_tokens`) | API-returned thinking summary |
 |---|---|---|---|---|---|---|---|
 | 1 | `haiku` | `claude-haiku-4-5-20251001` | `提出日`, `研究課題番号`, `変更種別` | `null` / `omitted (not supported by this model)` | `end_turn` | `2523` / `425` | *(none — Haiku 4.5 omits thinking)* |
 | 2 | `sonnet` | `claude-sonnet-5` | `研究代表者氏名`, `所属部局`, `変更前の計画概要`, `変更後の計画概要` | `"medium"` / `adaptive, summarized` | `end_turn` | `2` / `800` | `"I'm filling in the form fields now: the principal investigator's name, their affiliated department, the summary of the plan before changes, and the summary of the plan after changes."` |
@@ -365,9 +365,9 @@ cp932 環境での stdio 経由の MCP サーバー、2 段のフックを対象
 オフラインのテストに加えて、2026-11-03（火）に実際のソフトウェアと実APIで次の 3 つを確認しました。
 
 **Anthropic 実API 3階層ルーティング（`--mode live --model-tier auto`）。**
-- `form1_research_plan_change.docx`（run `20261103-164113-f83bad`、`created_at: 2026-11-03（火）07:41:13 UTC / 16:41:13 JST`、`filled_sha256: 2198043e2f70c66a2b36a71c4e0c653ffd6a1e8d88740af44d3f9f8356c2a2bc`、元ログはローカル `.gitignore` 対象の `output/live_smoke_form1/audit_log.json`）で3階層すべてが初回で応答し（`requests: 3`・`input_tokens: 2529`［Messages API の `usage.input_tokens` でありプロンプトキャッシュ命中分を除いた未キャッシュ入力トークン数］・`output_tokens: 2569`・`model_fallbacks: []`・`escalations: []`・`rounds: 0`）、21/21 項目 `PASS`・描画位置のずれ `0 px` を確認しました：
+- `form1_research_plan_change.docx`（run `20261103-164113-f83bad`、`created_at: 2026-11-03（火）07:41:13 UTC / 16:41:13 JST`、`filled_sha256: 2198043e2f70c66a2b36a71c4e0c653ffd6a1e8d88740af44d3f9f8356c2a2bc`、元ログはローカル `.gitignore` 対象の `output/live_smoke_form1/audit_log.json`）で3階層すべてが初回で応答し（`requests: 3`・`input_tokens: 2529`［Messages API の `usage.input_tokens`。プロンプトキャッシュの読み書き分は別フィールドで計上され、この実行の記録は `cache_read_input_tokens: 0`］・`output_tokens: 2569`・`model_fallbacks: []`・`escalations: []`・`rounds: 0`）、21/21 項目 `PASS`・描画位置のずれ `0 px` を確認しました：
 
-| 呼び出し | 階層 (`tier`) | `requested_model` / `served_model` | 担当欄 (`slots`) | `effort` / `thinking` | `stop_reason` | トークン数 (未キャッシュ `in` / `out`) | API が返した思考の要約 (`thinking_summaries`) |
+| 呼び出し | 階層 (`tier`) | `requested_model` / `served_model` | 担当欄 (`slots`) | `effort` / `thinking` | `stop_reason` | トークン数 (`input_tokens` / `output_tokens`) | API が返した思考の要約 (`thinking_summaries`) |
 |---|---|---|---|---|---|---|---|
 | 1 | `haiku` | `claude-haiku-4-5-20251001` | `提出日`・`研究課題番号`・`変更種別` | `null` / `omitted (not supported by this model)` | `end_turn` | `2523` / `425` | *(なし — Haiku 4.5 は thinking 省略)* |
 | 2 | `sonnet` | `claude-sonnet-5` | `研究代表者氏名`・`所属部局`・`変更前の計画概要`・`変更後の計画概要` | `"medium"` / `adaptive, summarized` | `end_turn` | `2` / `800` | `"I'm filling in the form fields now: the principal investigator's name, their affiliated department, the summary of the plan before changes, and the summary of the plan after changes."` |

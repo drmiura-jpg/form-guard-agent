@@ -256,7 +256,7 @@ _GLOB_RE = re.compile(r"[*?\[]")
 
 
 def is_template_path(path: str) -> bool:
-    p = posixpath.normpath(path.replace("\\", "/"))
+    p = "/".join(seg.rstrip(". ") for seg in posixpath.normpath(path.replace("\\", "/")).split("/"))
     return bool(re.search(r"(?:^|/)samples/+blank_forms/+[^/]+$", p, re.I)) and p.lower().endswith(TEMPLATE_EXTS)
 
 
@@ -398,6 +398,7 @@ def _native(raw: str) -> str:
 
 def _could_hold_template(name: str) -> bool:
     """A (lower-case) file name — or a wildcard for one — that is or can match a blank template (.docx / .xlsx / .pdf …)."""
+    name = name.rstrip(". ")
     if not _GLOB_RE.search(name):
         return name.endswith(TEMPLATE_EXTS)
     ext = re.search(r"\.[a-z0-9]+$", name)  # a literal extension at the end of the wildcard decides
@@ -422,7 +423,7 @@ def _reaches(arg: str, cwd: Optional[Path], roots: Iterable[Path], resolve_ances
     raw = arg.strip().strip("\"'").replace("\\", "/")
     if not raw or raw.startswith(("$", "%", "~", "{")):
         return found
-    parts = [c.lower() for c in posixpath.normpath(raw).split("/") if c not in ("", ".")]
+    parts = [c.lower().rstrip(". ") for c in posixpath.normpath(raw).split("/") if c not in ("", ".")]
     for k, c in enumerate(parts):
         if c == "blank_forms" or (k and parts[k - 1] == "samples" and _GLOB_RE.search(c)
                                   and fnmatchcase("blank_forms", c)):
@@ -434,7 +435,7 @@ def _reaches(arg: str, cwd: Optional[Path], roots: Iterable[Path], resolve_ances
         return found
     p = Path(_native(raw))
     p = Path(os.path.normpath(str(p if p.is_absolute() else cwd / p)))
-    full = [s.lower() for s in p.parts]
+    full = [s.lower().rstrip(". ") for s in p.parts]
     for root in roots:
         guard = [s.lower() for s in (root / "samples" / "blank_forms").parts]
         n = min(len(full), len(guard))
@@ -839,19 +840,22 @@ def post_tool_use(payload: dict) -> int:
     shown = path.relative_to(root).as_posix()
     problems: List[str] = []
     notes: List[str] = []
-    data = b""
+    data: Optional[bytes] = None
     if path.stat().st_size <= MAX_SCAN_BYTES:
         data = path.read_bytes()
     if _ext(path, ".py"):  # case-insensitive: x.PY too
         p, n = _python_checks(path, shown, started)
         problems += p
         notes += n
-    elif _ext(path, ".json") and data:  # x.JSON too
-        bad = _json_check(data, shown)
-        if bad:
-            problems.append(bad)
+    elif _ext(path, ".json"):  # x.JSON too
+        if data is None:
+            problems.append(f"{shown}: JSON file exceeds {MAX_SCAN_BYTES} bytes and could not be verified")
         else:
-            notes.append("JSON OK")
+            bad = _json_check(data, shown)
+            if bad:
+                problems.append(bad)
+            else:
+                notes.append("JSON OK")
     if data and not _hygiene_exempt(path) and (_ext(path, *TEXT_EXTS) or path.name.startswith(".")):
         text = data.decode("utf-8", "replace")
         found = hygiene_findings(text)

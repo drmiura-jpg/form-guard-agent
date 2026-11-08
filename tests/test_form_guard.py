@@ -5607,7 +5607,7 @@ def test_p4_cli_scans_discovers_fills_and_verifies_a_fixed_pdf(samples_dir, tmp_
     assert "PASS (21 passed, 0 failed)" in capsys.readouterr().out
 
 
-def test_p4_hook_guard_protects_blank_pdf_templates():
+def test_p4_hook_guard_protects_blank_pdf_templates(tmp_path, samples_dir):
     pdf = "samples/blank_forms/form6_study_group_grant.pdf"
     for tool, ti in (("Write", {"file_path": pdf}), ("Bash", {"command": f"cp output/x.pdf {pdf}"}),
                      ("Bash", {"command": f"rm {pdf}"}), ("PowerShell", {"command": f"Remove-Item {pdf}"})):
@@ -5616,7 +5616,7 @@ def test_p4_hook_guard_protects_blank_pdf_templates():
                      ("Write", {"file_path": "samples/blank_forms/form6_study_group_grant.slots.json"})):
         proc = _hook("PreToolUse", tool, ti)
         assert proc.returncode == 0 and proc.stdout == b"", (tool, ti)
-    _check_boundary_defenses_writer_pdf_and_hook()
+    _check_boundary_defenses_writer_pdf_and_hook(tmp_path, samples_dir)
 
 
 def test_p4_portal_form_fill_skill_and_docs_describe_the_pdf_checkbox_and_portal_workflow():
@@ -6271,25 +6271,67 @@ def _check_empty_label_line_never_takes_the_next_line_as_its_value():
             assert m_sec.status == "filled" and m_sec.filled_value == want, (head, body, m_sec.status, m_sec.filled_value)
 
 
-def _check_boundary_defenses_writer_pdf_and_hook():
-    """Verify the 3 boundary defenses: (1) hook_guard is_template_path normalizes '..' segments, (2) writer._BytePatch
-    sorts by (start, end) so a zero-length insertion at the exact start offset of a replacement precedes the
-    replacement without raising overlapping byte patches, and (3) pdf_support LAYOUT-04 checks office-only boxes on the
-    same page index only."""
-    from form_guard.models import PatchRecord
-    from form_guard.writer import _BytePatch
+def _check_boundary_defenses_writer_pdf_and_hook(tmp_path: Path, samples_dir: Path):
+    """Verify the boundary defenses end-to-end: (1) hook_guard normalizes '..' segments and trailing dots/spaces and
+    rejects 0-byte JSON in PostToolUse, (2) writer.patch_part sorts by (start, end) so inserting cell B5 at the exact
+    byte start of existing empty cell C5 succeeds without overlapping byte patches, and fill_form / write_pdf refuse
+    overwriting the blank template in place, and (3) pdf_support.find_cell rejects bool/float/negative pages and
+    LAYOUT-04 only checks office-only boxes on the same page index."""
+    from form_guard.pdf_core import Canvas, Name, PDFBuilder
+    from form_guard.pdf_support import find_cell, write_pdf
+    from form_guard.samples import _pdf_fonts, _pdf_info
+    from form_guard.writer import fill_form, patch_part
     import scripts.hook_guard as hg
 
-    assert hg.is_template_path("samples/blank_forms/../blank_forms/form1_research_plan_change.docx")
-    assert hg.is_template_path("samples/memos/../blank_forms/form6_study_group_grant.pdf")
-    assert "BLOCKED by the Form-Guard template guard" in _denied(
-        _hook("PreToolUse", "Write", {"file_path": "samples/blank_forms/../blank_forms/form1_research_plan_change.docx"})
-    )
-    dummy_rec = PatchRecord(part_name="word/document.xml", slot_id="s", kind="text", byte_start=10, byte_end=10,
-                            old_text="", new_text="X")
-    p_replace = _BytePatch(10, 15, b"REPL", dummy_rec)
-    p_insert = _BytePatch(10, 10, b"INS", dummy_rec)
-    patches = [p_replace, p_insert]
-    patches.sort(key=lambda p: (p.start, p.end))
-    assert patches == [p_insert, p_replace]
-    assert all(a.end <= b.start for a, b in zip(patches, patches[1:]))
+    # (1) Hook guard: '..' traversal, Windows trailing dots/spaces, and 0-byte JSON PostToolUse check
+    for rel in ("samples/blank_forms/../blank_forms/form1_research_plan_change.docx",
+                "samples/memos/../blank_forms/form6_study_group_grant.pdf",
+                "samples/blank_forms/form6_study_group_grant.pdf.",
+                "samples/blank_forms./form1_research_plan_change.docx.."):
+        assert hg.is_template_path(rel), rel
+        assert "BLOCKED by the Form-Guard template guard" in _denied(_hook("PreToolUse", "Write", {"file_path": rel}))
+    empty_json = tmp_path / "empty.json"
+    empty_json.write_bytes(b"")
+    proc_json = _hook("PostToolUse", "Write", {"file_path": str(empty_json)}, cwd=tmp_path, env={"CLAUDE_PROJECT_DIR": str(tmp_path)})
+    assert proc_json.returncode == 0 and b'"decision": "block"' in proc_json.stdout
+
+    # (2) Writer: real index_part + patch_part with zero-length cell insertion at the exact start offset of replacement
+    S = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    xml = f'<worksheet xmlns="{S}"><sheetData><row r="5"><c r="C5" s="1"/></row></sheetData></worksheet>'.encode()
+    idx = index_part("xl/worksheets/sheet1.xml", xml, "sheet")
+    new_xml, recs = patch_part(idx, {"b": "甲", "c": "乙"}, "xlsx", sheet_cell_targets={"B5": "b", "C5": "c"})
+    assert new_xml.index(b'r="B5"') < new_xml.index(b'r="C5"') and len(recs) == 2
+    s1 = scan(samples_dir / "blank_forms" / "form1_research_plan_change.docx")
+    with pytest.raises(ValueError, match="output must differ from the blank template"):
+        fill_form(s1, {}, s1.path)
+
+    # (3) PDF: write_pdf refuses overwriting template, find_cell rejects non-int/negative/bool, and 2-page LAYOUT-04
+    s6 = scan(samples_dir / "blank_forms" / "form6_study_group_grant.pdf")
+    with pytest.raises(ValueError, match="output must differ from the blank template"):
+        write_pdf(s6, {}, s6.path)
+    rect0 = s6.slots[0].occurrences[0].rect
+    for bad_page in (-1, 0.5, True, False, 99, "-1", "0.5"):
+        assert find_cell(s6.pdf, bad_page, rect0) is None, bad_page
+    assert find_cell(s6.pdf, 0, rect0) is not None and find_cell(s6.pdf, "0", rect0) is not None
+
+    def _page_stream(label_text: str) -> bytes:
+        cv = Canvas()
+        cv.rect(50, 700, 150, 730, width=0.5)
+        cv.rect(150, 700, 400, 730, width=0.5)
+        cv.text("F1", 10.0, 56.0, 711.0, label_text.encode("utf-16-be"))
+        return cv.data()
+
+    pb = PDFBuilder("1.7")
+    cat, pgs, pg0, pg1 = pb.reserve(), pb.reserve(), pb.reserve(), pb.reserve()
+    res = pb.add({"Font": dict(_pdf_fonts(pb)), "ProcSet": [Name("PDF"), Name("Text")]})
+    c0, c1 = pb.add({}, _page_stream("事務局受付番号"), compress=True), pb.add({}, _page_stream("申請者氏名"), compress=True)
+    pb.set(pg0, {"Type": Name("Page"), "Parent": pgs, "MediaBox": [0, 0, 595.28, 841.89], "Resources": res, "Contents": c0})
+    pb.set(pg1, {"Type": Name("Page"), "Parent": pgs, "MediaBox": [0, 0, 595.28, 841.89], "Resources": res, "Contents": c1})
+    pb.set(pgs, {"Type": Name("Pages"), "Kids": [pg0, pg1], "Count": 2})
+    pb.set(cat, {"Type": Name("Catalog"), "Pages": pgs, "Lang": b"ja-JP"})
+    two_page_pdf = tmp_path / "two_page.pdf"
+    two_page_pdf.write_bytes(pb.build(cat, _pdf_info(pb, "2ページ検証様式")))
+    spec2 = {"targets": [{"slot_id": "申請者氏名", "page": 1, "rect": [150.0, 700.0, 400.0, 730.0], "label": "申請者氏名"}]}
+    res2 = run_pipeline(two_page_pdf, "申請者氏名：見本 太郎\n", tmp_path / "run2", mode="demo", slot_spec=spec2)
+    lay04 = next(c for c in res2.report.checks if c.check_id == "LAYOUT-04")
+    assert lay04.passed and res2.report.failed_count == 0, lay04.details

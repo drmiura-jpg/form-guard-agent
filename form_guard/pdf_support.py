@@ -650,8 +650,13 @@ def office_cells(form: PDFForm) -> list[tuple[Cell, list[str]]]:
 
 
 def find_cell(form: PDFForm, page: Any, rect: Any) -> Optional[Cell]:
+    if isinstance(page, (bool, float)) or (isinstance(page, str) and not page.strip().isdigit()):
+        return None
     try:
-        p = form.pages[int(page)]
+        pidx = int(page)
+        if not (0 <= pidx < len(form.pages)):
+            return None
+        p = form.pages[pidx]
         r = [float(v) for v in rect]
     except (TypeError, ValueError, IndexError):
         return None
@@ -917,6 +922,9 @@ def write_pdf(scan, values: dict[str, str], out_path: Union[str, Path]):
     from .writer import WriteResult, prepare_value
 
     out_path = Path(out_path)
+    if out_path.resolve() == Path(scan.path).resolve() or (
+            out_path.exists() and Path(scan.path).exists() and out_path.samefile(scan.path)):
+        raise ValueError("output must differ from the blank template")
     form: PDFForm = scan.pdf if scan.pdf is not None else load_form(scan.path)
     known = {s.slot_id for s in scan.slots}
     prepared = {k: prepare_value(v, "pdf") for k, v in values.items() if v is not None and str(v).strip() and k in known}

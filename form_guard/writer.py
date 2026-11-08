@@ -375,6 +375,9 @@ def fill_form(scan: ScanResult, values: dict[str, str], out_path: Union[str, Pat
 
         return write_pdf(scan, values, out_path)
     out_path = Path(out_path)
+    if out_path.resolve() == Path(scan.path).resolve() or (
+            out_path.exists() and Path(scan.path).exists() and out_path.samefile(scan.path)):
+        raise ValueError("output must differ from the blank template")
     prepared = {k: prepare_value(v, scan.file_type) for k, v in values.items() if v is not None and str(v).strip()}
     known = {s.slot_id for s in scan.slots}
     prepared = {k: v for k, v in prepared.items() if k in known}
