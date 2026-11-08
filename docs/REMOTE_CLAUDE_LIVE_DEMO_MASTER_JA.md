@@ -49,14 +49,19 @@
 
 ### リモートPCでのセットアップ＆起動手順
 
-- **手順1**：リモートPCで ZIP を **`C:\hackathon\form-guard-agent`** に解凍します。
-- **手順2**：PowerShell を開いて以下のコマンドを実行すると、Python 仮想環境（`.venv`）構築・パッケージ導入・Claude Desktop の MCP 設定統合（既存設定のバックアップ付き）・ローカル Web サーバー（`http://127.0.0.1:8000`）の起動とヘルスチェック（`/api/health`）確認まで自動で進みます（途中で `[NG]` が出た場合は表示された理由を解消して再実行します）。
+- **手順1**：リモートPCで `git clone https://github.com/drmiura-jpg/form-guard-agent.git C:\hackathon\form-guard-agent`（または ZIP を **`C:\hackathon\form-guard-agent`** に解凍）します。
+- **手順2**：PowerShell を開いて以下のコマンドを実行すると、Python 仮想環境（`.venv`）構築・パッケージ導入・Claude Desktop の MCP 設定統合（`-ConfigureClaudeDesktop` 指定時のみ・既存設定のバックアップ付き）・ローカル Web サーバー（`http://127.0.0.1:8000`、`-AllowLive` 指定で MCP 下書きのブラウザ取り込み有効）の起動とヘルスチェック（`/api/health`・`/start`）確認まで自動で進みます（途中で `[NG]` が出た場合は表示された理由を解消して再実行します）。
 
 ```powershell
 cd C:\hackathon\form-guard-agent
-powershell -ExecutionPolicy Bypass -File .\scripts\setup_remote_demo.ps1
+# 録画PCでブラウザ側（/#tour=1 や /#tour=3）が誤って有料APIを呼ばないよう、シェル環境変数のキーと FORM_GUARD_FORCE_DEMO をクリア
+Remove-Item Env:FORM_GUARD_API_KEY, Env:ANTHROPIC_API_KEY, Env:ANTHROPIC_AUTH_TOKEN, Env:FORM_GUARD_FORCE_DEMO -ErrorAction SilentlyContinue
+# 既存の Form-Guard サーバーが動いていれば停止（別アプリは止めない）
+Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'form_guard\.cli.*--serve' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+# Claude Desktop 設定登録 (-ConfigureClaudeDesktop) ＆ MCP 下書きのブラウザ取り込み有効 (-AllowLive) で起動
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_remote_demo.ps1 -ConfigureClaudeDesktop -AllowLive
 ```
-※別フォルダに置いた単体スクリプトから実行する場合は `powershell -ExecutionPolicy Bypass -File .\setup_remote_demo.ps1 -RepoDir "C:\hackathon\form-guard-agent"` のように `-RepoDir` を指定します。また、録画中にブラウザ側から有料API通信が走らないよう、環境変数にAPIキーがある端末でも MCP は `mode="demo"`（オフラインエンジン）で実行します。
+※別フォルダに置いた単体スクリプトから実行する場合は `powershell -ExecutionPolicy Bypass -File .\setup_remote_demo.ps1 -RepoDir "C:\hackathon\form-guard-agent" -ConfigureClaudeDesktop -AllowLive` のように `-RepoDir` を指定します。また、外部 AI API を使わないのは `mode="demo"` を指定した Form-Guard の処理（および API キー未設定時の Web 画面）であり、Claude Desktop のチャットに入力した文面自体は Claude サービスで処理されます。収録前に `http://127.0.0.1:8000/api/health` で `live_available=false`・`default_mode=demo`（詳細画面のエンジン表示が「オフライン（API キーなし）」）になっていることを確認してください。
 
 ---
 
@@ -65,7 +70,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\setup_remote_demo.ps1
 リモートPCの **Claude デスクトップアプリ（Claude Desktop）** でも、アプリ内・ターミナルの **Claude Code** でも、両方から Form-Guard の MCP ツール（5個）を呼び出せます。
 
 ### 3-1. Claude デスクトップアプリ（Claude Desktop）に MCP を繋ぐ設定
-- 上記の `setup_remote_demo.ps1` を実行すると、`%APPDATA%\Claude\claude_desktop_config.json`（既存ファイルは `.bak-日時` に自動退避、破損JSON時は上書きせず停止）に以下の設定が書き込まれます。
+- 上記の `setup_remote_demo.ps1 -ConfigureClaudeDesktop` を実行すると（`-ConfigureClaudeDesktop` 指定時のみ）、`%APPDATA%\Claude\claude_desktop_config.json`（既存ファイルは `.bak-日時` に自動退避、破損JSON時は上書きせず停止）に以下の設定が書き込まれます。
 - Claude Desktop の作業フォルダがどこであっても確実にモジュールと下書き保存先（`output\mcp_runs\<run_id>`）が一致するよう、`--root` 引数と `PYTHONPATH`・`FORM_GUARD_MCP_ROOT` を絶対パスで指定しています。
 
 ```json

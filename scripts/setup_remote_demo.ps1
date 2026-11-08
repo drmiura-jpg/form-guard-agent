@@ -161,7 +161,7 @@ finally:
 print("      [OK] Updated claude_desktop_config.json with form-guard MCP server.")
 '@
 
-    & $VenvPython -X utf8 -c $ConfigureCode $ClaudeConfigPath $RepoDir $VenvPython
+    $ConfigureCode | & $VenvPython -X utf8 - $ClaudeConfigPath $RepoDir $VenvPython
     if ($LASTEXITCODE -ne 0) {
         Write-Host "[NG] Failed to update Claude Desktop MCP config (exit code: $LASTEXITCODE)." -ForegroundColor Red
         throw "Claude Desktop MCP config update failed (exit code: $LASTEXITCODE)"
@@ -204,7 +204,9 @@ if ($null -eq $Health) {
 
     $PrevForceDemo = $env:FORM_GUARD_FORCE_DEMO
     try {
-        if (-not $AllowLive) {
+        if ($AllowLive) {
+            $env:FORM_GUARD_FORCE_DEMO = "0"
+        } else {
             $env:FORM_GUARD_FORCE_DEMO = "1"
         }
         $StartedProc = Start-Process -FilePath $VenvPython -ArgumentList "-m","form_guard.cli","--serve","--port","8000" -WorkingDirectory $RepoDir -WindowStyle Hidden -PassThru
@@ -240,8 +242,8 @@ Write-Host ""
 Write-Host "======================================================================" -ForegroundColor Green
 Write-Host " [OK] Setup finished." -ForegroundColor Green
 Write-Host "  1. Open http://127.0.0.1:8000/start or http://127.0.0.1:8000/#tour=1 in your browser." -ForegroundColor White
-Write-Host "  2. To stop the background server on port 8000:" -ForegroundColor White
-Write-Host "     Get-NetTCPConnection -LocalPort 8000 -State Listen | ForEach-Object { Stop-Process -Id `$_.OwningProcess -Force }" -ForegroundColor Gray
-Write-Host "  3. For temporary tunnel (requires pwsh + cloudflared): stop port 8000 first or run 'pwsh scripts/share_tunnel.ps1 -Port 8001'." -ForegroundColor White
-Write-Host "  4. Timeline: docs/HANDOFF.md section 5" -ForegroundColor White
+Write-Host "  2. To stop only the Form-Guard background server:" -ForegroundColor White
+Write-Host "     Get-CimInstance Win32_Process | Where-Object { `$_.CommandLine -match 'form_guard\.cli.*--serve' } | ForEach-Object { Stop-Process -Id `$_.ProcessId -Force }" -ForegroundColor Gray
+Write-Host "  3. For temporary tunnel (requires pwsh + cloudflared): stop Form-Guard on port 8000 first or run 'pwsh scripts/share_tunnel.ps1 -Port 8001'." -ForegroundColor White
+Write-Host "  4. Timeline: docs/HANDOFF.md section 5 / Claude Desktop Guide: docs/CLAUDE_DESKTOP_DEMO_GUIDE_JA.md" -ForegroundColor White
 Write-Host "======================================================================" -ForegroundColor Green
